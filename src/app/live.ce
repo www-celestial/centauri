@@ -177,7 +177,8 @@ end
 
 defn act(e, handle, s, args)
   (** An action of a page: the endpoint e called through the app's door with the cookie of the screen, as a request
-      of HTTP of the same origin would be: an Ok of its answer, or an Err {Kind: "api", Status, Message, Fields}. *)
+      of HTTP of the same origin would be: an Ok of its answer, or an Err {Kind: "api", Status, Message, Fields}, with
+      Instance, the number of the request to quote, and Retry, the seconds to wait after a 429. *)
   q = Request(e, args)
   parts = text.Split("?", q.Path)
   r = s.Request
@@ -195,7 +196,14 @@ defn act(e, handle, s, args)
     return if result.IsOk(data) data else result.Ok(out.Body) end
   end
   p = if result.IsOk(data) and value.IsDict(data.Value) data.Value else {} end
-  result.Err({Kind: "api", Status: out.Status, Message: dict.GetOr("detail", http.Reason(out.Status), p), Fields: dict.GetOr("errors", {}, p)})
+  e = {Kind: "api", Status: out.Status, Message: dict.GetOr("detail", http.Reason(out.Status), p), Fields: dict.GetOr("errors", {}, p)}
+  if value.IsText(dict.Get("instance", p))
+    e.Instance = p.instance
+  end
+  if value.IsNumber(dict.Get("retry", p))
+    e.Retry = p.retry
+  end
+  result.Err(e)
 end
 
 defn actions(env, handle)

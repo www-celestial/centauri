@@ -139,7 +139,8 @@ defn Module(every = [], jobs = [])
       endpoints are the administration of the jobs (api.AdminJobs, api.AdminJobRetry). *)
   kinds = list.Concat(jobs, [s.Kind for s in every])
   m = app.Module("jobs", kinds = [Job], settings = Settings, jobs = kinds, start = env -> Work(env, every),
-    verify = env -> zonesRead(every), serve = [app.Serve(api.AdminJobs, adminJobs), app.Serve(api.AdminJobRetry, adminRetry)])
+    verify = env -> zonesRead(every), serve = [app.Serve(api.AdminJobs, adminJobs), app.Serve(api.AdminJobRetry, adminRetry),
+      app.Serve(api.AdminJobCancel, adminCancel)])
   dict.Put("Every", every, m)
 end
 
@@ -496,9 +497,27 @@ defn Retry(id, env, by = 0)
   result.Ok(missing)
 end
 
-defn List(state, db, limit = 100)
-  (** The jobs of a state, the latest first: an Ok of {Id, Kind, State, RunAt, Tries, Error, Key}. *)
-  rows = cepheus.Find(2, (j, k) -> {Where: [[j, Job.State, state], [j, Job.Kind, k]], Give: {Id: j, Kind: k}, Sort: [cepheus.Desc(j)], Limit: limit}, db)?
+defn Cancel(id, env, by = 0)
+  (** A job that waits made dead, so that it never runs: its error says who cancelled it. An Ok, or a 409 for a job
+      that runs now (its lease would let it finish), or a 404 for one that is no longer waiting. A dead job may be
+      run again by Retry. *)
+  j = cepheus.Get(Job, id, env.Db)?
+  if not value.IsMissing(j) and j.State == "running"
+    return app.Fail(409, "Job $id is running: it can't be cancelled now.")
+  end
+  if value.IsMissing(j) or j.State != "ready"
+    return app.Missing("There is no waiting job $id.")
+  end
+  cepheus.Write([cepheus.Expect(id, Job.State, "ready"), cepheus.Add(id, Job.State, "dead"),
+    cepheus.Add(id, Job.Error, "cancelled by user $by")], env.Db, by = by, why = "job cancelled")?
+  result.Ok(missing)
+end
+
+defn List(state, db, limit = 100, kind = missing)
+  (** The jobs of a state, the latest first, of one kind when given: an Ok of {Id, Kind, State, RunAt, Tries, Error,
+      Key}. *)
+  rows = cepheus.Find(2, (j, k) -> {Where: if value.IsMissing(kind) [[j, Job.State, state], [j, Job.Kind, k]] else [[j, Job.State, state], [j, Job.Kind, k], [j, Job.Kind, kind]] end,
+    Give: {Id: j, Kind: k}, Sort: [cepheus.Desc(j)], Limit: limit}, db)?
   out = []
   for row in rows
     j = cepheus.Get(Job, row.Id, db)?
@@ -508,7 +527,7 @@ defn List(state, db, limit = 100)
   result.Ok(out)
 end
 
-adminJobs(r, q) = List(q.State, r.Db, limit = 200)   (* GET /admin/jobs. *)
+adminJobs(r, q) = List(q.State, r.Db, limit = 200, kind = q.Kind)   (* GET /admin/jobs. *)
 
 defn adminRetry(r)
   (** POST /admin/jobs/:id/retry. *)
@@ -516,5 +535,18 @@ defn adminRetry(r)
   if value.IsMissing(id)
     return app.Missing()
   end
-  Retry(id, r.Env, by = r.User.Id)
+  Retry(id, r.Env, by = r.User.Id)?
+  _ = app.Note(r.Env, "job-retried", "Job $id run again.", user = r.User.Id, ip = r.Ip, route = r.Route)
+  result.Ok(missing)
+end
+
+defn adminCancel(r)
+  (** POST /admin/jobs/:id/cancel. *)
+  id = app.IdOf(r.Params.id)
+  if value.IsMissing(id)
+    return app.Missing()
+  end
+  Cancel(id, r.Env, by = r.User.Id)?
+  _ = app.Note(r.Env, "job-cancelled", "Job $id cancelled.", user = r.User.Id, ip = r.Ip, route = r.Route)
+  result.Ok(missing)
 end

@@ -1,0 +1,217 @@
+(** The super-admin's pages, as a module of the app: pages of Ceres compiled to WebAssembly, served at the path of the
+    setting AdminPath (/admin by default, off for none), that talk to the app by the endpoints of the administration
+    (api.AdminOfApp, api.AdminOfAccounts, the jobs') through the same door as any client, over the live screen of the
+    page: the session of its cookie, the role super checked at each call, the limits, the shapes, the log. The module
+    adds the live shows of the pages (api.AdminShows): the dashboard's points each second, the events as they are
+    written, the log as it goes. No endpoint of its own, no other way in. An app lists Module() among its modules, after
+    auth's. The pages are built by the app, from its own entry, so that it adds its pages, columns and actions
+    (package src/admin/pages): cesia build --target wasm admin/page.ce writes admin/page.wasm and its loader beside
+    it, which Module(folder = "admin") serves. The book's chapter The admin shows both. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use std/check
+use std/dict
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/log
+use std/math
+use std/metrics
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(** The settings of the admin pages: the path they are served at, as /admin, or off for none (the endpoints stay, for
+    programs). *)
+Settings = {AdminPath: check.Text(1, 200, optional = true, default = "/admin")}
+
+off(env) = env.Settings.AdminPath == "off"   (* Are the pages turned off? *)
+
+(** The points of the dashboard a screen keeps: five minutes, one a second. *)
+Kept = 300
+
+(** The lines of the log a screen keeps. *)
+KeptLines = 500
+
+defn Module(folder = "admin", entry = "page", title = missing)
+  (** The module of the admin pages: folder holds the build of the app's entry (entry.wasm, entry.js and the glue
+      beside them, from cesia build --target wasm folder/entry.ce), served at AdminPath with its index.html; title
+      names the browser's tab, the app's name by default. *)
+  app.Module("admin", settings = Settings, serve = [app.Live(api.AdminSeries, series), app.Live(api.AdminTail, tail),
+    app.Live(api.AdminLogTail, logTail)], pages = env -> pagesOf(env, folder, entry, title), verify = env -> built(env, folder, entry))
+end
+
+defn built(env, folder, entry)
+  (** The start goes on without the build of the pages, with a warning: the pages answer that they are to build. *)
+  if not off(env) and not sys.Exists("$folder/$entry.wasm")
+    log.Warn("the admin pages are not built: cesia build --target wasm $folder/$entry.ce", {Folder: folder})
+  end
+  result.Ok(missing)
+end
+
+defn pagesOf(env, folder, entry, title)
+  (** The pages at AdminPath: the folder's files and the page that loads them, which holds no script of its own (the
+      Content-Security-Policy allows none), no data and no secret: what it shows comes by the live screen, for a
+      session of the role super only. *)
+  path = env.Settings.AdminPath
+  if off(env)
+    return missing
+  end
+  name = http.Escape(if value.IsMissing(title) "Admin — $(env.App.Name)" else title end)
+  ready = sys.Exists("$folder/$entry.wasm")
+  index = if ready "<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>$name</title>\n<link rel=\"stylesheet\" href=\"$path/admin.css\">\n<div id=\"page\"><canvas data-path=\"/\"></canvas></div>\n<script type=\"module\" src=\"$path/$entry.js\"></script>\n"
+    else "<!doctype html>\n<meta charset=\"utf-8\">\n<title>$name</title>\n<p>The admin pages are not built: cesia build --target wasm $(http.Escape(folder))/$(http.Escape(entry)).ce\n" end
+  {Path: path, Folder: folder, Files: {"index.html": index, "admin.css": "html, body { margin: 0; height: 100%; background: #fff; }\n#page { width: 100%; height: 100%; }\n"}}
+end
+
+(* ---- The dashboard: a point each second. *)
+
+defn totals(raw)
+  (** The counters of std/metrics the dashboard reads, summed over their labels: requests, those of status 5xx, and
+      the refusals by reason. *)
+  out = {Requests: 0, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0}
+  for line in text.Lines(raw)
+    if text.StartsWith("centauri_", line)
+      cut = text.Split(" ", line)
+      v = text.Number(cut[value.Len(cut)])
+      v = if value.IsNumber(v) v else 0 end
+      if text.StartsWith("centauri_requests_total", line)
+        out.Requests += v
+        if text.Contains("status=\"5", line)
+          out.Errors += v
+        end
+      else if text.StartsWith("centauri_refused_total", line)
+        for reason in ["Origin", "Limit", "Signin", "Role"]
+          if text.Contains("reason=\"$(text.Lower(reason))\"", line)
+            out[reason] += v
+          end
+        end
+      end
+    end
+  end
+  out
+end
+
+defn quantile(sorted, q)
+  (** The q-quantile of sorted numbers, the nearest rank (Hyndman and Fan's definition 1): 0 for none. *)
+  n = value.Len(sorted)
+  if n == 0 0 else sorted[list.Max([1, math.Ceil(q * n)])] end
+end
+
+defn jobCounts(env)
+  (** The jobs ready, running and dead, when the app runs jobs: each a Count of Cepheus. *)
+  out = {Ready: 0, Running: 0, Dead: 0}
+  job = list.FindFirst(k -> dict.Get("name", k) == "centauri_job", env.App.Kinds)
+  if value.IsMissing(job)
+    return out
+  end
+  for state in ["ready", "running", "dead"]
+    got = cepheus.Find(1, j -> {Where: [[j, job.State, state]], Give: {N: cepheus.Count()}}, env.Db)
+    if result.IsOk(got) and value.Len(got.Value) > 0
+      out[{ready: "Ready", running: "Running", dead: "Dead"}[state]] = got.Value[1].N
+    end
+  end
+  out
+end
+
+defn series(s, args)
+  (** The show admin.series: a fiber that samples this process each second until the screen ends. *)
+  out = fiber.Channel(size = Kept * 2)
+  fiber.Spawn(() -> sampling(s, out))
+  result.Ok(out)
+end
+
+defn sampling(s, out)
+  (** Each second, a point: the counters' growth since the last one, the times of the requests the log kept since. *)
+  env = s.Env
+  before = totals(metrics.Text())
+  seq = app.Tail(0, env.State).Seq
+  jobs = jobCounts(env)
+  points = []
+  group = 1
+  fiber.Send({Group: group, Rows: []}, out)
+  tick = 0
+  while true
+    got = fiber.Receive(s.Ended, timeout = 1)
+    if not (result.IsErr(got) and got.Error.Kind == "timeout")
+      fiber.Close(out)
+      return missing
+    end
+    tick += 1
+    now = totals(metrics.Text())
+    lines = app.Tail(seq, env.State)
+    seq = lines.Seq
+    ms = list.Sort([dict.GetOr("Ms", 0, dict.GetOr("Fields", {}, l)) for l in lines.Lines if l.Message == "request"])
+    if math.Mod(tick, 5) == 0
+      jobs = jobCounts(env)
+    end
+    p = {At: math.Floor(env.Now()), Requests: now.Requests - before.Requests, Errors: now.Errors - before.Errors, Origin: now.Origin - before.Origin,
+      Limit: now.Limit - before.Limit, Signin: now.Signin - before.Signin, Role: now.Role - before.Role, Failures: app.Failures(env.State),
+      P50: quantile(ms, 0.5), P99: quantile(ms, 0.99), Ready: jobs.Ready, Running: jobs.Running, Dead: jobs.Dead}
+    before = now
+    points = list.Append(p, points)
+    gone = []
+    if value.Len(points) > Kept
+      gone = [points[1]]
+      points = list.Skip(1, points)
+    end
+    group += 1
+    fiber.Send({Group: group, Added: [p], Removed: gone}, out)
+  end
+end
+
+(* ---- The events as they are written, and the log as it goes. *)
+
+defn tail(s, args)
+  (** The show admin.events: a watch of the events of the last hour. *)
+  since = s.Now - 3600
+  w = cepheus.Watch(6, (e, at, k, ip, route, d) -> {Where: [[e, app.Event.At, at], cepheus.Above(at, since), [e, app.Event.Kind, k], [e, app.Event.Ip, ip],
+    [e, app.Event.Route, route], [e, app.Event.Detail, d]], Give: {Id: e, At: at, Kind: k, Ip: ip, Route: route, Detail: d}}, s.Db, until = s.Ended)?
+  result.Ok(w.Changes)
+end
+
+defn logTail(s, args)
+  (** The show admin.logs: the last lines of the log of this process, then each new one, each second. *)
+  out = fiber.Channel(size = 64)
+  fiber.Spawn(() -> tailing(s, out))
+  result.Ok(out)
+end
+
+defn row(seq, l)
+  (** A line of the log as the page gets it. *)
+  {Seq: seq, At: l.At, Level: l.Level, Message: l.Message, Fields: json.Text(l.Fields)}
+end
+
+defn tailing(s, out)
+  (** Sends the new lines each second, and takes back those past the last KeptLines. *)
+  env = s.Env
+  first = app.Tail(0, env.State)
+  n = value.Len(first.Lines)
+  kept = [row(first.Seq - n + k, first.Lines[k]) for k in 1..n]
+  kept = list.Skip(list.Max([0, value.Len(kept) - KeptLines]), kept)
+  seq = first.Seq
+  group = 1
+  fiber.Send({Group: group, Rows: kept}, out)
+  while true
+    got = fiber.Receive(s.Ended, timeout = 1)
+    if not (result.IsErr(got) and got.Error.Kind == "timeout")
+      fiber.Close(out)
+      return missing
+    end
+    t = app.Tail(seq, env.State)
+    m = value.Len(t.Lines)
+    if m > 0
+      added = [row(t.Seq - m + k, t.Lines[k]) for k in 1..m]
+      kept = list.Concat(kept, added)
+      over = list.Max([0, value.Len(kept) - KeptLines])
+      gone = list.Take(over, kept)
+      kept = list.Skip(over, kept)
+      group += 1
+      fiber.Send({Group: group, Added: added, Removed: gone}, out)
+      seq = t.Seq
+    end
+  end
+end

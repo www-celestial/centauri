@@ -34,7 +34,7 @@ end
 
 q = text.Char(34)
 lines = kept()
-for repo in ["cepheus", "centauri"]
+for repo in ["cepheus", "ceres", "centauri"]
   dir = "deps/www-celestial/$repo"
   if sys.Exists(dir)
     lines = list.Concat(lines, ["[deps.$repo]", "from = $(q)github.com/www-celestial/$repo$q", "version = $(q)v0.1.0$q", "files = ["])

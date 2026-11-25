@@ -107,6 +107,10 @@ end
 kept(at, id, method, route, status, ms, ip, user, state) = fiber.Send({Op: "request", At: at, Id: id, Method: method, Route: route, Status: status,
   Ms: ms, Ip: ip, User: user}, state)
 
+(** The lines kept since the line numbered after (0: all that are kept), the oldest first: {Seq, Lines}, Seq the number
+    of the last line kept, to give as after the next time, so that a live tail of the log reads each line once. *)
+Tail(after, state) = ask(state, {Op: "tail", After: after})
+
 (** Forgets every session the state keeps: a sign-out, a role changed, a user disabled are then read again from the
     database at their next request. *)
 forget(state) = fiber.Send({Op: "forget"}, state)
@@ -124,6 +128,7 @@ defn own(ch, slots, most, kept, keys, clock, rates)
   queue = []
   lines = list.Fill(missing, kept)
   at = 0
+  seq = 0
   seen = dict.Dict()
   minute = 0
   fails = [0, 0]
@@ -267,9 +272,14 @@ defn own(ch, slots, most, kept, keys, clock, rates)
     else if op == "request"
       at = math.Mod(at, kept) + 1
       lines[at] = m
+      seq += 1
     else if op == "line"
       at = math.Mod(at, kept) + 1
       lines[at] = m.Line
+      seq += 1
+    else if op == "tail"
+      n = list.Min([list.Max([seq - m.After, 0]), kept, seq])
+      fiber.Send({Seq: seq, Lines: [shown(lines[math.Mod(at - n + k - 1 + kept, kept) + 1]) for k in 1..n]}, m.Reply)
     else if op == "forget"
       sessions = dict.Dict()
       gen += 1

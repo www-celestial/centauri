@@ -1,0 +1,237 @@
+(** The admin pages, as their server sees them: the files of the pages served at AdminPath (their type, their ETag and a
+    304, their brotli, the headers of security, no script of its own in the page), and what the pages call, the
+    endpoints of the role super and the live shows. And what an attacker tries: the endpoints and the shows without a
+    session or without the role, a request of another site, a secret read or changed through the data browser, a field
+    of a kind changed to a value of another type. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/admin
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/jobs
+use std/bug
+use std/check
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket as ws
+
+folder = ".cesia/admin-pages"
+Thing = app.Kind("gadget", {Tenant: cepheus.Link(), Name: cepheus.Text(unique = true), Count: cepheus.Int(), Price: cepheus.Money(2), Seen: cepheus.Date(),
+  Token: cepheus.Text()}, secret = ["Token"])
+Gadgets = app.Module("gadgets", kinds = [Thing])
+App = app.Of([auth.Module(), admin.Module(folder = folder), Gadgets], name = "gadgets")
+
+defn built()
+  (** A build of pages, as cesia build would leave it: a module, its loader, its brotli. *)
+  _ = sys.Mkdir(folder)
+  sys.Write("$folder/page.wasm", "asm fake module")!
+  sys.Write("$folder/page.wasm.br", "brotli bytes")!
+  sys.Write("$folder/page.js", "export {}")!
+  sys.Write("$folder/page.ce", "secret source")!
+end
+
+defn super(t)
+  (** The super-admin of a test, signed in. *)
+  t.Super()
+end
+
+defn isPagesServedWithTheirHeaders()
+  built()
+  t = apptest.Start(App)?
+  index = t.Raw("GET", "/admin")
+  csp = http.HeaderValue("content-security-policy", index.Headers)
+  bug.Assert(index.Status == 200 and text.Contains("<script type=\"module\" src=\"/admin/page.js\"></script>", index.Body), "the page: $(index.Status)")
+  bug.Assert(not text.Contains("<script>", index.Body) and not text.Contains("style=", index.Body), "no script nor style of its own in the page")
+  bug.Assert(text.Contains("script-src 'self' 'wasm-unsafe-eval'", csp) and http.HeaderValue("x-frame-options", index.Headers) == "DENY", "its guards: $csp")
+  wasm = t.Raw("GET", "/admin/page.wasm")
+  tag = http.HeaderValue("etag", wasm.Headers)
+  bug.Assert(wasm.Status == 200 and http.HeaderValue("content-type", wasm.Headers) == "application/wasm" and wasm.Body == "asm fake module", "the module: $(wasm.Headers)")
+  again = t.Raw("GET", "/admin/page.wasm", headers = [{Name: "if-none-match", Value: tag}])
+  br = t.Raw("GET", "/admin/page.wasm", headers = [{Name: "accept-encoding", Value: "gzip, br"}])
+  bug.Assert(again.Status == 304 and again.Body == "", "a second visit: $(again.Status)")
+  bug.Assert(br.Body == "brotli bytes" and http.HeaderValue("content-encoding", br.Headers) == "br", "brotli: $(br.Headers)")
+  source = t.Raw("GET", "/admin/page.ce")
+  outside = t.Raw("GET", "/admin/../cesia.toml")
+  users = t.Raw("GET", "/admin/users")
+  source.Status == 404 and outside.Status == 404 and users.Status == 401
+end
+
+defn isTurnedOffBySetting()
+  t = apptest.Start(App, settings = {AdminPath: "off"})?
+  t.Raw("GET", "/admin").Status == 404 and t.Raw("GET", "/admin/page.js").Status == 404
+end
+
+defn isEveryEndpointForSuperOnly()
+  (** Each endpoint the pages call refuses who has no session (401) and who hasn't the role super (403). *)
+  t = apptest.Start(App)?
+  ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
+  args = {id: 65537, kind: "gadget", user: 65537, Fields: "{}", Super: true, Roles: []}
+  wrong = []
+  for e in list.Concat(api.AdminOfApp, list.Concat(api.AdminOfAccounts, [api.AdminJobs, api.AdminJobRetry, api.AdminJobCancel]))
+    if e.Method != "LIVE" and dict.Has(e.Name, dict.Dict([{Key: b.Endpoint.Name, Value: true} for b in t.Env.Served]))
+      nobody = t.Anyone().Call(e, args)
+      member = ana.Call(e, args)
+      if result.IsOk(nobody) or nobody.Error.Status != 401 or result.IsOk(member) or member.Error.Status != 403
+        wrong = list.Append(e.Name, wrong)
+      end
+    end
+  end
+  bug.Assert(value.Len(wrong) == 0, "open to others: $wrong")
+  true
+end
+
+defn isSecretNeverSent()
+  t = apptest.Start(App)?
+  boss = super(t)?
+  ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
+  users = boss.Call(api.AdminData, {kind: "centauri_user"})?
+  sessions = boss.Call(api.AdminData, {kind: "centauri_session"})?
+  things = [json.Parse(r.Fields)! for r in list.Concat(users.Rows, sessions.Rows)]
+  bug.Assert(value.Len(things) >= 3 and list.All([x.Hash == "(secret)" for x in things]), "the hashes masked: $things")
+  bug.Assert(not text.Contains("argon2", json.Text([users, sessions])), "no hash of a password in the answer")
+  kinds = boss.Call(api.AdminKinds, {})?
+  user = list.FindFirst(k -> k.Name == "centauri_user", kinds)
+  settings = json.Text(boss.Call(api.AdminSettings, {})?)
+  bug.Assert(list.FindFirst(f -> f.Name == "Hash", user.Fields).Secret == true, "the kinds say which fields are secret")
+  not text.Contains("correct horse", settings)
+end
+
+defn isEditCheckedByTheKind()
+  t = apptest.Start(App)?
+  boss = super(t)?
+  id = cepheus.Insert(Thing, {Name: "lamp", Count: 3, Price: 12.5, Seen: 1794528000, Token: "tok_live_0123456789"}, t.Db)?
+  other = cepheus.Insert(Thing, {Name: "desk", Count: 1}, t.Db)?
+  edit = fields -> boss.Call(api.AdminEdit, {kind: "gadget", id: id, Fields: json.Text(fields)})
+  typed = edit({Count: "many", Price: 1.005, Seen: "yesterday", Nothing: 1})
+  bug.Assert(typed.Error.Status == 422 and value.Equal(list.Sort(dict.Keys(typed.Error.Fields)), ["Nothing"]), "a field the kind hasn't, first: $(typed.Error)")
+  wrong = edit({Count: "many", Price: 1.005, Seen: "yesterday"})
+  bug.Assert(wrong.Error.Status == 422 and value.Equal(list.Sort(dict.Keys(wrong.Error.Fields)), ["Count", "Price", "Seen"]), "each wrong field: $(wrong.Error)")
+  secret = edit({Token: "mine now"})
+  bug.Assert(secret.Error.Status == 422 and dict.Has("Token", secret.Error.Fields), "a secret is never changed: $(secret.Error)")
+  twice = edit({Name: "desk"})
+  bug.Assert(result.IsErr(twice) and twice.Error.Status >= 400 and twice.Error.Status < 500, "Cepheus checks a unique value: $twice")
+  done = edit({Count: 4, Price: 13.25, Name: "big lamp"})?
+  thing = json.Parse(done.Fields)!
+  bug.Assert(thing.Count == 4 and thing.Price == 13.25 and thing.Name == "big lamp" and thing.Token == "(secret)", "changed: $thing")
+  events = boss.Call(api.AdminEvents, {Kind: "data-edited"})?.Rows
+  bug.Assert(value.Len(events) == 1 and text.Contains("Count", events[1].Detail) and not text.Contains("13.25", events[1].Detail), "the audit names the fields, never their values: $events")
+  cepheus.Get(Thing, id, t.Db)?.Token == "tok_live_0123456789" and cepheus.Get(Thing, other, t.Db)?.Name == "desk"
+end
+
+defn isJobCancelledAndRetried()
+  t = apptest.Start(App)?
+  boss = super(t)?
+  ready = cepheus.Insert(jobs.Job, {Kind: "report", Args: "{}", State: "ready", RunAt: 1794528000 + 3600, Tries: 0, Error: "", Key: "r1"}, t.Db)?
+  running = cepheus.Insert(jobs.Job, {Kind: "report", Args: "{}", State: "running", RunAt: 0, Tries: 1, Error: "", Key: "r2"}, t.Db)?
+  bug.Assert(boss.Call(api.AdminJobCancel, {id: running}).Error.Status == 409, "a running job is not cancelled")
+  boss.Call(api.AdminJobCancel, {id: ready})?
+  dead = boss.Call(api.AdminJobs, {State: "dead", Kind: "report"})?
+  bug.Assert(value.Len(dead) == 1 and dead[1].Id == ready and text.Contains("cancelled", dead[1].Error), "cancelled: $dead")
+  bug.Assert(boss.Call(api.AdminJobCancel, {id: ready}).Error.Status == 404, "once")
+  boss.Call(api.AdminJobRetry, {id: ready})?
+  audit = [e.Kind for e in boss.Call(api.AdminEvents, {})?.Rows]
+  "job-cancelled" in audit and "job-retried" in audit and value.Len(boss.Call(api.AdminJobs, {State: "ready", Kind: "report"})?) == 1
+end
+
+defn isEventsFilteredByTimeAndRoute()
+  t = apptest.Start(App)?
+  boss = super(t)?
+  _ = t.SignIn("nobody@example.com", "correct horse 12")
+  t.Advance(7200)
+  _ = t.SignIn("nobody@example.com", "correct horse 12")
+  all = boss.Call(api.AdminEvents, {Kind: "signin-failed"})?.Rows
+  late = boss.Call(api.AdminEvents, {Kind: "signin-failed", Since: "2026-11-13T01:00:00Z"})?.Rows
+  early = boss.Call(api.AdminEvents, {Kind: "signin-failed", Until: "2026-11-13T01:00:00Z"})?.Rows
+  route = boss.Call(api.AdminEvents, {Route: "POST /auth/signin"})?.Rows
+  value.Len(all) == 2 and value.Len(late) == 1 and value.Len(early) == 1 and value.Len(route) >= 2 and list.All([e.Route == "POST /auth/signin" for e in route])
+end
+
+defn isCrossSiteRefused()
+  t = apptest.Start(App)?
+  boss = super(t)?
+  ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
+  out = boss.Raw("POST", "/admin/users/$(ana.User)/signout", headers = [{Name: "origin", Value: "https://evil.example"}, {Name: "sec-fetch-site", Value: "cross-site"}])
+  same = boss.Raw("POST", "/admin/users/$(ana.User)/signout", headers = [{Name: "sec-fetch-site", Value: "same-origin"}])
+  out.Status == 403 and same.Status == 204
+end
+
+defn isLogTailedOnce()
+  t = apptest.Start(App)?
+  first = app.Tail(0, t.Env.State)
+  _ = t.Raw("GET", "/health/live")
+  _ = t.Raw("GET", "/nowhere")
+  next = app.Tail(first.Seq, t.Env.State)
+  none = app.Tail(next.Seq, t.Env.State)
+  next.Seq == first.Seq + 2 and value.Len(next.Lines) == 2 and value.Len(none.Lines) == 0
+end
+
+defn served(db)
+  (** The app served on a free port: {Port, Env}. *)
+  l = net.Listen(0)!
+  s = app.Read(App.Fields, {Profile: "test", Origin: "http://localhost:$(net.Port(l))", Pow: "off", SessionCache: 0}, defaults = App.Defaults)!
+  env = app.Start(App, s, db)!
+  fiber.Spawn(() -> http.Serve(app.App(env), listener = l, timeout = 5))
+  {Port: net.Port(l), Env: env}
+end
+
+defn signedIn(port, email, password)
+  (** The cookie of a sign-in. *)
+  out = http.Fetch("http://localhost:$port/auth/signin", method = "POST", body = json.Text({Email: email, Password: password}),
+    headers = [{Name: "content-type", Value: "application/json"}])!
+  text.Split(";", http.HeaderValue("set-cookie", out.Headers))[1]
+end
+
+defn screen(port, cookie, shows)
+  (** A screen with these shows, its hello sent. *)
+  q = encode.UrlEncode(json.Text([{Show: s, Args: {}} for s in shows]))
+  c = ws.Dial("ws://localhost:$port/live?shows=$q", headers = [{Name: "origin", Value: "http://localhost:$port"}, {Name: "cookie", Value: cookie}])!
+  ws.Send(json.Text({Hello: 1}), c)!
+  c
+end
+
+defn frames(c, seconds)
+  (** The messages that come in some seconds. *)
+  out = []
+  until = sys.Now() + seconds
+  while sys.Now() < until
+    got = fiber.Receive(c.Messages, timeout = list.Max([0.01, until - sys.Now()]))
+    if result.IsOk(got)
+      out = list.Concat(out, json.Parse(got.Value)!)
+    end
+  end
+  out
+end
+
+defn isLiveForSuperOnly()
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  auth.MakeSuper("boss@example.com", "correct horse boss", one.Env.Keys, db)!
+  boss = signedIn(one.Port, "boss@example.com", "correct horse boss")
+  _ = http.Fetch("http://localhost:$(one.Port)/auth/signup", method = "POST", body = json.Text({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}),
+    headers = [{Name: "content-type", Value: "application/json"}])
+  ana = signedIn(one.Port, "ana@example.com", "correct horse 12")
+  refused = frames(screen(one.Port, ana, ["admin.series"]), 0.5)
+  bug.Assert(value.Len(refused) == 1 and text.Contains("role super", refused[1].Error.Message), "a member gets no show of the admin: $refused")
+  c = screen(one.Port, boss, ["admin.series", "admin.events", "admin.logs"])
+  _ = http.Fetch("http://localhost:$(one.Port)/health/live")
+  got = frames(c, 2.3)
+  ws.Close(c)
+  shows = list.Unique([m.Show for m in got if dict.Has("Show", m)])
+  points = list.Flatten([m.Added for m in got if dict.Get("Show", m) == "admin.series" and dict.Has("Added", m)])
+  logs = list.Flatten([dict.GetOr("Rows", dict.GetOr("Added", [], m), m) for m in got if dict.Get("Show", m) == "admin.logs"])
+  events = list.Flatten([dict.GetOr("Rows", [], m) for m in got if dict.Get("Show", m) == "admin.events"])
+  bug.Assert(value.Len(shows) == 3, "the three shows: $shows")
+  bug.Assert(value.Len(points) >= 1 and value.IsNumber(points[1].Requests) and value.IsNumber(points[1].P99), "a point a second: $points")
+  bug.Assert(list.Any([text.Contains("health", l.Fields) or text.Contains("signin", l.Fields) for l in logs]), "the log lines: $logs")
+  list.Any([e.Kind == "signin" for e in events])
+end

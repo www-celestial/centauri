@@ -43,21 +43,27 @@ EventRow = check.Record({Id: check.Id(), At: check.Time(), Kind: check.Text(1, 6
 
 (** The events, the newest first, filtered by kind, tenant and user. *)
 AdminEvents = Get("/admin/events", query = check.Record({Kind: check.Text(1, 60, optional = true), Tenant: check.Id(optional = true),
-  User: check.Id(optional = true)}), out = Page(EventRow, 50), role = Super, about = "The history of sign-ins, failures, refusals and changes.")
+  User: check.Id(optional = true), Route: check.Text(1, 300, optional = true), Since: check.Time(optional = true), Until: check.Time(optional = true)}),
+  out = Page(EventRow, 50), role = Super, about = "The history of sign-ins, failures, refusals and changes.")
 
 (** A kind of the database, with its fields, and the module that declares it. *)
 KindRow = check.Record({Name: check.Text(1, 100), Module: check.Text(0, 100), Fields: check.List(check.Record({Name: check.Text(1, 100),
-  Type: check.Text(1, 20), Unique: check.Bool(), Many: check.Bool()}), 0, 1000)})
+  Type: check.Text(1, 20), Unique: check.Bool(), Many: check.Bool(), Secret: check.Bool(optional = true)}), 0, 1000)})
 
 (** The kinds of the app. *)
 AdminKinds = Get("/admin/kinds", out = check.List(KindRow, 0, 10000), role = Super, about = "The kinds of the database.")
 
-(** A thing of a kind: its id and its fields, as JSON. *)
+(** A thing of a kind: its id and its fields, as JSON, its secret fields written "(secret)". *)
 ThingRow = check.Record({Id: check.Id(), Fields: check.Text(0, 1000000)})
 
 (** The things of a kind, by their ids, of one tenant when Tenant is given and the kind has a Tenant. *)
 AdminData = Get("/admin/data/:kind", query = check.Record({Tenant: check.Id(optional = true)}), out = Page(ThingRow, 50), role = Super,
   about = "The things of a kind.")
+
+(** The fields of a thing changed by a super-admin: Fields, a JSON object of the fields to change, each read through the
+    shape of its type (a date in seconds since 1970); a secret field is refused. The thing as it is now comes back. *)
+AdminEdit = Patch("/admin/data/:kind/:id", body = check.Record({Fields: check.Text(2, 1000000, lines = true)}), out = ThingRow, role = Super,
+  about = "Changes fields of a thing.")
 
 (** The counts of the platform. *)
 AdminStats = Get("/admin/stats", out = check.Record({Users: check.Int(0), Tenants: check.Int(0), Sessions: check.Int(0),
@@ -109,14 +115,44 @@ JobRow = check.Record({Id: check.Id(), Kind: check.Text(1, 100), State: check.On
   Tries: check.Int(0), Error: check.Text(0, 1000), Key: check.Text(0, 400), Args: check.Text(0, 65536)})
 
 (** The jobs of a state, the latest first: the dead ones to see what failed, the ready ones to see what waits. *)
-AdminJobs = Get("/admin/jobs", query = check.Record({State: check.OneOf(["ready", "running", "done", "dead"], optional = true, default = "dead")}),
+AdminJobs = Get("/admin/jobs", query = check.Record({State: check.OneOf(["ready", "running", "done", "dead"], optional = true, default = "dead"),
+  Kind: check.Text(1, 100, optional = true)}),
   out = check.List(JobRow, 0, 200), role = Super, about = "The background jobs of a state.")
 
 (** A dead job made ready again, its tries back to 0. *)
 AdminJobRetry = Post("/admin/jobs/:id/retry", role = Super, about = "Runs a dead job again.")
 
+(** A job that waits made dead, so that it never runs; a running one can't be (409). *)
+AdminJobCancel = Post("/admin/jobs/:id/cancel", role = Super, about = "Cancels a waiting job.")
+
+(** A point of the dashboard, a second of this process: its requests, those that failed (5xx) and those refused at
+    the door (by the site they came from, a limit, a sign-in missing, a role), the failed sign-ins of the last minute,
+    the median and 99th percentile of the time of its requests in milliseconds (of those the log kept, all of them
+    under LogLines a second), the jobs ready, running and dead (every 5 seconds), and when. *)
+PointRow = check.Record({At: check.Float(), Requests: check.Float(0), Errors: check.Float(0), Origin: check.Float(0), Limit: check.Float(0),
+  Signin: check.Float(0), Role: check.Float(0), Failures: check.Float(0), P50: check.Float(0), P99: check.Float(0), Ready: check.Float(0),
+  Running: check.Float(0), Dead: check.Float(0)})
+
+(** The dashboard live: a point each second, the last 300 of them. *)
+AdminSeries = Live("admin.series", out = PointRow, role = Super, about = "A point of the dashboard each second.")
+
+(** The events of the last hour, live, their times in seconds since 1970: each new one as it is written, by any server
+    of the app. *)
+AdminTail = Live("admin.events", out = check.Record({Id: check.Id(), At: check.Float(), Kind: check.Text(1, 60), Ip: check.Text(0, 64),
+  Route: check.Text(0, 300), Detail: check.Text(0, 2000)}), role = Super, about = "The events of the last hour, live.")
+
+(** A line of the log of this process, numbered, its time in seconds since 1970: the last 500, live. *)
+TailRow = check.Record({Seq: check.Int(0), At: check.Float(), Level: check.OneOf(["info", "warn", "error"]), Message: check.Text(0, 1000),
+  Fields: check.Text(0, 10000)})
+
+(** The log of this process, live: each line as it is written. *)
+AdminLogTail = Live("admin.logs", out = TailRow, role = Super, about = "The log of this process, live.")
+
+(** The live shows of the admin pages. *)
+AdminShows = [AdminSeries, AdminTail, AdminLogTail]
+
 (** The endpoints of the app's part of the administration, served by package app. *)
-AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData]
+AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData, AdminEdit]
 
 (** The endpoints of the accounts' part, served by package auth. *)
 AdminOfAccounts = [AdminStats, AdminUsers, AdminUser, AdminDisable, AdminEnable, AdminSignOut, AdminSuper, AdminTenants, AdminTenant, AdminRoles]

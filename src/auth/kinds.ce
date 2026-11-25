@@ -8,7 +8,7 @@ use src/app
     platform, Disabled for one who may no longer sign in, when he signed up, and when his address was checked (by the
     link of a mail: missing before). *)
 User = app.Kind("centauri_user", {Email: cepheus.Text(unique = true), Name: cepheus.Text(), Hash: cepheus.Text(), Super: cepheus.Bool(),
-  Disabled: cepheus.Bool(), Created: cepheus.Date(), Checked: cepheus.Date()})
+  Disabled: cepheus.Bool(), Created: cepheus.Date(), Checked: cepheus.Date()}, secret = ["Hash"])
 
 (** A tenant: its name, its name in small letters for a search by its start, when it was made, its first owner, and
     Key, unique, for the one tenant of a single-tenant app ("single"). *)
@@ -23,12 +23,12 @@ Member = app.Kind("centauri_member", {User: cepheus.Link(), Tenant: cepheus.Link
     secret, when it started, when it was last seen, when it ends at the latest, and the address and browser it began
     from, which the user sees in the list of his sessions. *)
 Session = app.Kind("centauri_session", {User: cepheus.Link(), Member: cepheus.Link(), Tenant: cepheus.Link(), Hash: cepheus.Text(),
-  Started: cepheus.Date(), Seen: cepheus.Date(), Ends: cepheus.Date(), Ip: cepheus.Text(), Agent: cepheus.Text()})
+  Started: cepheus.Date(), Seen: cepheus.Date(), Ends: cepheus.Date(), Ip: cepheus.Text(), Agent: cepheus.Text()}, secret = ["Hash"])
 
 (** An invitation to a tenant: the e-mail it is for, the roles it gives, the hash of its code (unique), when it ends,
     and who made it. *)
 Invite = app.Kind("centauri_invite", {Tenant: cepheus.Link(), Email: cepheus.Text(), Roles: cepheus.Text(many = true),
-  Hash: cepheus.Text(unique = true), Ends: cepheus.Date(), By: cepheus.Link()})
+  Hash: cepheus.Text(unique = true), Ends: cepheus.Date(), By: cepheus.Link()}, secret = ["Hash"])
 
 (** The failed sign-ins of a login: Key, unique, is "login:" and the e-mail; Count the failures in a row; Last the
     time of the last one. A success sets Count back to 0. *)
@@ -40,7 +40,7 @@ Proof = app.Kind("centauri_proof", {Key: cepheus.Text(unique = true), Ends: ceph
 
 (** A code sent by mail, to check an address or to set a new password: its user, its kind ("check" or "reset"), the
     hash of the code (unique: the mail holds the code, the database never), and when it ends. A code serves once. *)
-Code = app.Kind("centauri_code", {User: cepheus.Link(), Kind: cepheus.Text(), Hash: cepheus.Text(unique = true), Ends: cepheus.Date()})
+Code = app.Kind("centauri_code", {User: cepheus.Link(), Kind: cepheus.Text(), Hash: cepheus.Text(unique = true), Ends: cepheus.Date()}, secret = ["Hash"])
 
 (** The kinds of package auth. *)
 Kinds = [User, Tenant, Member, Session, Invite, Failure, Proof, Code]

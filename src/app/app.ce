@@ -37,10 +37,13 @@ use std/value
 Serve(endpoint, handler) = {Endpoint: endpoint, Handler: handler}
 
 (** A kind of Cepheus that keeps its name and fields for the administration, which lists the kinds and their things:
-    cepheus.Kind, and two keys more, in small letters so that they meet no field.
+    cepheus.Kind, and keys more, in small letters so that they meet no field. secret names the fields that hold a
+    secret, as the hash of a password or a token: the administration never sends them to a page (it shows "(secret)")
+    and never changes them.
 
-      Kind("note", {Text: cepheus.Text()})["name"] --> "note" *)
-Kind(name, fields) = cepheus.Kind(name, fields) then dict.Put("name", name) then dict.Put("fields", fields)
+      Kind("note", {Text: cepheus.Text()})["name"] --> "note"
+      Kind("key", {Hash: cepheus.Text()}, secret = ["Hash"])["secret"] --> ["Hash"] *)
+Kind(name, fields, secret = []) = cepheus.Kind(name, fields) then dict.Put("name", name) then dict.Put("fields", fields) then dict.Put("secret", secret)
 
 (** A module: its name, its kinds and rules of Cepheus, its routes (Serve), and for a module of the framework, who
     (the function that reads the session of a request, as auth gives it), key (a function of the request and env that
@@ -50,13 +53,14 @@ Kind(name, fields) = cepheus.Kind(name, fields) then dict.Put("name", name) then
     app serves, as a keeper that ends old sessions), jobs (the kinds of background jobs it writes, jobs.Kind, which the
     module of package jobs runs), ends (for the who-module: ends(user, env, until), a channel that gets a value at each
     change of a user's session, so that his live screens end with it), verify (a function of env that gives an Ok, or an Err of lines that stop the start,
-    as a time zone that can't be read), and migrations (app.Migration, run once each, in order, before the app
-    serves).
+    as a time zone that can't be read), migrations (app.Migration, run once each, in order, before the app
+    serves), and pages, a function of env that gives the pages the module serves, {Path, Folder}, a folder of files
+    built beforehand served at a path a setting chooses (Pages), or missing for none.
 
       Module("notes", serve = []).Name --> "notes" *)
 Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing, key = missing, jobs = [], verify = missing,
-  migrations = [], ends = missing) = {Name: name, Kinds: kinds, Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key,
-  Jobs: jobs, Verify: verify, Migrations: migrations, Ends: ends}
+  migrations = [], ends = missing, pages = missing) = {Name: name, Kinds: kinds, Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key,
+  Jobs: jobs, Verify: verify, Migrations: migrations, Ends: ends, Pages: pages}
 
 (** The roles of an app unless it names its own: each role with the roles it includes. owner and admin manage the
     members of their tenant (the endpoints of auth need admin); member is the role of every user who signs up. *)
@@ -207,6 +211,12 @@ defn App(env)
   if value.Len(env.App.Lives) > 0
     handle = http.Handler(routes then http.Wrap((next, req) -> front(next, req, env)))
     routes = mounted(routes, env, handle)
+  end
+  for m in env.App.Modules
+    at = if value.IsMissing(dict.Get("Pages", m)) missing else m.Pages(env) end
+    if not value.IsMissing(at) and at.Path != ""
+      routes = Mount(at.Path, Shelf(at.Folder, env, files = dict.GetOr("Files", {}, at)), routes)
+    end
   end
   if not value.IsMissing(env.Pages)
     routes = http.Get("/*", req -> page(env.Pages, req.Params["*"]), routes)

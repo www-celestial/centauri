@@ -3,6 +3,7 @@
    kinds and their things. Each is an endpoint of package api (AdminOfApp), which the admin pages read. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
+use std/check
 use std/dict
 use std/json
 use std/list
@@ -17,7 +18,8 @@ defn adminOfApp()
   [{Endpoint: api.AdminApp, Handler: adminApp, Module: "centauri"}, {Endpoint: api.AdminSettings, Handler: adminSettings, Module: "centauri"},
    {Endpoint: api.AdminLogs, Handler: adminLogs, Module: "centauri"}, {Endpoint: api.AdminEndpoints, Handler: adminEndpoints, Module: "centauri"},
    {Endpoint: api.AdminMetrics, Handler: adminMetrics, Module: "centauri"}, {Endpoint: api.AdminEvents, Handler: adminEvents, Module: "centauri"},
-   {Endpoint: api.AdminKinds, Handler: adminKinds, Module: "centauri"}, {Endpoint: api.AdminData, Handler: adminData, Module: "centauri"}]
+   {Endpoint: api.AdminKinds, Handler: adminKinds, Module: "centauri"}, {Endpoint: api.AdminData, Handler: adminData, Module: "centauri"},
+   {Endpoint: api.AdminEdit, Handler: adminEdit, Module: "centauri"}]
 end
 
 defn adminApp(r)
@@ -65,11 +67,20 @@ defn adminMetrics(r)
 end
 
 defn adminEvents(r, q)
-  (** A page of events, the newest first, by a sorted question whose filters are patterns of their own. *)
+  (** A page of events, the newest first, by a sorted question whose filters are patterns of their own, and the times
+      a range of the field At. *)
+  since = dict.Get("Since", q)
+  until = dict.Get("Until", q)
   cepheus.Find(8, (e, at, k, u, t, ip, route, d) -> {
     Where: list.Concat([[e, Event.At, at], [e, Event.Kind, k], [e, Event.Ip, ip], [e, Event.Route, route], [e, Event.Detail, d]],
       list.Concat(if value.IsMissing(q.Kind) [] else [[e, Event.Kind, q.Kind]] end,
-        list.Concat(if value.IsMissing(q.Tenant) [] else [[e, Event.Tenant, q.Tenant]] end, if value.IsMissing(q.User) [] else [[e, Event.User, q.User]] end))),
+        list.Concat(if value.IsMissing(q.Tenant) [] else [[e, Event.Tenant, q.Tenant]] end,
+          list.Concat(if value.IsMissing(q.User) [] else [[e, Event.User, q.User]] end,
+            list.Concat(if value.IsMissing(dict.Get("Route", q)) [] else [[e, Event.Route, q.Route]] end,
+              if value.IsMissing(since) and value.IsMissing(until) []
+              else if value.IsMissing(until) [cepheus.Above(at, since - 0.000001)]
+              else if value.IsMissing(since) [cepheus.Below(at, until)]
+              else [cepheus.Between(at, since, until)] end))))),
     Give: {Id: e, At: at, Kind: k, Ip: ip, Route: route, Detail: d}, Sort: [cepheus.Desc(at), cepheus.Desc(e)], Limit: r.Limit, After: r.After,
   }, r.Db) then result.MapOk(rows -> [withWho(x, r.Db) for x in rows])
 end
@@ -86,10 +97,11 @@ defn withWho(x, db)
 end
 
 defn kindRow(k, module)
-  (** A kind as the admin sees it, from the name and fields that app.Kind keeps. *)
+  (** A kind as the admin sees it, from the name, fields and secret fields that app.Kind keeps. *)
   fields = dict.GetOr("fields", {}, k)
+  secret = dict.GetOr("secret", [], k)
   {Name: dict.GetOr("name", "(a kind without app.Kind)", k), Module: module,
-    Fields: [{Name: p.Key, Type: p.Value.Type, Unique: p.Value.Unique, Many: p.Value.Many} for p in dict.Pairs(fields)]}
+    Fields: [{Name: p.Key, Type: p.Value.Type, Unique: p.Value.Unique, Many: p.Value.Many, Secret: p.Key in secret} for p in dict.Pairs(fields)]}
 end
 
 defn adminKinds(r)
@@ -100,15 +112,31 @@ defn adminKinds(r)
   out
 end
 
-defn adminData(r, q)
-  (** A page of the things of a kind, by their ids: those that have its field Tenant (of q.Tenant when given), or
-      else its first field; each with all its fields, as JSON. *)
-  kind = missing
-  for k in r.Env.App.Kinds
-    if dict.Get("name", k) == r.Params.kind
-      kind = k
+defn kindNamed(name, env)
+  (** The kind of app.Kind of this name, or missing. *)
+  for k in env.App.Kinds
+    if dict.Get("name", k) == name
+      return k
     end
   end
+  missing
+end
+
+defn masked(thing, kind)
+  (** A thing as the admin sees it: its secret fields "(secret)", never their values. *)
+  out = thing
+  for name in dict.GetOr("secret", [], kind)
+    if value.IsDict(out) and dict.Has(name, out)
+      out[name] = "(secret)"
+    end
+  end
+  out
+end
+
+defn adminData(r, q)
+  (** A page of the things of a kind, by their ids: those that have its field Tenant (of q.Tenant when given), or
+      else its first field; each with all its fields, as JSON, its secret fields masked. *)
+  kind = kindNamed(r.Params.kind, r.Env)
   if value.IsMissing(kind)
     return Missing(message = "There is no kind $(r.Params.kind) declared with app.Kind.")
   end
@@ -116,5 +144,64 @@ defn adminData(r, q)
   field = if "Tenant" in names "Tenant" else names[1] end
   where = (t, v) -> if field == "Tenant" and not value.IsMissing(q.Tenant) [[t, kind.Tenant, q.Tenant]] else [[t, kind[field], v]] end
   rows = cepheus.Find(2, (t, v) -> {Where: where(t, v), Give: {Id: t}, Sort: [t], Limit: r.Limit, After: r.After}, r.Db)?
-  result.Ok([{Id: x.Id, Fields: json.Text(cepheus.Get(kind, x.Id, r.Db)?)} for x in rows])
+  result.Ok([{Id: x.Id, Fields: json.Text(masked(cepheus.Get(kind, x.Id, r.Db)?, kind))} for x in rows])
+end
+
+defn editOf(field)
+  (** The shape of a field of a kind, as the admin changes it: its type of Cepheus as a shape of std/check, optional;
+      a date in seconds since 1970, as the data gives it. missing for a type it doesn't change. *)
+  t = field.Type
+  one = if t == "text" check.Text(0, 100000, lines = true, optional = not field.Many)
+    else if t == "int" check.Int(-9007199254740991, 9007199254740991, optional = not field.Many)
+    else if t == "float" or t == "date" check.Float(-1e15, 1e15, optional = not field.Many)
+    else if t == "money" check.Money(dict.GetOr("Scale", 2, field), min = -1e15, max = 1e15, optional = not field.Many)
+    else if t == "bool" check.Bool(optional = not field.Many)
+    else if t == "link" check.Id(optional = not field.Many)
+    else missing end
+  if value.IsMissing(one) or not field.Many one else check.List(one, 0, 1000, optional = true) end
+end
+
+defn adminEdit(r, x)
+  (** PATCH /admin/data/:kind/:id: the fields given of a thing changed, each read through the shape of its type; a
+      secret field is never changed, a field the kind hasn't is refused. Cepheus checks the rest (a unique value, the
+      rules), and keeps who changed it and why in its history; the event says which fields, never their values. *)
+  kind = kindNamed(r.Params.kind, r.Env)
+  id = IdOf(r.Params.id)
+  if value.IsMissing(kind) or value.IsMissing(id)
+    return Missing()
+  end
+  thing = cepheus.Get(kind, id, r.Db)?
+  if value.IsMissing(thing) or value.Len(thing) == 0
+    return Missing()
+  end
+  given = json.Parse(x.Fields)
+  if result.IsErr(given) or not value.IsDict(given.Value)
+    return Fail(422, "Check the fields.", fields = {Fields: "A JSON object of the fields to change."})
+  end
+  fields = dict.GetOr("fields", {}, kind)
+  secret = dict.GetOr("secret", [], kind)
+  shapes = {}
+  wrong = {}
+  for p in dict.Pairs(given.Value)
+    f = dict.Get(p.Key, fields)
+    one = if value.IsMissing(f) missing else editOf(f) end
+    if p.Key in secret
+      wrong[p.Key] = "A secret: the administration never changes it."
+    else if value.IsMissing(one)
+      wrong[p.Key] = "No field of $(r.Params.kind) that the administration changes."
+    else
+      shapes[p.Key] = one
+    end
+  end
+  if value.Len(wrong) > 0
+    return Fail(422, "Check the fields.", fields = wrong)
+  end
+  read = check.Read(check.Record(shapes), given.Value)
+  if result.IsErr(read)
+    return Fail(422, "Check the fields.", fields = read.Error)
+  end
+  changed = dict.Dict([p for p in dict.Pairs(read.Value) if dict.Has(p.Key, given.Value)])
+  cepheus.Update(kind, id, changed, r.Db, by = r.User.Id, why = r.Why)?
+  _ = Note(r.Env, "data-edited", "$(r.Params.kind) $id: $(text.Join(", ", dict.Keys(changed))).", user = r.User.Id, ip = r.Ip, route = r.Route)
+  result.Ok({Id: id, Fields: json.Text(masked(cepheus.Get(kind, id, r.Db)?, kind))})
 end

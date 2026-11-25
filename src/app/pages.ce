@@ -1,0 +1,76 @@
+(* The pages of a module, as the admin's: a folder of files built beforehand (a page compiled to WebAssembly, its loader
+   and its glue) served at a path that a setting chooses, index.html at the path itself and the others under it. They
+   are read once, at the start, and kept in memory with their type, the ETag of their bytes and their brotli version
+   when the folder holds one (name.br): a visit after the first costs a 304 for each, a first one the compressed bytes.
+   They pass Centauri's door as any request: the limit of the address, the headers of security, the log. *)
+use std/crypto
+use std/dict
+use std/encode
+use std/http
+use std/list
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(* The media types of the files a page is made of. *)
+mediaTypes = {html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", wasm: "application/wasm", css: "text/css; charset=utf-8",
+  json: "application/json", sites: "application/json", svg: "image/svg+xml", png: "image/png", txt: "text/plain; charset=utf-8"}
+
+defn typeOf(name)
+  (** The media type of a file by its extension. *)
+  parts = text.Split(".", name)
+  dict.GetOr(text.Lower(parts[value.Len(parts)]), "application/octet-stream", mediaTypes)
+end
+
+defn shelved(name, body, br, keys)
+  (** A file as the shelf keeps it. *)
+  {Body: body, Br: br, Type: typeOf(name), Etag: "\"$(text.ByteSlice(1, 24, encode.Hex(crypto.Blake2b(body, keys))))\""}
+end
+
+defn Shelf(folder, env, files = {})
+  (** The files of a folder, read once: a map of their names to {Body, Br, Type, Etag}, with files, a map of names to
+      texts, made by the module (an index.html), added over them. A folder that can't be read gives only files. *)
+  out = {}
+  listed = if value.IsMissing(folder) result.Ok([]) else sys.List(folder) end
+  for name in if result.IsOk(listed) list.Sort(listed.Value) else [] end
+    if not text.EndsWith(".br", name) and not text.EndsWith(".ce", name) and not text.StartsWith(".", name)
+      body = sys.Read("$folder/$name")
+      if result.IsOk(body)
+        br = sys.Read("$folder/$name.br")
+        out[name] = shelved(name, body.Value, if result.IsOk(br) br.Value else missing end, env.Keys)
+      end
+    end
+  end
+  for p in dict.Pairs(files)
+    out[p.Key] = shelved(p.Key, p.Value, missing, env.Keys)
+  end
+  out
+end
+
+defn Shelved(shelf, name, req)
+  (** The response of a file of a shelf to a GET: a 304 when the browser holds it already, its brotli bytes when the
+      browser takes them, a 404 for a name the shelf hasn't. *)
+  f = dict.Get(name, shelf)
+  if value.IsMissing(f)
+    return {Status: 404, Body: "", Headers: []}
+  end
+  headers = [{Name: "content-type", Value: f.Type}, {Name: "etag", Value: f.Etag}, {Name: "cache-control", Value: "no-cache"}]
+  if not value.IsMissing(f.Br)
+    headers = list.Append({Name: "vary", Value: "accept-encoding"}, headers)
+  end
+  if http.HeaderValue("if-none-match", req.Headers) == f.Etag
+    return {Status: 304, Body: "", Headers: headers}
+  end
+  accepts = http.HeaderValue("accept-encoding", req.Headers)
+  if not value.IsMissing(f.Br) and value.IsText(accepts) and text.Contains("br", accepts)
+    return {Status: 200, Body: f.Br, Headers: list.Append({Name: "content-encoding", Value: "br"}, headers)}
+  end
+  {Status: 200, Body: f.Body, Headers: headers}
+end
+
+defn Mount(path, shelf, routes)
+  (** The routes with the files of a shelf at a path: index.html at the path, each other file under it. The routes
+      added before keep their paths: an endpoint under the same path is still the endpoint. *)
+  routes then http.Get(path, req -> Shelved(shelf, "index.html", req)) then http.Get("$path/*", req -> Shelved(shelf, if req.Params["*"] == "" "index.html" else req.Params["*"] end, req))
+end

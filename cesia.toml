@@ -9,6 +9,12 @@ from = "github.com/www-celestial/cepheus"
 version = "v0.1.0"
 take = ["cesia/cepheus"]
 
+# The admin pages are pages of Ceres, compiled to WebAssembly: its widgets, its browser back-end and its glue.
+[deps.ceres]
+from = "github.com/www-celestial/ceres"
+version = "v0.1.0"
+take = ["src/web", "src/browser", "src/form", "web"]
+
 # The tests run whole apps in memory, on forks of Cepheus's Empty: no server, no network. libsodium hashes the
 # passwords and makes the secrets of the sessions.
 [test]

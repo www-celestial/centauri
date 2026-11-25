@@ -27,7 +27,7 @@ use std/value
     app's key: the database never holds it in clear), the types of messages it takes (none: all), whether it still
     takes them (a 410 Gone turns it off), and when it was made. *)
 Endpoint = app.Kind("centauri_hook", {Tenant: cepheus.Link(), Url: cepheus.Text(), Secret: cepheus.Text(), Types: cepheus.Text(many = true),
-  Active: cepheus.Bool(), Created: cepheus.Date()})
+  Active: cepheus.Bool(), Created: cepheus.Date()}, secret = ["Secret"])
 
 (** A message received: the id its sender gave it, unique, and when it came; forgotten once its time can no longer be
     accepted. *)
