@@ -2,12 +2,9 @@
     no server, no network, no Docker; a clock that a test moves; clients that sign up, sign in and call the endpoints by
     their contracts. Three tests come made for every app: Isolated (no tenant reads or changes another's data, on every
     endpoint), Surface (no change of the API breaks its clients) and Fuzz (no input, however broken, makes a 500).
-
-      t = apptest.Start(main.App)?
-      ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
-      ana.Call(api.Me)?.Email == "ana@example.com"
-
-    Each test of Centauri starts its own app: tests never share a database, and run in any order. *)
+    A test starts its own app, t = apptest.Start(main.App)?, signs up, ana = t.SignUp({Email: "ana@example.com",
+    Password: "correct horse 12", Name: "Ana"})?, and calls, ana.Call(api.Me)?.Email: tests never share a database,
+    and run in any order. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use src/app
@@ -298,7 +295,7 @@ defn Fuzz(a, settings = {}, cases = 5)
   (** The test that no input makes a 500: every endpoint, called by a user with every role of the app (and a
       super-admin for the administration), with good inputs drawn from its shapes and broken ones (wrong types, texts of
       5,000 bytes, control characters, bad UTF-8, injections of SQL, HTML and formulas, nested lists, ids out of range,
-      bodies that are no JSON). An Ok of true, or an Err of each endpoint and input that gave a 500. *)
+      bodies that are no JSON), and good ones at the edges of their bounds, each field at its lowest and its highest. An Ok of true, or an Err of each endpoint and input that gave a 500. *)
   t = Start(a, settings = settings)?
   u = t.SignUp({Email: "fuzz@example.com", Password: "correct horse fuzz", Name: "fuzz"})?
   t.As(u, everyRole(t))?
@@ -309,7 +306,7 @@ defn Fuzz(a, settings = {}, cases = 5)
     if not (e.Name in skipped)
       c = if e.Role == api.Super boss else u end
       shape = if value.IsMissing(e.In) e.Query else e.In end
-      inputs = []
+      inputs = if value.IsMissing(shape) [] else Edges(shape, 1, ids, "fz") end
       for n in 1..cases
         inputs = list.Concat(inputs, if value.IsMissing(shape) [{}] else list.Append(Sample(shape, n, ids, "fz"), Breaks(shape, n, ids, "fz")) end)
       end

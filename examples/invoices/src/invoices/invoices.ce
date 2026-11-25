@@ -1,0 +1,188 @@
+(* Invoices: made with their lines in one group and numbered without a gap in each office, listed by pages with
+   filters, exported as CSV, changed while they are not paid, paid once, deleted while not paid, marked late every
+   minute; and the dashboard's numbers. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+use std/csv
+use std/date
+use std/dict
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Week = 604800   (** Seconds in a week. *)
+
+defn lineOps(inv, lines, from, tenant)
+  (** The facts of an invoice's lines, each a new thing of the group from New(from). *)
+  list.Flatten([app.Facts(Line, cepheus.New(from + k - 1), {Tenant: tenant, Invoice: inv, Position: k, Label: lines[k].Label,
+    Quantity: lines[k].Quantity, Price: lines[k].Price}) for k in 1..value.Len(lines)])
+end
+
+defn totalOf(x)
+  (** The total of the lines, in cents first, so that 0.1 + 0.2 is 0.3: an Ok, or a 422 past 1,000,000,000, or for a
+      due date before the date. *)
+  total = list.Sum([l.Quantity * math.Round(l.Price * 100) for l in x.Lines]) / 100
+  if x.Due < x.Date
+    return app.Fail(422, "Check the fields.", fields = {Due: "A due date on or after the date."})
+  end
+  if total > 1000000000 app.Fail(422, "Check the fields.", fields = {Lines: "The total may not pass 1,000,000,000."}) else result.Ok(total) end
+end
+
+defn invoiceOf(id, r)
+  (** An invoice of the tenant with its lines in their order: an Ok, or a 404. *)
+  inv = app.Own(Invoice, id, r)?
+  inv.Lines = cepheus.Find(5, (l, p, a, q, c) -> {Where: [[l, Line.Invoice, inv.Id], [l, Line.Position, p], [l, Line.Label, a],
+    [l, Line.Quantity, q], [l, Line.Price, c]], Give: {Line: l, Position: p, Label: a, Quantity: q, Price: c}, Sort: [p]}, r.Db)?
+  result.Ok(inv)
+end
+
+defn addInvoice(r, x)
+  (** POST /invoices: the invoice and its lines in one group, its number the office's next (app.Next). *)
+  c = app.Own(Client, x.Client, r)?
+  total = totalOf(x)?
+  inv = cepheus.New(1)
+  ops = list.Concat([app.Next("invoice", [inv, Invoice.Number], r)?], app.Facts(Invoice, inv, {Tenant: r.User.Tenant, Client: c.Id,
+    BillTo: c.Name, Search: text.Fold(c.Name), Date: x.Date, Due: x.Due, Status: "unpaid", Total: total}))
+  made = cepheus.Write(list.Concat(ops, lineOps(inv, x.Lines, 2, r.User.Tenant)), r.Db, by = r.User.Id, why = r.Why)
+  if result.IsErr(made) and made.Error.Code == "invalid"
+    return app.Fail(409, "This client was deleted meanwhile.")
+  end
+  invoiceOf(made?.Things[1], r)
+end
+
+defn editInvoice(r, x)
+  (** PUT /invoices/:id: new dates and lines while not paid, as it was read; a late invoice due later is unpaid again. *)
+  inv = invoiceOf(r.Params.id, r)?
+  if inv.Status == "paid"
+    return app.Fail(409, "Invoice $(inv.Number) is paid: it stays as it is.")
+  end
+  total = totalOf(x)?
+  status = if x.Due < r.Now and inv.Status == "late" "late" else "unpaid" end
+  ops = [cepheus.Expect(inv.Id, Invoice.Status, inv.Status), cepheus.Add(inv.Id, Invoice.Date, x.Date), cepheus.Add(inv.Id, Invoice.Due, x.Due),
+    cepheus.Add(inv.Id, Invoice.Total, total), cepheus.Add(inv.Id, Invoice.Status, status)]
+  for l in inv.Lines
+    ops = list.Concat(ops, app.Gone(Line, l.Line, r.Db)?)
+  end
+  cepheus.Write(list.Concat(ops, lineOps(inv.Id, x.Lines, 1, r.User.Tenant)), r.Db, by = r.User.Id, why = r.Why)?
+  invoiceOf(inv.Id, r)
+end
+
+defn paying(r)
+  (** A payment as the invoice was read: a conflict when it changed meanwhile, which app.Retry reads again. *)
+  inv = app.Own(Invoice, r.Params.id, r)?
+  if inv.Status == "paid"
+    return app.Fail(409, "Invoice $(inv.Number) is paid already.")
+  end
+  cepheus.Write([cepheus.Expect(inv.Id, Invoice.Status, inv.Status), cepheus.Add(inv.Id, Invoice.Status, "paid"), cepheus.Add(inv.Id, Invoice.PaidAt, r.Now)],
+    r.Db, by = r.User.Id, why = r.Why)?
+  invoiceOf(inv.Id, r)
+end
+
+(** POST /invoices/:id/pay: paid once; a second payment, or one at the same moment, gets a 409. *)
+pay(r) = app.Retry(() -> paying(r))
+
+defn deleteInvoice(r)
+  (** DELETE /invoices/:id: an invoice not paid, with its lines, as it was read. *)
+  inv = invoiceOf(r.Params.id, r)?
+  if inv.Status == "paid"
+    return app.Fail(409, "Invoice $(inv.Number) is paid: it stays.")
+  end
+  ops = list.Concat([cepheus.Expect(inv.Id, Invoice.Status, inv.Status)], app.Gone(Invoice, inv.Id, r.Db)?)
+  for l in inv.Lines
+    ops = list.Concat(ops, app.Gone(Line, l.Line, r.Db)?)
+  end
+  cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)?
+  result.Ok(missing)
+end
+
+defn sortKeys(sort, i, no, d, u, t)
+  (** The keys of an order, then the due date and the invoice, so that the invoice decides a tie. *)
+  match sort
+    "number" -> [no, u, i]
+    "-date" -> [cepheus.Desc(d), u, i]
+    "due" -> [u, i]
+    "-total" -> [cepheus.Desc(t), u, i]
+    else -> [cepheus.Desc(no), u, i]
+  end
+end
+
+defn question(r, f, limit, after)
+  (** The question of the list of invoices: the tenant's, of the statuses asked (In), late or due within a week
+      (Or), of a client, whose bill-to name starts with the search (Prefix), in an order. *)
+  statuses = [s[1] for s in [["unpaid", f.Unpaid], ["late", f.Late], ["paid", f.Paid]] if s[2]]
+  search = text.Fold(f.Search)
+  (i, no, b, d, u, s, t, k) -> {Where: list.Flatten([[[i, Invoice.Tenant, r.User.Tenant], [i, Invoice.Number, no], [i, Invoice.BillTo, b],
+      [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, s], [i, Invoice.Total, t]],
+      if value.Len(statuses) > 0 and value.Len(statuses) < 3 [cepheus.In(s, statuses)] else [] end,
+      if f.Action [cepheus.Or([i, Invoice.Status, "late"], cepheus.And([i, Invoice.Status, "unpaid"], cepheus.Below(u, r.Now + Week)))] else [] end,
+      if value.IsMissing(f.Client) [] else [[i, Invoice.Client, f.Client]] end,
+      if search == "" [] else [[i, Invoice.Search, k], cepheus.Prefix(k, search)] end]),
+    Give: {Id: i, Number: no, BillTo: b, Date: d, Due: u, Status: s, Total: t}, Sort: sortKeys(f.Sort, i, no, d, u, t), Limit: limit, After: after}
+end
+
+(** GET /invoices: a page of the tenant's invoices, filtered, in an order: one sorted question of 8 to 11 patterns. *)
+invoices(r, f) = cepheus.Find(8, question(r, f, r.Limit, r.After), r.Db)
+
+defn cell(s)
+  (** A text for a cell of CSV that a spreadsheet won't run as a formula: one that starts with = + - @, a tab or a
+      carriage return gets a ' in front (OWASP, CSV injection). *)
+  if s != "" and text.ByteSlice(1, 1, s) in ["=", "+", "-", "@", text.Char(9), text.Char(13)] "'$s" else s end
+end
+
+defn export(r, f)
+  (** GET /invoices.csv: every invoice of the filter, in the order of their numbers, with the day each was paid. *)
+  f.Sort = "number"
+  rows = cepheus.Find(8, question(r, f, missing, missing), r.Db)?
+  paid = dict.Dict()
+  ids = [x.Id for x in rows if x.Status == "paid"]
+  for from in [k * 10000 + 1 for k in 0..math.Div(value.Len(ids), 10000)]
+    part = list.Take(10000, list.Skip(from - 1, ids))
+    if value.Len(part) > 0
+      for x in cepheus.Find(2, (i, p) -> {Where: [[i, Invoice.PaidAt, p], cepheus.In(i, part)], Give: {Id: i, PaidAt: p}}, r.Db)?
+        paid[x.Id] = x.PaidAt
+      end
+    end
+  end
+  day(t) = if value.IsMissing(t) "" else date.FormatDate(date.FromUnix(t)) end
+  lines = list.Concat([["number", "date", "due", "bill_to", "status", "total", "paid_at"]],
+    [[x.Number, day(x.Date), day(x.Due), cell(x.BillTo), x.Status, text.Decimals(2, x.Total), day(dict.Get(x.Id, paid))] for x in rows])
+  app.Reply(csv.Text(lines), headers = [{Name: "content-disposition", Value: "attachment; filename=\"invoices.csv\""}])
+end
+
+defn dashboard(r)
+  (** GET /dashboard: what is not paid, what is late, the ten latest payments. *)
+  sum(rows) = if value.Len(rows) == 0 {Total: 0, Count: 0} else rows[1] end
+  open = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Tenant, r.User.Tenant], [i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])],
+    Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, r.Db)?
+  late = cepheus.Find(3, (i, t, s) -> {Where: [[i, Invoice.Tenant, r.User.Tenant], [i, Invoice.Status, "late"], [i, Invoice.Total, t]],
+    Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, r.Db)?
+  paid = cepheus.Find(5, (i, p, no, b, t) -> {Where: [[i, Invoice.Tenant, r.User.Tenant], [i, Invoice.PaidAt, p], [i, Invoice.Number, no],
+    [i, Invoice.BillTo, b], [i, Invoice.Total, t]], Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
+    Sort: [cepheus.Desc(p), cepheus.Desc(no)], Limit: 10}, r.Db)?
+  {Unpaid: sum(open), Late: sum(late), Payments: paid}
+end
+
+defn MarkLate(now, db, most = 500)
+  (** Marks late the unpaid invoices whose due date has passed, of every office, at most most of them, each as it was
+      read: an Ok of how many. *)
+  due = cepheus.Find(2, (i, u) -> {Where: [[i, Invoice.Status, "unpaid"], [i, Invoice.Due, u], cepheus.Below(u, now)], Give: {Invoice: i, Due: u}, Sort: [u], Limit: most}, db)?
+  if value.Len(due) == 0
+    return result.Ok(0)
+  end
+  done = cepheus.Write(list.Flatten([[cepheus.Expect(x.Invoice, Invoice.Status, "unpaid"), cepheus.Add(x.Invoice, Invoice.Status, "late")] for x in due]), db, why = "invoices late")
+  if result.IsErr(done) and done.Error.Code == "conflict" result.Ok(0) else done then result.MapOk(g -> value.Len(due)) end
+end
+
+defn keep(env)
+  (** The keeper of the invoices: every minute, the invoices whose due date passed become late, 500 a round. *)
+  while true
+    late = MarkLate(env.Now(), env.Db)
+    while result.IsOk(late) and late.Value == 500
+      late = MarkLate(env.Now(), env.Db)
+    end
+    sys.Sleep(60)
+  end
+end

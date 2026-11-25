@@ -20,12 +20,14 @@ Fail(status, message, fields = missing) = result.Err({Kind: "api", Status: statu
       Missing().Error.Status --> 404 *)
 Missing(message = "There is no such thing.") = Fail(404, message)
 
-(* The status and message of each code of a Cepheus Err, as the client gets them. *)
+(* The status and message of each code of a Cepheus Err, as the client gets them. An invalid is a 500: a value of the
+   wrong type, a link to no thing, a question badly made are bugs of the server (a constraint of a rule, Never, is
+   invalid too: its handler turns it into a Fail of its own, as a 409). *)
 cepheusCodes = {"conflict": [409, "This changed meanwhile: read it again, then try again."],
   "unique": [409, "This value is taken already."], "denied": [403, "This is not yours to read or change."],
   "unreachable": [503, "The database can't be reached: try again in a moment."], "timeout": [503, "This took too long: try again."],
   "busy": [503, "Busy: try again in a moment."], "damaged": [500, "Something went wrong on our side."],
-  "invalid": [422, "This was refused by a rule of the data."], "missing": [404, "There is no such thing."]}
+  "invalid": [500, "Something went wrong on our side."], "missing": [404, "There is no such thing."]}
 
 defn Problem(e, id, detailed = false)
   (** The status and the body of an Err as Problem Details: {Status, Body}, Body the map to write as JSON, with type,

@@ -12,7 +12,7 @@ take = ["cesia/cepheus"]
 # The tests run whole apps in memory, on forks of Cepheus's Empty: no server, no network. libsodium hashes the
 # passwords and makes the secrets of the sessions.
 [test]
-allow = ["native=cepheus", "ffi=sodium"]
+allow = ["native=cepheus", "ffi=sodium", "read=.cesia", "write=.cesia"]
 timeout = "60"
 
 # cesia doc --site: the site of Centauri, its book and the reference of its packages.

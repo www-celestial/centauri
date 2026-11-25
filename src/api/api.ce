@@ -78,6 +78,12 @@ Live(name, args = missing, out = missing, role = Signed, about = missing) = endp
       Page(check.Int(), 20).Size --> 20 *)
 Page(of, size = 20) = check.Record({Rows: check.List(of, 0, size), After: check.Text(0, 4096, optional = true)}) then dict.Put("Size", size)
 
+(** The out of an endpoint that answers a file, as a CSV export: its media type. The handler gives the file's bytes,
+    a text; headers (as Content-Disposition) come with app.Reply.
+
+      File("text/csv").Type --> "text/csv" *)
+File(type = "application/octet-stream") = {Kind: "file", Type: type}
+
 (** The parts of a path: its fixed words, and :name for a parameter.
 
       Parts("/invoices/:id/pay") --> ["invoices", ":id", "pay"] *)
@@ -119,7 +125,9 @@ defn operation(e)
   if value.IsDict(e.Out) and "Size" in e.Out
     params = list.Append(param("After", "query", false, {type: "string"}), params)
   end
-  ok = if value.IsMissing(e.Out) {description: "Done."} else {description: "Done.", content: {"application/json": {schema: check.Schema(e.Out)}}} end
+  ok = if value.IsMissing(e.Out) {description: "Done."}
+    else if e.Out.Kind == "file" {description: "Done.", content: dict.Dict([{Key: e.Out.Type, Value: {schema: {type: "string", format: "binary"}}}])}
+    else {description: "Done.", content: {"application/json": {schema: check.Schema(e.Out)}}} end
   op = {operationId: e.Name, parameters: params, responses: dict.Dict([
     {Key: "$(Done(e))", Value: ok},
     {Key: "default", Value: {description: "An error, as RFC 9457 writes it.", content: {"application/problem+json": {schema: problem}}}}])}

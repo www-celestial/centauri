@@ -65,7 +65,8 @@ end
 
 defn Read(fields, given, defaults = {})
   (** The settings: an Ok of a map of every field to its value, or an Err of a list of what is wrong, each line naming
-      its variable. given is a map of names to texts, as the environment gives them (sys.Env for each, by Load), and
+      its variable. given is a map of names to texts, as the environment gives them (sys.Env for each, by Load), or to
+      values of their types (a test's), and
       defaults the app's defaults, values of their type. The profile's rules come after the shape's: in prod, the
       Origin is https, a Secret and a database are given.
 
@@ -77,7 +78,7 @@ defn Read(fields, given, defaults = {})
     values[p.Key] = p.Value
   end
   for p in dict.Pairs(given)
-    if value.IsText(p.Value) and p.Value != ""
+    if not value.IsMissing(p.Value) and p.Value != ""
       values[p.Key] = p.Value
     end
   end

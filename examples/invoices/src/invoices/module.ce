@@ -1,0 +1,17 @@
+(** The app of the invoices on Centauri: the module of the invoices beside the accounts. Each office is a tenant; its
+    owner is an admin, who makes clients and invoices and invites accountants, who make and pay invoices. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/auth
+use src/invoices/endpoints as e
+
+(** The roles, each with those it includes. *)
+Roles = {owner: ["admin"], admin: ["accountant"], accountant: []}
+
+Module = app.Module("invoices", kinds = Kinds, rules = Rules, start = keep, serve = [
+  app.Serve(e.AddClient, addClient), app.Serve(e.Clients, clients), app.Serve(e.Client, client), app.Serve(e.EditClient, editClient),
+  app.Serve(e.DeleteClient, deleteClient), app.Serve(e.AddInvoice, addInvoice), app.Serve(e.Invoices, invoices), app.Serve(e.Export, export),
+  app.Serve(e.Invoice, r -> invoiceOf(r.Params.id, r)), app.Serve(e.EditInvoice, editInvoice), app.Serve(e.Pay, pay),
+  app.Serve(e.DeleteInvoice, deleteInvoice), app.Serve(e.Dashboard, dashboard)])
+
+(** The app: an accountant is who joins an office by invitation. *)
+App = app.Of([auth.Module(), Module], name = "invoices", roles = Roles, defaults = {MemberRoles: "accountant"})

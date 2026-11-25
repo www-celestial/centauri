@@ -297,7 +297,9 @@ defn served(b, e, req, env, rid)
     rows = if value.IsArray(v) v else [] end
     v = {Rows: list.Take(pageSize, rows), After: if value.Len(rows) > pageSize seal(rows[pageSize], e, user, env) else missing end}
   end
-  out = if value.IsMissing(e.Out) {Status: if status == 200 204 else status end, Body: "", Headers: []} else http.Json(check.Out(e.Out, v), status = status) end
+  out = if value.IsMissing(e.Out) {Status: if status == 200 204 else status end, Body: "", Headers: []}
+    else if e.Out.Kind == "file" {Status: status, Body: if value.IsText(v) v else "" end, Headers: [{Name: "content-type", Value: e.Out.Type}]}
+    else http.Json(check.Out(e.Out, v), status = status) end
   for h in extra
     out = http.WithHeader(h.Name, h.Value, out)
   end

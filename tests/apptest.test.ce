@@ -1,0 +1,93 @@
+(** The tests that Centauri makes of a whole app, on apps that are right and on apps with the bug each must catch: a
+    route that reads a thing by its id without app.Own (Isolated), a handler that fails on an edge of its input
+    (Fuzz), a change that takes a field from an answer (Surface). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/check
+use std/dict
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text(), Rank: cepheus.Int()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100), Rank: check.Int(0, 10)}), out = NoteOut, role = "member")
+OneNote = api.Get("/notes/:id", out = NoteOut, role = "member")
+Notes = api.Get("/notes", query = check.Record({Starts: check.Text(0, 20, optional = true)}), out = api.Page(NoteOut, 50), role = "member")
+Rename = api.Put("/notes/:id", body = check.Record({Text: check.Text(1, 100)}), out = NoteOut, role = "member")
+
+defn add(r, x)
+  made = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text, Rank: x.Rank}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Note, made, r)
+end
+
+defn rename(r, x)
+  id = app.Own(Note, r.Params.id, r)?.Id
+  cepheus.Update(Note, id, {Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Note, id, r)
+end
+
+listed(r, q) = cepheus.Find(2, (n, t) -> {Where: [[n, Note.Tenant, r.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}, Sort: [n], Limit: r.Limit, After: r.After}, r.Db)
+
+(* Wrong on purpose: the thing of the path, read by its id alone, and changed by it alone. *)
+defn leaky(r)
+  t = cepheus.Get(Note, app.IdOf(r.Params.id), r.Db)?
+  if value.IsMissing(t) app.Missing() else dict.Put("Id", app.IdOf(r.Params.id), t) end
+end
+
+defn careless(r, x)
+  cepheus.Update(Note, app.IdOf(r.Params.id), {Text: x.Text}, r.Db)?
+  {Id: app.IdOf(r.Params.id), Text: x.Text}
+end
+
+(* Wrong on purpose: a rank of 10 divides by zero, a bug that the shape lets through. *)
+defn brittle(r, x)
+  made = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text, Rank: 100 / (10 - x.Rank)}, r.Db)?
+  app.Own(Note, made, r)
+end
+
+notes(serve) = app.Of([auth.Module(), app.Module("notes", kinds = [Note], serve = serve)], name = "notes")
+Right = notes([app.Serve(AddNote, add), app.Serve(OneNote, r -> app.Own(Note, r.Params.id, r)), app.Serve(Notes, listed), app.Serve(Rename, rename)])
+
+defn isRightAppIsolated()
+  apptest.Isolated(Right)?
+end
+
+defn isLeakCaught()
+  read = apptest.Isolated(notes([app.Serve(AddNote, add), app.Serve(OneNote, leaky)]))
+  changed = apptest.Isolated(notes([app.Serve(AddNote, add), app.Serve(Rename, careless)]))
+  bug.Assert(result.IsErr(read) and text.Contains("GET /notes/:id: an answer to tenant B holds data of tenant A", read.Error.Message), "the read: $read")
+  result.IsErr(changed) and text.Contains("was changed by tenant B", changed.Error.Message)
+end
+
+defn isRightAppFuzzed()
+  apptest.Fuzz(Right)?
+end
+
+defn isCrashCaught()
+  got = apptest.Fuzz(notes([app.Serve(AddNote, brittle)]))
+  result.IsErr(got) and text.Contains("POST /notes gave 500", got.Error.Message)
+end
+
+defn isSurfaceKept()
+  path = ".cesia/surface-test.json"
+  _ = sys.Remove(path)
+  apptest.Surface(Right, path)?
+  same = apptest.Surface(Right, path)
+  more = apptest.Surface(notes([app.Serve(AddNote, add), app.Serve(OneNote, r -> app.Own(Note, r.Params.id, r)), app.Serve(Notes, listed),
+    app.Serve(Rename, rename), app.Serve(api.Get("/count", out = check.Int(), role = "member"), r -> 0)]), path)
+  less = apptest.Surface(notes([app.Serve(AddNote, add), app.Serve(Notes, listed), app.Serve(Rename, rename)]), path)
+  narrower = api.Get("/notes/:id", out = check.Record({Id: check.Id()}), role = "member")
+  fewer = apptest.Surface(notes([app.Serve(AddNote, add), app.Serve(narrower, r -> app.Own(Note, r.Params.id, r)), app.Serve(Notes, listed), app.Serve(Rename, rename)]), path)
+  stricter = api.Post("/notes", body = check.Record({Text: check.Text(1, 100), Rank: check.Int(0, 10), Color: check.Text()}), out = NoteOut, role = "member")
+  asks = apptest.Surface(notes([app.Serve(stricter, add), app.Serve(OneNote, r -> app.Own(Note, r.Params.id, r)), app.Serve(Notes, listed), app.Serve(Rename, rename)]), path)
+  bug.Assert(result.IsOk(same) and result.IsOk(more), "adding breaks nothing")
+  bug.Assert(text.Contains("GET /notes/{id} was taken away", less.Error.Message), "a route taken away: $less")
+  bug.Assert(text.Contains("the field .Text of its answer was taken away", fewer.Error.Message), "a field taken away: $fewer")
+  text.Contains("the field .Color of its body is now required", asks.Error.Message)
+end

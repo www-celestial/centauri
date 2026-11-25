@@ -1,0 +1,6 @@
+(** The server of the invoices: its settings come from the environment (APP_PROFILE, APP_ORIGIN, APP_CEPHEUS_URL,
+    APP_CEPHEUS_TOKEN, APP_SECRET... each named in Centauri's settings), and cesia do serve runs it. *)
+use deps/www-celestial/centauri/src/app
+use src/invoices
+
+app.Run(invoices.App)

@@ -93,3 +93,44 @@ defn Breaks(shape, k, ids, mark)
   end
   out
 end
+
+defn Edge(shape, high, k, ids, mark)
+  (** A good value of a shape at an edge of its bounds: its lowest (high false) or its highest, as an Int at its Min or
+      Max, a text of Min or Max bytes, a list of Min or Max items. *)
+  kind = shape.Kind
+  if kind == "int" or kind == "float" or kind == "money"
+    return if high shape.Max else shape.Min end
+  end
+  if kind == "text"
+    return fit(mark, if high shape.Max else shape.Min end, if high shape.Max else shape.Min end)
+  end
+  if kind == "list"
+    n = if high shape.Max else shape.Min end
+    return if n == 0 [] else [Edge(shape.Of, high, k + j, ids, mark) for j in 1..n] end
+  end
+  if kind == "record"
+    out = {}
+    for p in dict.Pairs(shape.Fields)
+      out[p.Key] = Edge(p.Value, high, k, ids, mark)
+    end
+    return out
+  end
+  Sample(shape, k, ids, mark)
+end
+
+defn Edges(shape, k, ids, mark)
+  (** Good values at the edges: the whole value at its lowest and at its highest, then each field of a record alone at
+      its lowest and its highest, the others as Sample gives them. *)
+  out = [Edge(shape, false, k, ids, mark), Edge(shape, true, k, ids, mark)]
+  if shape.Kind == "record"
+    good = Sample(shape, k, ids, mark)
+    for p in dict.Pairs(shape.Fields)
+      for high in [false, true]
+        x = good
+        x[p.Key] = Edge(p.Value, high, k, ids, mark)
+        out = list.Append(x, out)
+      end
+    end
+  end
+  out
+end

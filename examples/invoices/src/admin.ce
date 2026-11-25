@@ -1,0 +1,5 @@
+(** Makes a super-admin of the platform: APP_ADMIN_EMAIL=... APP_ADMIN_PASSWORD=... cesia do admin. *)
+use deps/www-celestial/centauri/src/auth
+use src/invoices
+
+auth.Admin(invoices.App)

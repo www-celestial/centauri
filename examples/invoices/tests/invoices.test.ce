@@ -1,0 +1,207 @@
+(** The invoices on Centauri, through their contract, as a page or a program calls them: the tests of the app of
+    Cepheus's book (its store and its web), on an app in memory, and the three tests that Centauri makes of any app. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/apptest
+use src/invoices
+use src/invoices/endpoints as e
+use std/bug
+use std/dict
+use std/fiber
+use std/http
+use std/list
+use std/result
+use std/text
+use std/value
+
+now = 1794528000   (* 2026-11-13 00:00 UTC *)
+
+defn office()
+  (** An office: its owner Ada, two clients, three invoices of Ada Martin (one due already). *)
+  t = apptest.Start(invoices.App, now = now)?
+  ada = t.SignUp({Email: "ada@example.com", Password: "correct horse battery", Name: "Ada", Tenant: "Martin & Co"})?
+  am = ada.Call(e.AddClient, {Name: "Ada Martin", Email: "Ada@Example.com", City: "Lyon"})?
+  bo = ada.Call(e.AddClient, {Name: "Élodie Bo", Email: "bo@example.com", City: "Paris"})?
+  lines = [{Label: "Design", Quantity: 3, Price: 400}, {Label: "Hosting", Quantity: 1, Price: 80.5}]
+  one = ada.Call(e.AddInvoice, {Client: am.Id, Date: "2026-10-01", Due: "2026-10-31", Lines: lines})?
+  two = ada.Call(e.AddInvoice, {Client: am.Id, Date: "2026-10-01", Due: "2026-12-01", Lines: lines})?
+  three = ada.Call(e.AddInvoice, {Client: am.Id, Date: "2026-10-01", Due: "2026-12-01", Lines: lines})?
+  result.Ok({T: t, Ada: ada, Am: am.Id, Bo: bo.Id, One: one, Two: two, Three: three})
+end
+
+defn accountant(s)
+  (** An accountant of the office, invited by its owner. *)
+  code = s.Ada.Call(api.Invite, {Email: "bo@example.com", Roles: ["accountant"]})?.Code
+  s.T.Anyone().Call(api.SignUp, {Email: "bo@example.com", Password: "another long secret", Name: "Bo", Invite: code})?
+  s.T.SignIn("bo@example.com", "another long secret")
+end
+
+numbers(page) = [r.Number for r in page.Rows]
+
+defn isClientChecked()
+  s = office()?
+  bad = s.Ada.Call(e.AddClient, {Name: "", Email: "nobody", City: text.Repeat(81, "a")})
+  bug.Assert(value.Equal(list.Sort(dict.Keys(bad.Error.Fields)), ["City", "Email", "Name"]), "three wrong fields: $(bad.Error)")
+  c = s.Ada.Call(e.Client, {id: s.Am})?.Client
+  c.Name == "Ada Martin" and c.Email == "ada@example.com"
+end
+
+defn isEmailUniqueInAnOffice()
+  s = office()?
+  again = s.Ada.Call(e.AddClient, {Name: "Other", Email: "ada@example.com"})
+  elsewhere = s.T.SignUp({Email: "zoe@example.com", Password: "correct horse zoe", Name: "Zoé"})?.Call(e.AddClient, {Name: "Ada", Email: "ada@example.com"})
+  again.Error.Status == 409 and again.Error.Fields.Email == "Another client has this e-mail." and result.IsOk(elsewhere)
+end
+
+defn isInvoiceMadeWithItsLines()
+  s = office()?
+  inv = s.Ada.Call(e.Invoice, {id: s.One.Id})?
+  bug.Assert(s.One.Number == 1 and s.Two.Number == 2 and s.Three.Number == 3, "numbers follow")
+  inv.Total == 1280.5 and inv.Status == "unpaid" and value.Len(inv.Lines) == 2 and inv.Lines[2].Label == "Hosting" and inv.BillTo == "Ada Martin"
+end
+
+defn isInvoiceChecked()
+  s = office()?
+  bad = s.Ada.Call(e.AddInvoice, {Client: s.Am, Date: "2026-13-01", Due: "", Lines: [{Label: "A", Quantity: 0, Price: 1}]})
+  three = s.Ada.Call(e.AddInvoice, {Client: s.Am, Date: "2026-11-01", Due: "2026-11-01", Lines: [{Label: "A", Quantity: 1, Price: 1.005}]})
+  early = s.Ada.Call(e.AddInvoice, {Client: s.Am, Date: "2026-11-02", Due: "2026-11-01", Lines: [{Label: "A", Quantity: 1, Price: 1}]})
+  cents = s.Ada.Call(e.AddInvoice, {Client: s.Am, Date: "2026-11-01", Due: "2026-11-01", Lines: [{Label: "A", Quantity: 2, Price: 0.1}, {Label: "B", Quantity: 1, Price: 0.2}]})?
+  bug.Assert(value.Equal(list.Sort(dict.Keys(bad.Error.Fields)), ["Date", "Due", "Lines.1.Quantity"]), "the wrong fields: $(bad.Error.Fields)")
+  three.Error.Fields["Lines.1.Price"] != missing and early.Error.Fields.Due != missing and cents.Total == 0.4
+end
+
+defn isPaidOnce()
+  s = office()?
+  paid = s.Ada.Call(e.Pay, {id: s.One.Id})?
+  again = s.Ada.Call(e.Pay, {id: s.One.Id})
+  paid.Status == "paid" and paid.PaidAt == "2026-11-13T00:00:00Z" and again.Error.Status == 409
+end
+
+defn isPaidOnceAtTheSameMoment()
+  s = office()?
+  tasks = [fiber.Spawn(() -> s.Ada.Call(e.Pay, {id: s.Two.Id})) for k in 1..8]
+  codes = [if result.IsOk(result.Unwrap(fiber.Wait(x))) 200 else 409 end for x in tasks]
+  value.Len([c for c in codes if c == 200]) == 1
+end
+
+defn isNumberedInOrderAtOnce()
+  s = office()?
+  x = {Client: s.Bo, Date: "2026-10-01", Due: "2026-10-31", Lines: [{Label: "A", Quantity: 1, Price: 1}]}
+  tasks = [fiber.Spawn(() -> s.Ada.Call(e.AddInvoice, x)) for k in 1..20]
+  numbers = [result.Unwrap(result.Unwrap(fiber.Wait(t))).Number for t in tasks]
+  value.Equal(list.Sort(numbers), [k for k in 4..23])
+end
+
+defn isLateAndOverdue()
+  s = office()?
+  n = invoices.MarkLate(now, s.T.Db)?
+  late = s.Ada.Call(e.Invoice, {id: s.One.Id})?.Status
+  overdue = s.Ada.Call(e.Client, {id: s.Am})?.Client.Overdue
+  s.Ada.Call(e.Pay, {id: s.One.Id})?
+  n == 1 and late == "late" and overdue == true and value.IsMissing(dict.Get("Overdue", s.Ada.Call(e.Client, {id: s.Am})?.Client)) and invoices.MarkLate(now, s.T.Db)? == 0
+end
+
+defn isEditedWhileNotPaid()
+  s = office()?
+  change = {Date: "2026-10-02", Due: "2026-12-02", Lines: [{Label: "Audit", Quantity: 2, Price: 99.99}]}
+  inv = s.Ada.Call(e.EditInvoice, dict.Put("id", s.Two.Id, change))?
+  s.Ada.Call(e.Pay, {id: s.Two.Id})?
+  inv.Total == 199.98 and value.Len(inv.Lines) == 1 and s.Ada.Call(e.EditInvoice, dict.Put("id", s.Two.Id, change)).Error.Status == 409
+end
+
+defn isDeleteChecked()
+  s = office()?
+  kept = s.Ada.Call(e.DeleteClient, {id: s.Am})
+  s.Ada.Call(e.DeleteClient, {id: s.Bo})?
+  gone = s.Ada.Call(e.Client, {id: s.Bo})
+  refused = s.Ada.Call(e.AddInvoice, {Client: s.Bo, Date: "2026-10-02", Due: "2026-12-02", Lines: [{Label: "A", Quantity: 1, Price: 1}]})
+  raced = cepheus.Write([cepheus.Retract(s.Am, invoices.Client.Name, "Ada Martin")], s.T.Db)
+  s.Ada.Call(e.Pay, {id: s.One.Id})?
+  s.Ada.Call(e.DeleteInvoice, {id: s.Two.Id})?
+  bug.Assert(kept.Error.Status == 409 and gone.Error.Status == 404 and refused.Error.Status == 404, "a client with invoices stays; a deleted one is no more")
+  bug.Assert(raced.Error.Code == "invalid", "the rule refuses a delete that comes after an invoice, as a race would")
+  s.Ada.Call(e.DeleteInvoice, {id: s.One.Id}).Error.Status == 409 and s.Ada.Call(e.Invoice, {id: s.Two.Id}).Error.Status == 404
+end
+
+defn isClientsByPagesAndSearch()
+  t = apptest.Start(invoices.App)?
+  a = t.SignUp({Email: "ada@example.com", Password: "correct horse battery", Name: "Ada"})?
+  for k in 1..25
+    a.Call(e.AddClient, {Name: "Client $(100 + k)", Email: "c$k@example.com", City: "Lyon"})?
+  end
+  one = a.Call(e.Clients)?
+  two = a.Call(e.Clients, {After: one.After})?
+  found = a.Call(e.Clients, {Search: "CLIENT 11"})?
+  mail = a.Call(e.Clients, {Search: "c2"})?
+  bug.Assert(value.Len(one.Rows) == 20 and one.Rows[1].Name == "Client 101" and value.Len(two.Rows) == 5 and value.IsMissing(dict.Get("After", two)), "two pages")
+  value.Len(found.Rows) == 10 and found.Rows[1].Name == "Client 110" and value.Len(mail.Rows) == 7
+end
+
+defn isInvoicesFiltered()
+  s = office()?
+  invoices.MarkLate(now, s.T.Db)?
+  s.Ada.Call(e.Pay, {id: s.Three.Id})?
+  open = numbers(s.Ada.Call(e.Invoices, {Unpaid: true, Late: true})?)
+  soon = numbers(s.Ada.Call(e.Invoices, {Action: true})?)
+  named = numbers(s.Ada.Call(e.Invoices, {Search: "ADA M", Sort: "number"})?)
+  paid = numbers(s.Ada.Call(e.Invoices, {Paid: true})?)
+  value.Equal(open, [2, 1]) and value.Equal(soon, [1]) and value.Equal(named, [1, 2, 3]) and value.Equal(paid, [3])
+end
+
+defn isBalanceNotPaid()
+  s = office()?
+  s.Ada.Call(e.Pay, {id: s.One.Id})?
+  b = s.Ada.Call(e.Client, {id: s.Am})?.Balance
+  b.Total == 2561.0 and b.Count == 2
+end
+
+defn isDashboard()
+  s = office()?
+  invoices.MarkLate(now, s.T.Db)?
+  s.Ada.Call(e.Pay, {id: s.Two.Id})?
+  d = s.Ada.Call(e.Dashboard)?
+  d.Unpaid.Count == 2 and d.Late.Count == 1 and d.Late.Total == 1280.5 and value.Len(d.Payments) == 1 and d.Payments[1].Number == 2
+end
+
+defn isCsvOfTheFilter()
+  s = office()?
+  c = s.Ada.Call(e.AddClient, {Name: "=HYPERLINK(1)", Email: "x@example.com"})?
+  s.Ada.Call(e.AddInvoice, {Client: c.Id, Date: "2026-11-01", Due: "2026-12-01", Lines: [{Label: "Item", Quantity: 1, Price: 10}]})?
+  out = s.Ada.Send(e.Export, {Unpaid: true})
+  lines = text.Lines(out.Body)
+  bug.Assert(http.HeaderValue("content-type", out.Headers) == "text/csv; charset=utf-8" and text.Contains("attachment", http.HeaderValue("content-disposition", out.Headers)), "a CSV file")
+  value.Len(lines) == 5 and lines[1] == "number,date,due,bill_to,status,total,paid_at" and lines[5] == "4,2026-11-01,2026-12-01,'=HYPERLINK(1),unpaid,10.00,"
+end
+
+defn isAccountantSeesInvoicesOnly()
+  s = office()?
+  b = accountant(s)?
+  bug.Assert(b.Tenant == s.Ada.Tenant and value.Equal(b.Account.Roles, ["accountant"]), "Bo joined the office as an accountant")
+  [b.Send(e.Clients).Status, b.Send(e.AddClient, {Name: "X", Email: "x@example.com"}).Status, b.Send(e.Invoices).Status, b.Send(api.Members).Status] then value.Equal([403, 403, 200, 403])
+end
+
+defn isOfficesApart()
+  s = office()?
+  other = s.T.SignUp({Email: "zoe@example.com", Password: "correct horse zoe", Name: "Zoé"})?
+  [other.Send(e.Invoice, {id: s.One.Id}).Status, other.Send(e.Pay, {id: s.One.Id}).Status, value.Len(other.Call(e.Invoices)?.Rows)] then value.Equal([404, 404, 0])
+end
+
+defn isOtherOriginRefused()
+  s = office()?
+  forged = s.Ada.Raw("POST", "/clients", body = "{\"Name\":\"Mallory\",\"Email\":\"m@evil.example\"}", headers = [{Name: "origin", Value: "http://evil.example"}])
+  forged.Status == 403 and value.Len(s.Ada.Call(e.Clients)?.Rows) == 2
+end
+
+defn isSignInNeeded()
+  s = office()?
+  s.T.Anyone().Send(e.Invoices).Status == 401 and s.T.Anyone().Send(e.AddClient, {Name: "X", Email: "x@example.com"}).Status == 401
+end
+
+defn isBadCursorRefused()
+  s = office()?
+  [s.Ada.Send(e.Invoices, {After: "!!"}).Status, s.Ada.Send(e.Invoices, {After: "eyJJZCI6MX0"}).Status] then value.Equal([400, 400])
+end
+
+isIsolated() = apptest.Isolated(invoices.App)?
+isFuzzed() = apptest.Fuzz(invoices.App, cases = 2)?
+isSurfaceKept() = apptest.Surface(invoices.App, ".cesia/surface.json")?

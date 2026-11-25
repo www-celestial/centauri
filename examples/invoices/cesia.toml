@@ -1,0 +1,30 @@
+[project]
+name = "invoices"
+cesia = "1.3"
+
+# Centauri and Cepheus, put in deps/ by Centauri's tools/deps.sh examples/invoices until they have tagged releases.
+[deps.centauri]
+from = "github.com/www-celestial/centauri"
+version = "v0.1.0"
+take = ["src/app", "src/api", "src/auth", "src/apptest"]
+
+[deps.cepheus]
+from = "github.com/www-celestial/cepheus"
+version = "v0.1.0"
+take = ["cesia/cepheus"]
+
+# The server: the engine of Cepheus, libsodium for the passwords and the sessions, OpenSSL for https, its settings
+# (each APP_ variable that Centauri and the app read) and its port.
+[tasks.serve]
+file = "src/main.ce"
+allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", "read=/etc/invoices"]
+
+# APP_ADMIN_EMAIL=... APP_ADMIN_PASSWORD=... cesia do admin: a super-admin of the platform.
+[tasks.admin]
+file = "src/admin.ce"
+allow = ["native=cepheus", "ffi=sodium", "env", "net"]
+
+# The tests run whole apps in memory, on forks of Cepheus's Empty: no server, no network.
+[test]
+allow = ["native=cepheus", "ffi=sodium", "read=.cesia", "write=.cesia"]
+timeout = "120"

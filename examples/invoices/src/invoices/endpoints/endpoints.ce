@@ -1,0 +1,43 @@
+(** The contract of the invoices: the shapes of what comes in and goes out, and the endpoints, read by the server and
+    by the pages. A client is the admin's; an invoice the accountant's (the admin's too: admin includes accountant). *)
+use deps/www-celestial/centauri/src/api
+use std/check
+
+Statuses = ["unpaid", "late", "paid"]   (** The statuses of an invoice. *)
+Sorts = ["-number", "number", "-date", "due", "-total"]   (** The orders of the list of invoices; - is the largest first. *)
+
+ClientIn = check.Record({Name: check.Text(1, 120), Email: check.Email(), City: check.Text(0, 80, optional = true, default = "")})
+ClientOut = check.Record({Id: check.Id(), Name: check.Text(), Email: check.Email(), City: check.Text(), Overdue: check.Bool(optional = true)})
+Balance = check.Record({Total: check.Money(2), Count: check.Int(0)})
+
+AddClient = api.Post("/clients", body = ClientIn, out = ClientOut, role = "admin")
+Clients = api.Get("/clients", query = check.Record({Search: check.Text(0, 120, optional = true, default = ""),
+  Sort: check.OneOf(["name", "city"], optional = true, default = "name")}), out = api.Page(ClientOut, 20), role = "admin")
+Client = api.Get("/clients/:id", out = check.Record({Client: ClientOut, Balance: Balance}), role = "admin")
+EditClient = api.Put("/clients/:id", body = ClientIn, out = ClientOut, role = "admin")
+DeleteClient = api.Delete("/clients/:id", role = "admin")
+
+LineIn = check.Record({Label: check.Text(1, 200), Quantity: check.Int(1, 1000000), Price: check.Money(2, 0, 1000000000)})
+InvoiceIn = check.Record({Client: check.Id(), Date: check.Date(), Due: check.Date(), Lines: check.List(LineIn, 1, 50)})
+Change = check.Record({Date: check.Date(), Due: check.Date(), Lines: check.List(LineIn, 1, 50)})
+InvoiceOut = check.Record({Id: check.Id(), Number: check.Int(1), Client: check.Id(), BillTo: check.Text(), Date: check.Date(),
+  Due: check.Date(), Status: check.OneOf(Statuses), Total: check.Money(2, 0, 1e15), PaidAt: check.Time(optional = true), Lines: check.List(LineIn, 0, 50)})
+InvoiceRow = check.Record({Id: check.Id(), Number: check.Int(1), BillTo: check.Text(), Date: check.Date(), Due: check.Date(),
+  Status: check.OneOf(Statuses), Total: check.Money(2, 0, 1e15)})
+
+(** The filter of the list of invoices: the statuses wanted (none: all), Action for those late or due within a week,
+    a start of the bill-to name, a client, an order. *)
+Filter = check.Record({Unpaid: check.Bool(optional = true, default = false), Late: check.Bool(optional = true, default = false),
+  Paid: check.Bool(optional = true, default = false), Action: check.Bool(optional = true, default = false),
+  Search: check.Text(0, 120, optional = true, default = ""), Client: check.Id(optional = true), Sort: check.OneOf(Sorts, optional = true, default = "-number")})
+
+AddInvoice = api.Post("/invoices", body = InvoiceIn, out = InvoiceOut, role = "accountant")
+Invoices = api.Get("/invoices", query = Filter, out = api.Page(InvoiceRow, 20), role = "accountant")
+Export = api.Get("/invoices.csv", query = Filter, out = api.File("text/csv; charset=utf-8"), role = "accountant")
+Invoice = api.Get("/invoices/:id", out = InvoiceOut, role = "accountant")
+EditInvoice = api.Put("/invoices/:id", body = Change, out = InvoiceOut, role = "accountant")
+Pay = api.Post("/invoices/:id/pay", out = InvoiceOut, role = "accountant")
+DeleteInvoice = api.Delete("/invoices/:id", role = "accountant")
+
+Payment = check.Record({Invoice: check.Id(), PaidAt: check.Time(), Number: check.Int(1), BillTo: check.Text(), Total: check.Money(2, 0, 1e15)})
+Dashboard = api.Get("/dashboard", out = check.Record({Unpaid: Balance, Late: Balance, Payments: check.List(Payment, 0, 10)}), role = "accountant")

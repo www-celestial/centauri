@@ -1,0 +1,71 @@
+(* Clients: made, listed by pages with a search, shown with what they owe, changed, deleted while they have no invoice. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+use std/dict
+use std/list
+use std/result
+use std/text
+use std/value
+
+taken(x) = result.IsErr(x) and x.Error.Code == "unique"
+emailTaken() = app.Fail(409, "Check the fields.", fields = {Email: "Another client has this e-mail."})
+fields(x, r) = {Name: x.Name, Search: text.Fold(x.Name), Email: x.Email, Key: "$(r.User.Tenant)/$(x.Email)", City: x.City}
+
+defn addClient(r, x)
+  (** POST /clients. *)
+  made = cepheus.Insert(Client, dict.Put("Tenant", r.User.Tenant, fields(x, r)), r.Db, by = r.User.Id, why = r.Why)
+  if taken(made) emailTaken() else app.Own(Client, made?, r) end
+end
+
+defn clients(r, q)
+  (** GET /clients?Search=&Sort=: a page of the tenant's clients whose name or e-mail starts with Search. *)
+  search = text.Fold(q.Search)
+  cepheus.Find(6, (c, n, y, m, k, t) -> {
+    Where: list.Concat([[c, Client.Tenant, r.User.Tenant], [c, Client.Name, n], [c, Client.City, y], [c, Client.Email, m]],
+      if search == "" [] else [[c, Client.Search, k], cepheus.Or(cepheus.Prefix(k, search), cepheus.Prefix(m, search))] end),
+    Give: {Id: c, Name: n, City: y, Email: m}, Sort: if q.Sort == "city" [y, n, c] else [n, c] end, Limit: r.Limit, After: r.After}, r.Db)
+end
+
+defn balance(id, db)
+  (** What a client owes: the sum and the count of its invoices not paid. *)
+  rows = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Client, id], [i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])],
+    Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db)?
+  result.Ok(if value.Len(rows) == 0 {Total: 0, Count: 0} else rows[1] end)
+end
+
+defn client(r)
+  (** GET /clients/:id: the client and what it owes. *)
+  c = app.Own(Client, r.Params.id, r)?
+  {Client: c, Balance: balance(c.Id, r.Db)?}
+end
+
+defn editClient(r, x)
+  (** PUT /clients/:id. *)
+  id = app.Own(Client, r.Params.id, r)?.Id
+  done = cepheus.Update(Client, id, fields(x, r), r.Db, by = r.User.Id, why = r.Why)
+  if taken(done)
+    return emailTaken()
+  end
+  done?
+  app.Own(Client, id, r)
+end
+
+defn deleteClient(r)
+  (** DELETE /clients/:id: a client without invoices; the rule NoInvoiceOfDeleted refuses the group if one came meanwhile. *)
+  c = app.Own(Client, r.Params.id, r)?
+  if balanceCount(c.Id, r.Db)? > 0
+    return app.Fail(409, "This client has invoices: it stays.")
+  end
+  done = cepheus.Write(list.Concat([cepheus.Expect(c.Id, Client.Name, c.Name)], app.Gone(Client, c.Id, r.Db)?), r.Db, by = r.User.Id, why = r.Why)
+  if result.IsErr(done) and done.Error.Code == "invalid"
+    return app.Fail(409, "An invoice of this client came meanwhile: it stays.")
+  end
+  done?
+  result.Ok(missing)
+end
+
+defn balanceCount(id, db)
+  (** How many invoices a client has, paid or not. *)
+  rows = cepheus.Find(1, i -> {Where: [[i, Invoice.Client, id]], Give: {N: cepheus.Count()}}, db)?
+  result.Ok(if value.Len(rows) == 0 0 else rows[1].N end)
+end
