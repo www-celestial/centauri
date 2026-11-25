@@ -1,0 +1,338 @@
+(* Files: an upload read as it comes (std/http's bodies in pieces), its type checked by its first bytes, stored in
+   Cepheus's vault by parts of UploadPart bytes (each a Put: compressed, sealed under the key of its owner, the tenant,
+   stored once), and read back by ranges (Range, 206). Cepheus has no Put of a file in pieces yet, so a file is its
+   parts, joined by a thing of the app's kind of files; a fork holds no file, so in a test or in dev without a server
+   the parts are facts of the fork. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+defn Files(name)
+  (** A kind of files of the app, as scans of invoices: each thing a file, with its tenant, its name, its size, its
+      media type (checked by its first bytes), its parts (their ids, in order, and the size of each but the last), its
+      owner (the thing whose key seals its bytes: the tenant, unless the handler says otherwise) and when it came.
+      Erasing the owner's key (cepheus.Erase) makes every file of his unreadable, everywhere.
+
+        Files("scan")["name"] --> "scan" *)
+  Kind(name, {Tenant: cepheus.Link(), Name: cepheus.Text(), Size: cepheus.Int(), Type: cepheus.Text(), Parts: cepheus.Text(),
+    PartSize: cepheus.Int(), Owner: cepheus.Link(), Created: cepheus.Date()})
+end
+
+(* The first bytes of the types an upload may declare, as their formats define them: a declared type is believed only
+   when its first bytes say so (the Content-Type of a client is never a proof). *)
+magic = {"application/pdf": ["%PDF-"], "image/png": [text.FromBytes([137, 80, 78, 71, 13, 10, 26, 10])],
+  "image/jpeg": [text.FromBytes([255, 216, 255])], "image/gif": ["GIF87a", "GIF89a"], "application/zip": [text.FromBytes([80, 75, 3, 4])],
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [text.FromBytes([80, 75, 3, 4])],
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [text.FromBytes([80, 75, 3, 4])],
+  "application/vnd.oasis.opendocument.text": [text.FromBytes([80, 75, 3, 4])], "application/gzip": [text.FromBytes([31, 139])]}
+
+(* The types whose content is text: believed when the first bytes are UTF-8 without a NUL. *)
+textual = ["text/plain", "text/csv", "application/json", "text/markdown"]
+
+defn baseType(t)
+  (** A media type without its parameters, in small letters: "text/csv; charset=utf-8" is text/csv. *)
+  if not value.IsText(t)
+    return ""
+  end
+  text.Lower(text.Trim(text.Split(";", t)[1]))
+end
+
+defn Sniffed(declared, first)
+  (** Do the first bytes of a file say it is of its declared type: true for a type of known first bytes that match,
+      or of text with first bytes of UTF-8 and no NUL, or a type that has none (application/octet-stream); false else.
+
+        Sniffed("application/pdf", "%PDF-1.7 ...") --> true
+        Sniffed("application/pdf", "<html><script>") --> false
+        Sniffed("text/csv", "a,b\n1,2\n") --> true *)
+  t = baseType(declared)
+  if dict.Has(t, magic)
+    return list.Any([text.StartsWith(m, first) for m in magic[t]])
+  end
+  if t == "image/webp"
+    return text.ByteLength(first) >= 12 and text.StartsWith("RIFF", first) and text.ByteSlice(9, 12, first) == "WEBP"
+  end
+  if t in textual
+    cut = text.ByteSlice(1, list.Min([text.ByteLength(first), 4096]), first)
+    return text.IsUtf8(validPrefix(cut)) and not text.Contains(text.FromBytes([0]), cut)
+  end
+  t == "application/octet-stream"
+end
+
+defn validPrefix(s)
+  (** A text cut to its first bytes, without the last character when the cut split it. *)
+  k = text.ByteLength(s)
+  while k > 0 and not text.IsUtf8(text.ByteSlice(1, k, s)) and text.ByteLength(s) - k < 4
+    k -= 1
+  end
+  if k == 0 "" else text.ByteSlice(1, k, s) end
+end
+
+defn FileName(given)
+  (** The name of an uploaded file as it is kept: its last part (no folder, nothing that climbs out of one), without
+      control characters, quotes or backslashes, 200 bytes at most; "file" when nothing is left.
+
+        FileName("../../etc/passwd") --> "passwd"
+        FileName("C:\\Users\\ana\\scan 1.pdf") --> "scan 1.pdf"
+        FileName("a\"b\r\nc.pdf") --> "abc.pdf" *)
+  if not value.IsText(given) or not text.IsUtf8(given)
+    return "file"
+  end
+  last = text.Split("/", text.Replace("\\", "/", given))
+  name = last[value.Len(last)]
+  kept = text.FromBytes([b for b in text.Bytes(name) if b >= 32 and b != 127 and b != 34])
+  kept = text.Trim(kept)
+  if text.ByteLength(kept) > 200
+    kept = validPrefix(text.ByteSlice(1, 200, kept))
+  end
+  if kept == "" or kept == "." or kept == ".." "file" else kept end
+end
+
+defn pieces(first, rest)
+  (** A reader that gives first, then what rest() gives. *)
+  ch = fiber.Channel()
+  if first != ""
+    fiber.Send(result.Ok(first), ch)
+  end
+  fiber.Close(ch)
+  () -> nextPiece(ch, rest)
+end
+
+defn nextPiece(ch, rest)
+  got = fiber.Receive(ch, timeout = 0)
+  if result.IsOk(got) got.Value else rest() end
+end
+
+defn whole(body)
+  (** A reader of a body that came whole. *)
+  pieces(body, () -> result.Ok(""))
+end
+
+defn upload(e, req, env)
+  (** The file of a request to an upload endpoint, checked: an Ok of {Name, Type, Size, Read}, Read giving its bytes
+      in pieces, or an Err: 415 for a type the endpoint doesn't take or that its first bytes contradict, 413 past its
+      most, 400 for a body cut short. *)
+  declared = baseType(http.HeaderValue("content-type", req.Headers))
+  if not (declared in [baseType(t) for t in e.Types])
+    return Fail(415, "This file is of a type the endpoint doesn't take: $(text.Join(", ", e.Types)).")
+  end
+  streamed = dict.Has("Read", req)
+  size = if streamed req.Size else text.ByteLength(req.Body) end
+  if size > e.Most
+    return Fail(413, "This file is larger than $(e.Most) bytes.")
+  end
+  read = if streamed req.Read else whole(req.Body) end
+  first = ""
+  while text.ByteLength(first) < 4096 and text.ByteLength(first) < size
+    p = read()
+    if result.IsErr(p)
+      return Fail(400, "The file was cut short.")
+    end
+    if p.Value == ""
+      break
+    end
+    first = "$first$(p.Value)"
+  end
+  if size > 0 and not Sniffed(declared, first)
+    return Fail(415, "This file is no $declared: its first bytes say otherwise.")
+  end
+  q = req.Query
+  result.Ok({Name: FileName(if value.IsDict(q) dict.Get("name", q) else missing end), Type: declared, Size: size, Read: pieces(first, read)})
+end
+
+defn putPart(bytes, n, owner, r)
+  (** A part of a file: an Ok of its id, a file of the vault, or a fact of a fork. *)
+  if r.Env.Forked
+    return cepheus.Insert(Bytes, {Bytes: bytes}, r.Db, by = if value.IsMissing(r.User) 0 else r.User.Id end, why = r.Why)
+  end
+  cepheus.Put(Parts, "$n", bytes, r.Db, owner = owner, by = if value.IsMissing(r.User) 0 else r.User.Id end, why = r.Why)
+end
+
+defn Store(kind, file, r, owner = missing, fields = {})
+  (** Stores an uploaded file, as it comes, by parts of UploadPart bytes, then its thing of a kind of Files, in the
+      tenant of who asks, sealed under the key of owner (the tenant unless given), with more fields of the kind if
+      given: an Ok of its id. The file is never whole in memory: one part at most. A file cut short, or a part the
+      database refuses, leaves no file (its parts written are deleted). *)
+  size = r.Settings.UploadPart
+  key = if value.IsMissing(owner) dict.GetOr("Tenant", 0, if value.IsMissing(r.User) {} else r.User end) else owner end
+  key = if value.IsMissing(key) 0 else key end
+  ids = []
+  held = []
+  heldBytes = 0
+  total = 0
+  failed = missing
+  while value.IsMissing(failed)
+    p = file.Read()
+    if result.IsErr(p)
+      failed = Fail(400, "The file was cut short.")
+      break
+    end
+    piece = p.Value
+    if piece == ""
+      break
+    end
+    total += text.ByteLength(piece)
+    held = list.Append(piece, held)
+    heldBytes += text.ByteLength(piece)
+    while heldBytes >= size
+      joined = text.Join("", held)
+      part = text.ByteSlice(1, size, joined)
+      left = if text.ByteLength(joined) > size text.ByteSlice(size + 1, text.ByteLength(joined), joined) else "" end
+      made = putPart(part, value.Len(ids) + 1, key, r)
+      if result.IsErr(made)
+        failed = made
+        break
+      end
+      ids = list.Append(made.Value, ids)
+      held = if left == "" [] else [left] end
+      heldBytes = text.ByteLength(left)
+    end
+  end
+  if value.IsMissing(failed) and heldBytes > 0
+    made = putPart(text.Join("", held), value.Len(ids) + 1, key, r)
+    if result.IsErr(made)
+      failed = made
+    else
+      ids = list.Append(made.Value, ids)
+    end
+  end
+  if value.IsMissing(failed) and total != file.Size
+    failed = Fail(400, "The file was cut short: $total of its $(file.Size) bytes came.")
+  end
+  if not value.IsMissing(failed)
+    dropParts(ids, r)
+    return failed
+  end
+  data = dict.Merge(fields, {Tenant: dict.Get("Tenant", if value.IsMissing(r.User) {} else r.User end), Name: file.Name, Size: total, Type: file.Type,
+    Parts: text.Join(" ", ["$i" for i in ids]), PartSize: size, Owner: key, Created: r.Now})
+  made = cepheus.Write(Facts(kind, cepheus.New(1), data), r.Db, by = if value.IsMissing(r.User) 0 else r.User.Id end, why = r.Why)
+  made = if result.IsOk(made) result.Ok(made.Value.Things[1]) else made end
+  if result.IsErr(made)
+    dropParts(ids, r)
+  end
+  made
+end
+
+defn dropParts(ids, r)
+  (** The parts of a file that won't be: deleted, as well as can be. *)
+  for id in ids
+    if r.Env.Forked
+      ops = Gone(Bytes, id, r.Db)
+      if result.IsOk(ops) and value.Len(ops.Value) > 0
+        _ = cepheus.Write(ops.Value, r.Db, why = r.Why)
+      end
+    else
+      _ = cepheus.Delete(Parts, id, r.Db, why = r.Why)
+    end
+  end
+end
+
+defn Range(header, size)
+  (** The bytes a Range header asks of a file of size bytes: {From, To} (from 0, both included) for one range, missing
+      for the whole file (no header, or one this server reads as the whole: several ranges, a unit not bytes, a
+      syntax it doesn't know, as RFC 9110 allows), or {Unsatisfied: true} when it starts past the end.
+
+        Range("bytes=0-99", 1000) --> {From: 0, To: 99}
+        Range("bytes=900-", 1000) --> {From: 900, To: 999}
+        Range("bytes=-100", 1000) --> {From: 900, To: 999}
+        Range("bytes=1000-", 1000) --> {Unsatisfied: true}
+        Range("bytes=0-1,5-9", 1000) --> missing *)
+  if not value.IsText(header) or not text.StartsWith("bytes=", text.Lower(text.Trim(header)))
+    return missing
+  end
+  spec = text.Trim(text.ByteSlice(7, text.ByteLength(text.Trim(header)), text.Trim(header)))
+  if text.Contains(",", spec)
+    return missing
+  end
+  ends = text.Split("-", spec)
+  if value.Len(ends) != 2
+    return missing
+  end
+  a = text.Trim(ends[1])
+  b = text.Trim(ends[2])
+  if a == ""
+    if not allDigits(b) or text.Number(b) == 0
+      return if allDigits(b) {Unsatisfied: true} else missing end
+    end
+    n = list.Min([text.Number(b), size])
+    return if size == 0 {Unsatisfied: true} else {From: size - n, To: size - 1} end
+  end
+  if not allDigits(a) or (b != "" and not allDigits(b))
+    return missing
+  end
+  from = text.Number(a)
+  to = if b == "" size - 1 else list.Min([text.Number(b), size - 1]) end
+  if from >= size
+    return {Unsatisfied: true}
+  end
+  if to < from missing else {From: from, To: to} end
+end
+
+allDigits(s) = text.ByteLength(s) > 0 and text.ByteLength(s) <= 15 and value.IsMissing(text.ByteFindAny("0123456789", 1, s, not = true))   (* A number of digits only. *)
+
+defn readPart(id, from, n, r)
+  (** n bytes of a part from its byte from (from 0). *)
+  if r.Env.Forked
+    b = cepheus.Get(Bytes, id, r.Db)?
+    return result.Ok(text.ByteSlice(from + 1, from + n, b.Bytes))
+  end
+  cepheus.Read(Parts, id, r.Db, from = from, len = n)
+end
+
+defn disposition(name)
+  (** The Content-Disposition of a download: attachment, the name in ASCII for old clients and in UTF-8 as RFC 6266
+      and RFC 8187 write it. *)
+  plainName = text.FromBytes([if b >= 32 and b < 127 and b != 34 and b != 92 and b != 59 b else 95 end for b in text.Bytes(name)])
+  "attachment; filename=\"$plainName\"; filename*=UTF-8''$(encode.UrlEncode(name))"
+end
+
+defn Download(kind, id, r)
+  (** The answer that sends a file of a kind of Files of the tenant of who asks, or the range its Range header asks
+      (206), read part by part as it goes: never whole in memory. It is an attachment (no page opens it in the app's
+      origin), its type never sniffed by the browser, under a policy that forbids scripts if it is opened anyway. An
+      Ok of the answer, or a 404 for another tenant's file. *)
+  f = Own(kind, id, r)?
+  size = f.Size
+  asked = Range(http.HeaderValue("range", r.Headers), size)
+  headers = [{Name: "content-type", Value: f.Type}, {Name: "content-disposition", Value: disposition(f.Name)},
+    {Name: "x-content-type-options", Value: "nosniff"}, {Name: "content-security-policy", Value: "sandbox; default-src 'none'"},
+    {Name: "accept-ranges", Value: "bytes"}, {Name: "cache-control", Value: "private, no-store"}]
+  if not value.IsMissing(asked) and dict.Has("Unsatisfied", asked)
+    return result.Ok(Raw({Status: 416, Body: "", Headers: list.Append({Name: "content-range", Value: "bytes */$size"}, headers)}))
+  end
+  from = if value.IsMissing(asked) 0 else asked.From end
+  to = if value.IsMissing(asked) size - 1 else asked.To end
+  status = if value.IsMissing(asked) 200 else 206 end
+  if status == 206
+    headers = list.Append({Name: "content-range", Value: "bytes $from-$to/$size"}, headers)
+  end
+  ids = [text.Number(x) for x in text.Split(" ", dict.GetOr("Parts", "", f)) if x != ""]
+  part = f.PartSize
+  result.Ok(Raw(http.Stream(send -> sending(send, ids, part, from, to, r), status = status, headers = headers)))
+end
+
+defn sending(send, ids, part, from, to, r)
+  (** The bytes from..to of a file, part by part, each read only for its range. *)
+  at = from
+  while at <= to
+    k = math.Div(at, part)
+    off = at - k * part
+    n = list.Min([part - off, to - at + 1])
+    bytes = readPart(ids[k + 1], off, n, r)?
+    send(bytes)?
+    at += n
+  end
+  result.Ok(missing)
+end
+
+(** A handler's answer given as it is, an HTTP response of std/http (a file, a stream), with Centauri's headers of
+    security added to it.
+
+      Raw({Status: 204, Body: "", Headers: []}).CentauriRaw --> true *)
+Raw(response) = {CentauriRaw: true, Response: response}

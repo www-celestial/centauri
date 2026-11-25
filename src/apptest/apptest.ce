@@ -12,6 +12,7 @@ use src/auth
 use src/jobs
 use std/dict
 use std/encode
+use std/fiber
 use std/http
 use std/json
 use std/list
@@ -83,7 +84,7 @@ defn raw(t, method, target, body, headers, cookie, ip)
   if not value.IsMissing(cookie)
     h = list.Append({Name: "cookie", Value: cookie}, h)
   end
-  if body != ""
+  if body != "" and value.IsMissing(http.HeaderValue("content-type", headers))
     h = list.Append({Name: "content-type", Value: "application/json"}, h)
   end
   t.Handle({Method: method, Path: parts[1], Query: if value.Len(parts) > 1 parts[2] else "" end, Headers: h, Body: body, Peer: ip})
@@ -112,6 +113,23 @@ defn Request(e, x)
     return {Method: e.Method, Path: if q == "" path else "$path?$q" end, Body: ""}
   end
   {Method: e.Method, Path: path, Body: if value.IsMissing(e.In) and value.Len(rest) == 0 "" else json.Text(rest) end}
+end
+
+defn Drained(response)
+  (** The body of a response, its pieces gathered when it is a stream (http.Stream, as a file app.Download sends): a
+      text. *)
+  if not dict.Has("Stream", response)
+    return response.Body
+  end
+  box = fiber.Channel()
+  done = fiber.Wait(fiber.Spawn(() -> response.Stream(piece -> keepPiece(piece, box))))
+  fiber.Close(box)
+  text.Join("", [p for p in box])
+end
+
+defn keepPiece(piece, box)
+  fiber.Send(piece, box)
+  result.Ok(missing)
 end
 
 defn Answer(response)

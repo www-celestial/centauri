@@ -17,8 +17,15 @@ Event = Kind("centauri_event", {At: cepheus.Date(), Kind: cepheus.Text(), User: 
 (** A counter: Key, unique, names it (a tenant's invoices: "70001/invoice"); Last is the last number it gave. *)
 Counter = Kind("centauri_counter", {Key: cepheus.Text(unique = true), Last: cepheus.Int()})
 
+(** The parts of the files of every app (files.ce), in the vault of Cepheus. *)
+Parts = cepheus.Files("centauri_part") then dict.Put("name", "centauri_part") then dict.Put("fields", {Name: cepheus.Text(), Size: cepheus.Int(),
+  Type: cepheus.Text(), Owner: cepheus.Link(), Content: cepheus.Text()})
+
+(** The parts of the files in a fork, which holds no file: their bytes as facts. *)
+Bytes = Kind("centauri_bytes", {Bytes: cepheus.Text()})
+
 (** The kinds of package app. *)
-Kinds = [Event, Counter]
+Kinds = [Event, Counter, Parts, Bytes]
 
 defn IdOf(x)
   (** An id from outside, as a parameter of a path: an Int above 0 from a whole number or its digits, else missing.

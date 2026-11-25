@@ -166,7 +166,7 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   served = [rated(b) for b in list.Concat(adminOfApp(), a.Served)]
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
   guards = Guards(s.Csp, text.StartsWith("https://", s.Origin))
-  env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles,
+  env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
     Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
     Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: guards,
     Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
@@ -186,14 +186,14 @@ defn rated(b)
   status = api.Done(e)
   {Endpoint: e, Handler: b.Handler, Module: b.Module, Rate: if value.IsMissing(e.Limit) missing else dict.Put("Name", e.Name, rateOf(e.Limit, 60, e.Limit)) end,
     Size: if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end, Status: status, Labels: {route: e.Name, status: status},
-    Takes: not value.IsMissing(e.In) or not value.IsMissing(e.Query), Out: if value.IsDict(e.Out) and dict.Get("Kind", e.Out) != "file" outOf(e.Out) else missing end}
+    Takes: not value.IsMissing(e.In) or not value.IsMissing(e.Query), Upload: dict.Has("Types", e), Out: if value.IsDict(e.Out) and dict.Get("Kind", e.Out) != "file" outOf(e.Out) else missing end}
 end
 
 defn App(env)
   (** The app as std/http serves it: its routes behind Centauri's door. *)
   routes = http.App()
   for b in env.Served
-    routes = http.Route(b.Endpoint.Method, b.Endpoint.Path, req -> answer(b, req, env), routes)
+    routes = http.Route(b.Endpoint.Method, b.Endpoint.Path, req -> answer(b, req, env), routes, stream = dict.Get("Most", b.Endpoint))
   end
   if env.Profile.OpenApi
     routes = http.Get("/openapi.json", req -> openapi(env), routes)

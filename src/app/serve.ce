@@ -9,6 +9,7 @@ use std/check
 use std/crypto
 use std/dict
 use std/encode
+use std/fiber
 use std/http
 use std/json
 use std/list
@@ -329,13 +330,28 @@ defn served(b, e, req, env, rid)
   r = {Method: req.Method, Path: req.Path, Params: req.Params, Query: req.Query, Headers: req.Headers, Cookies: req.Cookies, Body: req.Body, Ip: req.Ip,
     Id: rid, Route: e.Name, User: user, Db: db, Why: "$(e.Name) #$rid", Settings: s, Now: d.Now, Keys: env.Keys,
     Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
-  got = if value.IsMissing(e.In) and value.IsMissing(e.Query) b.Handler(r) else b.Handler(r, x.Value) end
+  got = missing
+  if b.Upload
+    if not Take("upload", s.UploadsAtOnce, env.State)
+      return failed({Kind: "api", Status: 503, Message: "Too many files are coming at once: send it again in a moment."}, rid, env, e)
+    end
+    file = upload(e, req, env)
+    got = if result.IsErr(file) file else b.Handler(r, file.Value) end
+    Give("upload", env.State)
+  else
+    got = if value.IsMissing(e.In) and value.IsMissing(e.Query) b.Handler(r) else b.Handler(r, x.Value) end
+  end
   wrote = not value.IsMissing(before) and probe(db) != before + 1
   if not reads and not value.IsMissing(user) and b.Module == env.WhoModule
     forget(env.State)   (* a write of the accounts by a signed-in user, as a sign-out or a role changed: read again *)
   end
+  streams = result.IsOk(got) and value.IsDict(got.Value) and dict.Has("CentauriRaw", got.Value) and dict.Has("Stream", got.Value.Response)
   if not value.IsMissing(before)
-    cepheus.Close(db)   (* a fork is kept until it is closed: one a GET would grow the process without end *)
+    if streams
+      got = result.Ok(closedAfter(got.Value, db))   (* a file read as it goes reads its fork to its end *)
+    else
+      cepheus.Close(db)   (* a fork is kept until it is closed: one a GET would grow the process without end *)
+    end
   end
   if result.IsErr(got)
     return failed(got.Error, rid, env, e)
@@ -345,6 +361,16 @@ defn served(b, e, req, env, rid)
     return failed({Kind: "api", Status: 500, Message: "$(e.Name) wrote to the database: a GET only reads (A06)."}, rid, env, e)
   end
   v = if result.IsOk(got) got.Value else got end
+  if value.IsDict(v) and dict.Has("CentauriRaw", v)
+    out = v.Response
+    out.Route = e.Name
+    out.Done = true
+    if not value.IsMissing(user)
+      out.User = user.Id
+    end
+    metrics.Add("centauri_requests_total", labels = {route: e.Name, status: out.Status})
+    return out
+  end
   extra = []
   status = b.Status
   if value.IsDict(v) and dict.Has("CentauriReply", v)
@@ -377,6 +403,22 @@ defn served(b, e, req, env, rid)
 end
 
 nothing = result.Ok(missing)   (* The input of an endpoint that takes none. *)
+
+defn closedAfter(raw, db)
+  (** A raw answer whose body goes in pieces, the fork of its GET closed once the last piece went, or the client left. *)
+  produce = raw.Response.Stream
+  out = raw
+  response = raw.Response
+  response.Stream = send -> streamedThenClosed(produce, send, db)
+  out.Response = response
+  out
+end
+
+defn streamedThenClosed(produce, send, db)
+  got = fiber.Wait(fiber.Spawn(() -> produce(send)))
+  cepheus.Close(db)
+  if result.IsOk(got) got.Value else got end
+end
 
 (* The kinds of std/check that check.Out gives as they are. *)
 plain = {text: true, int: true, float: true, money: true, bool: true, email: true, id: true, url: true, oneof: true}

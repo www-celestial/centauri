@@ -59,8 +59,10 @@ Patch(path, body = missing, out = missing, role = Signed, name = missing, limit 
       Delete("/notes/:id").Method --> "DELETE" *)
 Delete(path, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("DELETE", path, missing, missing, out, role, name, limit, about)
 
-(** A POST endpoint that takes a file as its body, of one of these media types and at most most bytes. Centauri serves
-    it from L2, with the body read in pieces; its contract is here already, so that pages can name it.
+(** A POST endpoint that takes a file as its body, of one of these media types and at most most bytes, its name in the
+    query (?name=scan.pdf). Centauri reads the body in pieces as it comes, never whole, checks its type by its first
+    bytes, and gives the handler handler(r, file), file {Name, Type, Size, Read}, which app.Store keeps in the vault
+    of Cepheus.
 
       Upload("/invoices/:id/scan", ["application/pdf"]).Most --> 10485760 *)
 Upload(path, types, most = 10485760, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("POST", path, missing, missing, out, role, name, limit, about, more = {Types: types, Most: most})
@@ -107,12 +109,12 @@ defn param(name, where, required, schema)
   out
 end
 
-(** The status of an endpoint's answer when it works: 201 for a POST with a body (something was made), 204 for an
-    endpoint with no out, else 200.
+(** The status of an endpoint's answer when it works: 201 for a POST with a body or a file (something was made), 204
+    for an endpoint with no out, else 200.
 
       Done(Post("/notes", body = check.Record({Text: check.Text()}), out = check.Id())) --> 201
       Done(Delete("/notes/:id")) --> 204 *)
-Done(e) = if value.IsMissing(e.Out) 204 else if e.Method == "POST" and not value.IsMissing(e.In) 201 else 200 end
+Done(e) = if value.IsMissing(e.Out) 204 else if e.Method == "POST" and (not value.IsMissing(e.In) or dict.Has("Types", e)) 201 else 200 end
 
 defn operation(e)
   (** The OpenAPI operation of an endpoint: its parameters, its body, its answers, its security. *)
@@ -138,7 +140,8 @@ defn operation(e)
     op.requestBody = {required: true, content: {"application/json": {schema: check.Schema(e.In)}}}
   end
   if dict.Has("Types", e)
-    op.requestBody = {required: true, content: dict.Dict([{Key: t, Value: {schema: {type: "string", format: "binary"}}} for t in e.Types])}
+    op.requestBody = {required: true, content: dict.Dict([{Key: t, Value: {schema: {type: "string", format: "binary", maxLength: e.Most}}} for t in e.Types])}
+    op.parameters = list.Append(param("name", "query", false, {type: "string", maxLength: 200}), op.parameters)
   end
   op.security = if e.Role == Public [] else [{session: []}] end
   if e.Role != Public and e.Role != Signed

@@ -60,6 +60,12 @@ Slot(state) = ask(state, {Op: "slot"})
 (** Gives back a slot of the password hashes. *)
 Free(state) = fiber.Send({Op: "free"}, state)
 
+(** Takes one of most places of a name, as the uploads that run at once: true when one was free, false else. *)
+Take(name, most, state) = ask(state, {Op: "take", Name: name, Most: most})
+
+(** Gives back a place of a name that Take gave. *)
+Give(name, state) = fiber.Send({Op: "give", Name: name}, state)
+
 (** Keeps a mail of a test, sent by the transport test: of mail (the box holds the last 1,000). *)
 KeepMail(m, state) = fiber.Send({Op: "mail", Mail: m}, state)
 
@@ -123,6 +129,7 @@ defn own(ch, slots, most, kept, keys, clock, rates)
   fails = [0, 0]
   served = 0
   box = []
+  places = dict.Dict()
   while true
     got = fiber.Receive(ch)
     if result.IsErr(got)
@@ -326,6 +333,14 @@ defn own(ch, slots, most, kept, keys, clock, rates)
       else
         fiber.Send(fails[1] + fails[2], m.Reply)
       end
+    else if op == "take"
+      n = dict.GetOr(m.Name, 0, places)
+      if n < m.Most
+        places[m.Name] = n + 1
+      end
+      fiber.Send(n < m.Most, m.Reply)
+    else if op == "give"
+      places[m.Name] = list.Max([0, dict.GetOr(m.Name, 0, places) - 1])
     else if op == "mail"
       box = list.Append(m.Mail, if value.Len(box) >= 1000 list.Skip(1, box) else box end)
     else if op == "mails"

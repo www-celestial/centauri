@@ -1,0 +1,148 @@
+(** Files: an upload read as it comes and kept by parts, read back whole or by ranges; and what an attacker tries: a
+    file whose declared type its bytes contradict (a page of HTML sent as a PDF), a type the endpoint doesn't take, a
+    file larger than allowed, names that climb out of a folder or add a header, a range past the end or that wraps,
+    another tenant's file, many uploads at once, a body cut short. In memory (apptest), and over the network where a
+    body comes in pieces. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/check
+use std/dict
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Scans = app.Files("scan")
+Scan = api.Upload("/scans", ["application/pdf", "image/png", "text/csv"], most = 3000000, out = check.Record({Id: check.Id(), Size: check.Int(0), Name: check.Text()}), role = "member")
+Fetch = api.Get("/scans/:id", out = api.File(), role = "member")
+
+defn scan(r, file)
+  id = app.Store(Scans, file, r)?
+  f = app.Own(Scans, id, r)?
+  {Id: id, Size: f.Size, Name: f.Name}
+end
+
+Module = app.Module("scans", kinds = [Scans], serve = [app.Serve(Scan, scan), app.Serve(Fetch, r -> app.Download(Scans, r.Params.id, r))])
+App = app.Of([auth.Module(), Module], name = "scans")
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+pdf(n) = "%PDF-1.7\n$(text.Repeat(n - 9, "x"))"   (* A file whose first bytes are those of a PDF, n bytes long. *)
+
+defn up(c, body, type = "application/pdf", name = "scan.pdf")
+  (** An upload as a page sends it, and its answer. *)
+  apptest.Answer(c.Raw("POST", "/scans?name=$(name)", body = body, headers = [{Name: "content-type", Value: type}]))
+end
+
+ranged(a, id, h) = a.Raw("GET", "/scans/$id", headers = [{Name: "range", Value: h}])   (* A download of a range. *)
+
+defn isStoredByPartsAndReadByRanges()
+  t = apptest.Start(App, settings = {UploadPart: 65536})?
+  a = t.SignUp(ana)?
+  body = "%PDF-$(text.Repeat(20000, "0123456789"))"
+  got = up(a, body)?
+  f = cepheus.Get(Scans, got.Id, t.Db)?
+  bug.Assert(got.Size == text.ByteLength(body) and value.Len(text.Split(" ", f.Parts)) == 4 and f.Owner == a.Tenant, "4 parts, sealed for the tenant: $f")
+  out = a.Raw("GET", "/scans/$(got.Id)")
+  whole = apptest.Drained(out)
+  bug.Assert(out.Status == 200 and whole == body, "the whole file: $(out.Status) $(text.ByteLength(whole)) $(text.ByteSlice(1, 40, whole))")
+  bug.Assert(text.StartsWith("attachment;", http.HeaderValue("content-disposition", out.Headers)) and http.HeaderValue("x-content-type-options", out.Headers) == "nosniff" and
+    text.StartsWith("sandbox", http.HeaderValue("content-security-policy", out.Headers)), "an attachment, never sniffed, no script: $(out.Headers)")
+  across = ranged(a, got.Id, "bytes=65530-65545")
+  bug.Assert(across.Status == 206 and apptest.Drained(across) == text.ByteSlice(65531, 65546, body) and
+    http.HeaderValue("content-range", across.Headers) == "bytes 65530-65545/$(text.ByteLength(body))", "a range across two parts")
+  last = ranged(a, got.Id, "bytes=-10")
+  bug.Assert(apptest.Drained(last) == text.ByteSlice(text.ByteLength(body) - 9, text.ByteLength(body), body), "the last 10 bytes")
+  past = ranged(a, got.Id, "bytes=999999999-")
+  bug.Assert(past.Status == 416 and http.HeaderValue("content-range", past.Headers) == "bytes */$(text.ByteLength(body))", "a range past the end")
+  several = ranged(a, got.Id, "bytes=0-1,5-9")
+  huge = ranged(a, got.Id, "bytes=0-99999999999999999999")
+  several.Status == 200 and huge.Status == 200 and apptest.Drained(huge) == body
+end
+
+defn isTypeTrustedByItsBytesOnly()
+  (** The Content-Type of a client is no proof: a page of HTML sent as a PDF, a script sent as a PNG are refused; a
+      type the endpoint doesn't take too, and a CSV must be text. *)
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  html = up(a, "<html><script>alert(document.cookie)</script></html>")
+  png = up(a, "%PDF-1.7 a pdf sent as a png", type = "image/png")
+  page = up(a, "<html></html>", type = "text/html")
+  binary = up(a, "a,b\n$(text.FromBytes([0, 1, 2]))", type = "text/csv")
+  csv = up(a, "Client,Total\nAda,120.50\n", type = "text/csv; charset=utf-8", name = "export.csv")?
+  html.Error.Status == 415 and png.Error.Status == 415 and page.Error.Status == 415 and binary.Error.Status == 415 and csv.Size == 24
+end
+
+defn isTooLargeRefused()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  up(a, pdf(3000001)).Error.Status == 413
+end
+
+defn isNameKeptHarmless()
+  (** A name that climbs out of a folder, or holds a line end or a quote, is kept as its last part, cleaned: it names
+      no path (the bytes are in the database), and its header of download adds nothing. *)
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  got = up(a, pdf(100), name = "..%2F..%2Fetc%2Fpasswd")?
+  bug.Assert(got.Name == "passwd", "the last part: $(got.Name)")
+  odd = up(a, pdf(100), name = "a%22b%0D%0ASet-Cookie%3A%20x%3D1%3B.pdf")?
+  out = a.Raw("GET", "/scans/$(odd.Id)")
+  d = http.HeaderValue("content-disposition", out.Headers)
+  not text.Contains("\r", d) and not text.Contains("\n", d) and value.IsMissing(http.HeaderValue("set-cookie", out.Headers)) and text.Contains("abSet-Cookie", odd.Name)
+end
+
+defn isOtherTenantsFileHidden()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignUp({Email: "bo@example.com", Password: "another long secret", Name: "Bo"})?
+  got = up(a, pdf(1000))?
+  b.Raw("GET", "/scans/$(got.Id)").Status == 404 and apptest.Isolated(App)?
+end
+
+defn isUploadsAtOnceBounded()
+  t = apptest.Start(App, settings = {UploadsAtOnce: 1})?
+  a = t.SignUp(ana)?
+  bug.Assert(app.Take("upload", 1, t.Env.State), "a first upload runs")
+  busy = up(a, pdf(1000))
+  app.Give("upload", t.Env.State)
+  busy.Error.Status == 503 and result.IsOk(up(a, pdf(1000)))
+end
+
+defn isStreamedOverTheNetwork()
+  (** A server as app.Run serves it: a body of 2.5 MB, past MaxBody, comes in pieces into parts of 1 MiB; one cut
+      short leaves no file and no part. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)?
+  s = app.Read(App.Fields, {Profile: "test", Origin: "http://localhost", Pow: "off"}, defaults = App.Defaults)?
+  env = app.Start(App, s, db)?
+  l = net.Listen(0)?
+  port = net.Port(l)
+  fiber.Spawn(() -> http.Serve(app.App(env), listener = l, maxBody = 1048576, timeout = 2))
+  hostH = {Name: "host", Value: "localhost:$port"}
+  signed = http.Fetch("http://localhost:$port/auth/signup", method = "POST", body = json.Text(ana), headers = [hostH, {Name: "content-type", Value: "application/json"}])?
+  cookie = text.Split(";", http.HeaderValue("set-cookie", signed.Headers))[1]
+  body = pdf(2500000)
+  got = http.Fetch("http://localhost:$port/scans?name=big.pdf", method = "POST", body = body, headers = [hostH, {Name: "cookie", Value: cookie}, {Name: "content-type", Value: "application/pdf"}])?
+  bug.Assert(got.Status == 201, "stored: $(got.Status) $(got.Body)")
+  id = json.Parse(got.Body)!.Id
+  f = cepheus.Get(Scans, id, db)?
+  bug.Assert(f.Size == 2500000 and value.Len(text.Split(" ", f.Parts)) == 3, "3 parts: $f")
+  back = http.Fetch("http://localhost:$port/scans/$id", headers = [hostH, {Name: "cookie", Value: cookie}, {Name: "range", Value: "bytes=1048570-1048580"}])?
+  bug.Assert(back.Status == 206 and back.Body == text.ByteSlice(1048571, 1048581, body), "a range over the network: $(back.Status)")
+  before = value.Len(cepheus.Find(2, (p, b) -> {Where: [[p, app.Bytes.Bytes, b]], Give: {P: p}}, db)?)
+  c = net.Connect("127.0.0.1", port)?
+  net.Write(c, "POST /scans?name=cut.pdf HTTP/1.1\r\nHost: localhost:$port\r\nCookie: $cookie\r\nContent-Type: application/pdf\r\nContent-Length: 2500000\r\n\r\n")?
+  net.Write(c, text.ByteSlice(1, 1500000, body))?
+  sys.Sleep(3)
+  net.Close(c)
+  rows = cepheus.Find(2, (f, n) -> {Where: [[f, Scans.Name, n]], Give: {N: n}}, db)?
+  after = value.Len(cepheus.Find(2, (p, b) -> {Where: [[p, app.Bytes.Bytes, b]], Give: {P: p}}, db)?)
+  value.Len([x for x in rows if x.N == "cut.pdf"]) == 0 and after == before
+end

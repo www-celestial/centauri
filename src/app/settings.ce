@@ -36,6 +36,8 @@ Core = {
   LogLines: check.Int(10, 100000, optional = true, default = 1000),
   GetDb: check.OneOf(["fork", "read", "same"], optional = true),
   AdminPort: check.Int(0, 65535, optional = true, default = 0),
+  UploadPart: check.Int(65536, 16777216, optional = true, default = 1048576),
+  UploadsAtOnce: check.Int(1, 100000, optional = true, default = 16),
   Csp: check.Text(1, 2000, optional = true, default = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
 }
 
