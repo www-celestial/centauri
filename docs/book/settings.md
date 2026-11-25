@@ -61,6 +61,7 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_MAIL_URL`, `APP_MAIL_FROM`, `APP_MAIL_TIMEOUT`, `APP_MAIL_CA` | `log:` in dev, `test:` in test, required in prod | the transport of the mails, their sender, their deadline, the authorities of a company's server |
 | `APP_EMAIL_CHECK`, `APP_SIGN_UP_ANSWER`, `APP_CHECK_TIME`, `APP_RESET_TIME`, `APP_CHECK_PAGE`, `APP_RESET_PAGE`, `APP_MAILS_PER_HOUR` | `off`, `tell`, 2 days, 1 hour, `/check-email`, `/reset-password`, 5 | the checks of addresses and the new passwords by mail ([check](check-email.md)) |
 | `APP_HOOK_TOLERANCE`, `APP_HOOK_TIMEOUT` | 300 s, 15 s | the webhooks: how far from now a message received may be, the deadline of each try |
+| `APP_ADMIN_PATH` | `/admin` | where the admin pages are served, `off` for none ([the admin pages](admin.md)) |
 
 ## 2. Three profiles
 

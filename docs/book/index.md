@@ -34,7 +34,10 @@ in [`examples/invoices`](https://github.com/www-celestial/centauri/tree/main/exa
     contract, and what waits for Cepheus's A2.
 12. [Security](security.md): each threat of the OWASP Top 10, and the others, with Centauri's defense and its test.
 13. [The administration](administration.md): the endpoints of the super-admin pages, and what they show.
-14. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
+14. [The admin pages](admin.md): the pages of the super-admin in the browser, in WebAssembly (a live dashboard, users,
+    tenants, events, log, jobs, webhooks, files, settings, the data of every kind changed in place, the audit trail),
+    and your own admin page for the invoices, with Django's admin beside.
+15. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
     Spring Boot, where the time goes, and what the pieces of the first month cost.
 
 The reference of the packages, every public name with its parameters, is under [Reference](ref/index.html).

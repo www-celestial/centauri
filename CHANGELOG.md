@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.0 (not released)
+
+The admin pages. Nothing of 0.2 changes: an app without `admin.Module()` serves what it served; every new field of an
+answer is optional, every new query field too.
+
+- `admin`: the module of the super-admin's pages, `admin.Module(folder, entry, title)`: the pages that the app built
+  (`cesia build --target wasm admin/page.ce`) served at `APP_ADMIN_PATH` (`/admin`, or `off`) from memory, with their
+  ETag, a 304, their brotli, under the headers of security and the door; three live shows of the role super,
+  `admin.series` (a point of the dashboard each second), `admin.events`, `admin.logs`.
+- `admin/pages`: the pages, in Cesia with Ceres, in WebAssembly: sign-in, dashboard, users, a user, tenants, a tenant,
+  events, log, jobs, webhooks, files, settings, data, audit; `pages.Run`, `Page`, `Kind`, `Column`, `Action`, and the
+  tools of a page (`Call`, `Lister`, `ListRows`, `ListState`, `More`, `Again`, `Chosen`, `Confirm`, `Question`,
+  `Replied`, `Local`, `Cell`).
+- `app`: `Kind` takes `secret`, fields the administration never sends nor changes (Centauri's hashes and a webhook's
+  secret are); `Module` takes `pages`; `Shelf`, `Shelved`, `Mount` serve a folder of built files; `Tail`, the lines of
+  the log since a number; `api.AdminEdit` (`PATCH /admin/data/:kind/:id`) changes a thing through the shapes of its
+  types; `GET /admin/events` takes `Route`, `Since`, `Until`; an action of the live screen gives `Instance` and
+  `Retry` with its problem.
+- `jobs`: `Cancel` and `api.AdminJobCancel`; `GET /admin/jobs` takes `Kind`; a retry and a cancel are events.
+- The example: `examples/invoices/admin/page.ce` (the unpaid invoices of every office, Mark paid, the invoices' columns),
+  `AdminInvoices` and `AdminPay` of the role super, `src/filled` (a month of data), `cesia do admin-serve`, the test in
+  Chrome `tools/admin-shot.sh`.
+- The book: The admin pages (with your own admin page, Django's admin beside), the administration, Security (the
+  threats of the admin pages), Settings, Speed.
+
 ## 0.2.0 (not released)
 
 The second batch, L2: what an app of management asks in its first month. Nothing of 0.1 changes: every app of 0.1

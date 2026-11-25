@@ -53,6 +53,21 @@ The threats of L2, the first month (the jobs, mail, files, live screens, webhook
 | a request sent twice that runs twice (a payment) | `Idempotency-Key` kept unique in Cepheus with its request's hash | calls `isIdempotencyKeyRunOnce`, `isIdempotencyKeyRequiredAndChecked` |
 | a migration run twice, or half | its fact unique, its lease, its state; a fill that never overwrites | migrate `isOnceAcrossProcesses`, `isFilledWithoutOverwriting`, `isTakenAgainAfterItsLease` |
 
+The threats of the admin pages, each with its test in `tests/admin.test.ce`, and in a browser
+`examples/invoices/tools/admin-shot.sh`:
+
+| threat | defense | test |
+|---|---|---|
+| a back door: an endpoint of the pages that skips a check | none: the pages call the endpoints of the role super through the door, by HTTP or by the live screen's actions; the module adds only three live shows, of the role super | admin `isEveryEndpointForSuperOnly`, `isLiveForSuperOnly` |
+| the pages used without a session, or by a user who isn't a super-admin | 401 and 403 on each endpoint and each show; a sign-in of an account that isn't a super-admin's is signed out at once | admin `isEveryEndpointForSuperOnly`, `isLiveForSuperOnly`; the browser test |
+| cross-site request forgery against a super-admin | a write of another site refused before its cookie is read; the screen opened from the app's origin only; `SameSite=Strict` | admin `isCrossSiteRefused`; live `isRefusedWithoutRights` |
+| a secret sent to the page: a hash of a password, a session's, a webhook's secret, a setting | `app.Kind(..., secret)` fields masked by the server, never changed; settings masked by `check.Masked`; the password field a dot per character in the page's tree, a password input | admin `isSecretNeverSent`, `isEditCheckedByTheKind`; the browser test (`signIn`) |
+| a field set to a value of another type, a unique value taken, a rule broken through the data browser | each field read through the shape of its Cepheus type, a wrong one named; Cepheus checks unique values and rules | admin `isEditCheckedByTheKind` |
+| a change nobody can trace | each change an event of its user, address and route, naming the fields and never their values; Cepheus's history keeps who and why | admin `isEditCheckedByTheKind`, `isJobCancelledAndRetried` |
+| script injection into the pages (XSS) | no HTML made from data: the page is drawn in a canvas from Cesia; the hidden DOM holds texts as text; no script of its own in `index.html`, the Content-Security-Policy allows the app's scripts and its WebAssembly only, no framing | admin `isPagesServedWithTheirHeaders` |
+| a file outside the pages' folder, or their source, read by its path | the pages are a map of names read at the start; `..` or a name not in it gives 404; `.ce` files are left out | admin `isPagesServedWithTheirHeaders` |
+| a flood through the pages | every action passes the limits of the address, the user and the tenant; the screens of a session (16) and their shows (64) are bounded | app `isLimited`; live `isRefusedWithoutRights` |
+
 What L1 does not do yet: the third wall, a token of Cepheus per role that reads only its kinds (G16), for roles that
 must never see some kinds (an outside accountant); multi-factor and passkeys (L3); checking a new password against the
 lists of leaked ones. The neutral answer of a sign-up came with L2 (`SignUpAnswer`, with mail).

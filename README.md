@@ -55,8 +55,13 @@ endpoints and `/openapi.json` in dev.
   proof of work when under attack; a trap field for bots; a cap on new tenants an hour; refusal of requests from other
   sites (CSRF), CORS for named partners; security headers on every response; a GET that only reads; every write with
   who and why in Cepheus's history, every sign-in, failure and refusal an event.
-- **Administration**: the endpoints of a super-admin page (users, tenants, roles, sessions, events, logs, metrics,
-  settings, kinds and their things).
+- **Administration**: the endpoints of the super-admin (users, tenants, roles, sessions, events, logs, metrics,
+  settings, kinds and their things, jobs), and its pages in the browser (`admin`), written in Cesia with Ceres and
+  compiled to WebAssembly: a live dashboard (requests, failures, p50 and p99, refusals and failed sign-ins, jobs), the
+  users and tenants with their roles changed in place, events and log by filter or live, jobs and webhooks run again,
+  files, settings, the data of every kind changed through its checks, the audit trail; an app adds its own pages,
+  columns and actions with `pages.Page`, `Kind`, `Column` and `Action`. No new way in: the pages call the endpoints of
+  the role super through the same door as any client.
 - **Settings**: `APP_*` variables read once through a shape; three profiles, dev, test and prod; health and metrics.
 - **Tests**: `apptest.Start` runs an app in memory on a fork of the database; `apptest.Isolated` proves on every
   endpoint that no tenant reads another's data, `apptest.Fuzz` that no broken input makes a 500, `apptest.Surface` that
@@ -74,8 +79,9 @@ endpoints and `/openapi.json` in dev.
 
 ## Status
 
-Version 0.2, the first two batches (L1, L2). The admin pages wait for [Ceres](https://github.com/www-celestial/ceres)
-in the browser; OpenID Connect, passkeys, TOTP and API keys come in L3. It needs Cesia's main and its branch
-`centauri-l2` (bodies in pieces, `Fetch`'s `peer`, `tls.Client`'s `ca`), not yet in a release.
+Version 0.3, the first two batches (L1, L2) and the admin pages. OpenID Connect, passkeys, TOTP and API keys come in
+L3. It needs Cesia's main and its branch `centauri-admin` (`std/check`, `http.Fetch` and `std/encode` in a page), and
+Ceres's branch `admin` (a field of a password; an action that waits for the screen's first connection), not yet in a
+release; `tools/deps.sh` puts Cepheus and Ceres in `deps/`.
 
 MIT licence.
