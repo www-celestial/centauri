@@ -1,0 +1,83 @@
+(** What Centauri costs a request, in this program, without the network: the same answers through a route of std/http
+    alone and through Centauri (its door, its session, its role, its shapes, its log), on a fork with 50 notes. Each
+    measure is the mean of n calls; rounds alternate the order; one JSON line a measure:
+    cesia run --allow native=cepheus,ffi=sodium,env bench/micro.ce [ROUNDS] [N] *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/check
+use std/http
+use std/io
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = api.Public)
+One = api.Get("/notes/:id", out = NoteOut, role = "member")
+Many = api.Get("/notes", out = api.Page(NoteOut, 20), role = "member")
+Add = api.Post("/notes", body = check.Record({Text: check.Text(1, 200)}), out = NoteOut, role = "member")
+
+defn add(r, x)
+  made = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Note, made, r)
+end
+
+many(r) = cepheus.Find(2, (n, t) -> {Where: [[n, Note.Tenant, r.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}, Sort: [n], Limit: r.Limit, After: r.After}, r.Db)
+
+App = app.Of([auth.Module(), app.Module("notes", kinds = [Note], serve = [app.Serve(Hello, r -> {Text: "Hello"}), app.Serve(One, r -> app.Own(Note, r.Params.id, r)),
+  app.Serve(Many, many), app.Serve(Add, add)])])
+
+args = sys.Args
+rounds = if value.Len(args) >= 1 text.Number(args[1]) else 21 end
+n = if value.Len(args) >= 2 text.Number(args[2]) else 2000 end
+
+t = result.Unwrap(apptest.Start(App, settings = {Profile: "prod", Origin: "https://notes.example", Secret: text.Repeat(40, "s"), CepheusUrl: "cepheus://none",
+  LogRequests: false, LimitIp: 1000000, LimitUser: 1000000, LimitTenant: 10000000}))
+ana = result.Unwrap(t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}))
+for k in 1..50
+  result.Unwrap(ana.Call(Add, {Text: "note $k"}))
+end
+first = result.Unwrap(ana.Call(Many)).Rows[1].Id
+cookie = ana.Cookie
+
+plain = http.Handler(http.App()
+  then http.Get("/hello", r -> http.Json({Text: "Hello"}))
+  then http.Get("/notes/:id", r -> http.Json(result.Unwrap(cepheus.Get(Note, text.Number(r.Params.id), t.Db))))
+  then http.Get("/notes", r -> http.Json({Rows: result.Unwrap(cepheus.Find(2, (x, y) -> {Where: [[x, Note.Text, y]], Give: {Id: x, Text: y}, Sort: [x], Limit: 21}, t.Db))})))
+
+ask(path, c) = {Method: "GET", Path: path, Query: "", Headers: [{Name: "host", Value: "notes.example"}, {Name: "cookie", Value: c}], Body: "", Peer: "203.0.113.7"}
+
+cases = [
+  {Name: "std/http, a JSON of one field", Handle: plain, Request: ask("/hello", "")},
+  {Name: "Centauri, public, a JSON of one field", Handle: t.Handle, Request: ask("/hello", "")},
+  {Name: "std/http, a thing by its id", Handle: plain, Request: ask("/notes/$first", "")},
+  {Name: "Centauri, signed in, a thing by its id (app.Own)", Handle: t.Handle, Request: ask("/notes/$first", cookie)},
+  {Name: "std/http, a page of 20 things", Handle: plain, Request: ask("/notes", "")},
+  {Name: "Centauri, signed in, a page of 20 things", Handle: t.Handle, Request: ask("/notes", cookie)}]
+
+for c in cases
+  bad = c.Handle(c.Request)
+  if bad.Status != 200
+    io.PrintError("$(c.Name): $(bad.Status) $(bad.Body)")
+    sys.Exit(1)
+  end
+end
+
+for round in 1..rounds
+  order = if math.Mod(round, 2) == 0 list.Reverse(cases) else cases end
+  for c in order
+    start = sys.Now()
+    for k in 1..n
+      c.Handle(c.Request)
+    end
+    io.Print(json.Text({Name: c.Name, Round: round, Us: (sys.Now() - start) / n * 1000000}))
+  end
+end

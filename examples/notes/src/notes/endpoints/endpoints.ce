@@ -1,0 +1,7 @@
+(** The contract of the notes, read by the server and by the pages. *)
+use deps/www-celestial/centauri/src/api
+use std/check
+
+Note = check.Record({Id: check.Id(), Text: check.Text()})
+Add = api.Post("/notes", body = check.Record({Text: check.Text(1, 500)}), out = Note, role = "member")
+List = api.Get("/notes", out = api.Page(Note, 20), role = "member")

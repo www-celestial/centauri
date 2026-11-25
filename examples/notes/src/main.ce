@@ -1,0 +1,4 @@
+use deps/www-celestial/centauri/src/app
+use src/notes
+
+app.Run(notes.App)

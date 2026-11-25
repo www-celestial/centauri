@@ -1,0 +1,16 @@
+(** The notes: the kind, the handlers, the module and the app. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/auth
+use src/notes/endpoints as e
+
+Kind = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+
+defn add(r, x)
+  made = cepheus.Insert(Kind, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Kind, made, r)
+end
+
+list(r) = cepheus.Find(2, (n, t) -> {Where: [[n, Kind.Tenant, r.User.Tenant], [n, Kind.Text, t]], Give: {Id: n, Text: t}, Sort: [n], Limit: r.Limit, After: r.After}, r.Db)
+
+App = app.Of([auth.Module(), app.Module("notes", kinds = [Kind], serve = [app.Serve(e.Add, add), app.Serve(e.List, list)])], defaults = {Tenancy: "single"})

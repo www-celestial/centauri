@@ -1,0 +1,11 @@
+(** A server of Centauri for the measures of load and start-up: /hello, public, a JSON of one field, behind Centauri's
+    door (health, its site, the limit of its address, the headers, the log line kept), and the accounts. Its settings
+    from the environment, as any app: APP_PORT, and no database (a fork in memory, the profile dev). *)
+use src/api
+use src/app
+use src/auth
+use std/check
+
+Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = api.Public)
+
+app.Run(app.Of([auth.Module(), app.Module("hello", serve = [app.Serve(Hello, r -> {Text: "Hello"})])], name = "hello"))

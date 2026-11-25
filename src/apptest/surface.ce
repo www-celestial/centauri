@@ -93,6 +93,11 @@ defn Surface(a, path, update = false)
       An Ok of true, or an Err of what breaks. Needs the permissions read and write of path. *)
   now = SurfaceOf(a.Endpoints)
   if update or not sys.Exists(path)
+    cut = text.Split("/", path)
+    dir = text.Join("/", list.Take(value.Len(cut) - 1, cut))
+    if dir != "" and not sys.Exists(dir)
+      sys.Mkdir(dir)?
+    end
     sys.Write(path, "$(json.Pretty(now))$(text.Char(10))")?
     return result.Ok(true)
   end

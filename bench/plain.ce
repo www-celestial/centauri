@@ -1,0 +1,12 @@
+(** The same server with std/http alone, for the measures beside Centauri: /hello, a JSON of one field, and the same
+    start: the engine of Cepheus loaded (a fork of Empty) and libsodium opened. PORT from the environment. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/crypto
+use std/http
+use std/result
+use std/sys
+use std/text
+
+db = result.Unwrap(cepheus.Fork(cepheus.Empty, []))
+keys = result.Unwrap(crypto.Open())
+_ = http.Serve(http.App() then http.Get("/hello", r -> http.Json({Text: "Hello"})), port = text.Number(sys.Env("PORT")))

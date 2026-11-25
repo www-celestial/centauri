@@ -1,0 +1,19 @@
+(** The notes, as a page calls them, and the three tests Centauri makes of any app. *)
+use deps/www-celestial/centauri/src/apptest
+use src/notes
+use src/notes/endpoints as e
+use std/result
+use std/value
+
+defn isAddedAndListed()
+  t = apptest.Start(notes.App)?
+  ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
+  bo = t.SignUp({Email: "bo@example.com", Password: "correct horse 34", Name: "Bo"})?
+  ana.Call(e.Add, {Text: "milk"})?
+  bad = ana.Call(e.Add, {Text: ""})
+  bad.Error.Status == 422 and value.Len(bo.Call(e.List)?.Rows) == 1 and t.Anyone().Call(e.List).Error.Status == 401
+end
+
+isIsolated() = apptest.Isolated(notes.App)?
+isFuzzed() = apptest.Fuzz(notes.App, cases = 2)?
+isSurfaceKept() = apptest.Surface(notes.App, ".cesia/surface.json")?
