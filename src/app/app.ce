@@ -153,14 +153,10 @@ defn rated(b)
       it (or missing), the size of its page (or missing), its status and the labels of its metric, whether it takes an
       input, and its output as a function (outOf). *)
   e = b.Endpoint
-  out = b
-  out.Rate = if value.IsMissing(e.Limit) missing else dict.Put("Name", e.Name, rateOf(e.Limit, 60, e.Limit)) end
-  out.Size = if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end
-  out.Status = api.Done(e)
-  out.Labels = {route: e.Name, status: out.Status}
-  out.Takes = not value.IsMissing(e.In) or not value.IsMissing(e.Query)
-  out.Out = if value.IsDict(e.Out) and dict.Get("Kind", e.Out) != "file" outOf(e.Out) else missing end
-  out
+  status = api.Done(e)
+  {Endpoint: e, Handler: b.Handler, Module: b.Module, Rate: if value.IsMissing(e.Limit) missing else dict.Put("Name", e.Name, rateOf(e.Limit, 60, e.Limit)) end,
+    Size: if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end, Status: status, Labels: {route: e.Name, status: status},
+    Takes: not value.IsMissing(e.In) or not value.IsMissing(e.Query), Out: if value.IsDict(e.Out) and dict.Get("Kind", e.Out) != "file" outOf(e.Out) else missing end}
 end
 
 defn App(env)
