@@ -56,13 +56,14 @@ defn front(base, req, env)
   start = sys.Now()
   rid = "$(env.Prefix)$(math.Mod(math.Floor(start * 1000000), 10000000000))"
   s = env.Settings
-  ip = Client(req, trustProxy = s.TrustProxy)
+  peer = dict.GetOr("Peer", "", req)
+  ip = if not s.TrustProxy and value.IsText(peer) and not text.Contains(":", peer) peer else Client(req, trustProxy = s.TrustProxy) end
   out = missing
   if req.Path == "/health/live"
     out = json200({Status: "live"})
   else if req.Path == "/health/ready"
     out = readiness(env)
-  else
+  else if req.Method == "OPTIONS"
     out = Preflight(req, env.Cors)
   end
   if value.IsMissing(out)
@@ -87,7 +88,10 @@ defn front(base, req, env)
       out = refuse(out.Status, if out.Status == 404 "There is no such address." else http.Reason(out.Status) end, rid, env)
     end
   end
-  out = Shared(Secure(out, env.Guards), req, env.Cors)
+  out = Secure(out, env.Guards, names = env.GuardNames)
+  if value.Len(env.Cors) > 0
+    out = Shared(out, req, env.Cors)
+  end
   ms = math.Round((sys.Now() - start) * 1000000) / 1000
   line = {Id: rid, Method: req.Method, Route: dict.GetOr("Route", req.Path, out), Status: out.Status, Ms: ms, Ip: ip}
   if dict.Has("User", out)
@@ -106,6 +110,7 @@ defn front(base, req, env)
 end
 
 ipLimit(ip, s) = Limit("ip:$ip", s.LimitIp, 60, list.Max([1, math.Floor(s.LimitIp / 4)]))   (* The limit of an address. *)
+ipRate(per) = rateOf(per, 60, list.Max([1, math.Floor(per / 4)]))   (* The rate of door of a limit a minute, as ipLimit's. *)
 
 defn limited(limits, env, ip, route, user, rid)
   (** The 429 of the first of these limits that refuses a request, or missing when all of them let it pass: one round
@@ -236,13 +241,40 @@ defn answer(b, req, env)
 end
 
 defn served(b, e, req, env, rid)
+  (** A request at its route: its session and its limits in one round trip to the state (two when its session is not
+      kept there), its role, its input, its handler, its output. *)
   user = missing
-  if req.Site == "same" and not value.IsMissing(env.Who)
-    who = env.Who(req, env)
-    if result.IsErr(who)
-      return failed(who.Error, rid, env, e)
+  d = missing
+  same = req.Site == "same" and not value.IsMissing(env.Who)
+  if same and not value.IsMissing(env.SessionKey)
+    key = env.SessionKey(req, env)
+    d = door(req.Ip, env.State, session = key, endpoint = b.Rate)
+    if not d.Hit
+      who = env.Who(req, env)
+      if result.IsErr(who)
+        return failed(who.Error, rid, env, e)
+      end
+      until = d.Now + env.SessionCache
+      if not value.IsMissing(who.Value) and value.IsNumber(dict.Get("Until", who.Value)) and who.Value.Until < until
+        until = who.Value.Until
+      end
+      d = door(req.Ip, env.State, session = key, store = {User: who.Value, Until: until}, endpoint = b.Rate, gen = d.Gen)
     end
-    user = who.Value
+  else
+    if same
+      who = env.Who(req, env)
+      if result.IsErr(who)
+        return failed(who.Error, rid, env, e)
+      end
+      user = who.Value
+    end
+    d = door(req.Ip, env.State, user = user, endpoint = b.Rate)
+  end
+  user = d.User
+  if not d.Ok
+    metrics.Add("centauri_refused_total", labels = {reason: "limit"})
+    noted(env, "limited", d.Key, "Too many requests.", if value.IsMissing(user) missing else user.Id end, tenantOf(user), req.Ip, e.Name)
+    return refuse(429, "Too many requests: wait $(d.Retry) seconds.", rid, env, retry = d.Retry)
   end
   status = allowedRole(e.Role, user, env.Roles)
   if status != 0
@@ -250,25 +282,11 @@ defn served(b, e, req, env, rid)
     return refuse(status, if status == 401 "Sign in first." else "This is for the role $(e.Role)." end, rid, env)
   end
   s = env.Settings
-  limits = [ipLimit(req.Ip, s)]
-  if not value.IsMissing(user)
-    limits = list.Append(Limit("u:$(user.Id)", s.LimitUser, 60, list.Max([1, math.Floor(s.LimitUser / 4)])), limits)
-    if not value.IsMissing(dict.Get("Tenant", user))
-      limits = list.Append(Limit("t:$(user.Tenant)", s.LimitTenant, 60, list.Max([1, math.Floor(s.LimitTenant / 4)])), limits)
-    end
-  end
-  if not value.IsMissing(e.Limit)
-    limits = list.Append(Limit("e:$(e.Name) $(if value.IsMissing(user) req.Ip else user.Id end)", e.Limit, 60, e.Limit), limits)
-  end
-  refused = limited(limits, env, req.Ip, e.Name, user, rid)
-  if not value.IsMissing(refused)
-    return refused
-  end
   x = input(e, req)
   if result.IsErr(x)
     return failed(x.Error, rid, env, e)
   end
-  pageSize = if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end
+  pageSize = b.Size
   after = missing
   if not value.IsMissing(pageSize) and value.IsText(dict.Get("After", req.Query)) and req.Query.After != ""
     a = opened(req.Query.After, e, user, env)
@@ -278,18 +296,26 @@ defn served(b, e, req, env, rid)
     after = a.Value
   end
   reads = e.Method == "GET"
-  db = if reads getDb(env) else result.Ok(env.Db) end
-  if result.IsErr(db)
-    return failed(db.Error, rid, env, e)
+  db = env.Db
+  before = missing
+  if reads and s.GetDb != "same"
+    got = getDb(env)
+    if result.IsErr(got)
+      return failed(got.Error, rid, env, e)
+    end
+    db = got.Value
+    before = if s.GetDb == "fork" probe(db) else missing end
   end
-  before = if reads and s.GetDb == "fork" probe(db.Value) else missing end
   r = {Method: req.Method, Path: req.Path, Params: req.Params, Query: req.Query, Headers: req.Headers, Cookies: req.Cookies, Body: req.Body, Ip: req.Ip,
-    Id: rid, Route: e.Name, User: user, Db: db.Value, Why: "$(e.Name) #$rid", Settings: s, Now: env.Now(), Keys: env.Keys,
+    Id: rid, Route: e.Name, User: user, Db: db, Why: "$(e.Name) #$rid", Settings: s, Now: d.Now, Keys: env.Keys,
     Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
   got = if value.IsMissing(e.In) and value.IsMissing(e.Query) b.Handler(r) else b.Handler(r, x.Value) end
-  wrote = not value.IsMissing(before) and probe(db.Value) != before + 1
+  wrote = not value.IsMissing(before) and probe(db) != before + 1
+  if not reads and not value.IsMissing(user) and b.Module == env.WhoModule
+    forget(env.State)   (* a write of the accounts by a signed-in user, as a sign-out or a role changed: read again *)
+  end
   if not value.IsMissing(before)
-    cepheus.Close(db.Value)   (* a fork is kept until it is closed: one a GET would grow the process without end *)
+    cepheus.Close(db)   (* a fork is kept until it is closed: one a GET would grow the process without end *)
   end
   if result.IsErr(got)
     return failed(got.Error, rid, env, e)
@@ -300,7 +326,7 @@ defn served(b, e, req, env, rid)
   end
   v = if result.IsOk(got) got.Value else got end
   extra = []
-  status = api.Done(e)
+  status = b.Status
   if value.IsDict(v) and dict.Has("CentauriReply", v)
     extra = v.Headers
     status = if value.IsMissing(v.Status) status else v.Status end
@@ -312,7 +338,7 @@ defn served(b, e, req, env, rid)
   end
   out = if value.IsMissing(e.Out) {Status: if status == 200 204 else status end, Body: "", Headers: []}
     else if e.Out.Kind == "file" {Status: status, Body: if value.IsText(v) v else "" end, Headers: [{Name: "content-type", Value: e.Out.Type}]}
-    else http.Json(check.Out(e.Out, v), status = status) end
+    else http.Json(b.Out(v), status = status) end
   for h in extra
     out = http.WithHeader(h.Name, h.Value, out)
   end
@@ -320,6 +346,60 @@ defn served(b, e, req, env, rid)
     out.User = user.Id
   end
   metrics.Add("centauri_requests_total", labels = {route: e.Name, status: out.Status})
+  out
+end
+
+(* The kinds of std/check that check.Out gives as they are. *)
+plain = {text: true, int: true, float: true, money: true, bool: true, email: true, id: true, url: true, oneof: true}
+
+defn outOf(shape)
+  (** check.Out of a shape as a function made once, at the start, for an endpoint: a record of plain fields takes its
+      fields, a record of others gives each its own, a list each item; any other shape is check.Out's. The same
+      values, without reading the shape again at each request. *)
+  if not value.IsDict(shape)
+    return x -> check.Out(shape, x)
+  end
+  kind = dict.Get("Kind", shape)
+  if kind == "record"
+    pairs = dict.Pairs(shape.Fields)
+    if list.All([value.IsDict(p.Value) and dict.Has(dict.GetOr("Kind", "", p.Value), plain) for p in pairs])
+      names = [p.Key for p in pairs]
+      return x -> if value.IsDict(x) taken(names, x) else check.Out(shape, x) end
+    end
+    fields = [{Key: p.Key, Out: outOf(p.Value)} for p in pairs]
+    return x -> if value.IsDict(x) given(fields, x) else check.Out(shape, x) end
+  end
+  if kind == "list"
+    item = outOf(shape.Of)
+    return x -> if value.IsArray(x) [item(v) for v in x] else check.Out(shape, x) end
+  end
+  x -> check.Out(shape, x)
+end
+
+defn taken(names, x)
+  (** The fields of x of these names that it has. *)
+  out = {}
+  for k in names
+    v = dict.Get(k, x)
+    if not value.IsMissing(v)
+      out[k] = v
+    end
+  end
+  out
+end
+
+defn given(fields, x)
+  (** Each field of x through its own function of outOf, those that give something. *)
+  out = {}
+  for f in fields
+    v = dict.Get(f.Key, x)
+    if not value.IsMissing(v)
+      v = f.Out(v)
+      if not value.IsMissing(v)
+        out[f.Key] = v
+      end
+    end
+  end
   out
 end
 

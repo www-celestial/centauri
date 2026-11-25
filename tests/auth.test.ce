@@ -243,3 +243,47 @@ defn isEventsAndAdministration()
   bug.Assert("signup" in kinds and "signin-failed" in kinds and "signin" in kinds, "events: $kinds")
   value.Len(tenants.Rows) == 1 and one.Members[1].Email == "ana@example.com" and stats.Users == 2 and stats.Tenants == 1
 end
+
+defn isRoleTakenSeenAtOnce()
+  (* the sessions kept by the state of the process: a role taken through the accounts holds at the next request *)
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  code = a.Call(api.Invite, {Email: "bo@example.com", Roles: ["admin"]})?.Code
+  b = t.Anyone().Call(api.SignUp, dict.Put("Invite", code, bo))?
+  bc = t.SignIn("bo@example.com", "another long secret")?
+  bug.Assert(result.IsOk(bc.Call(api.Members)), "an admin lists the members")
+  a.Call(api.SetRoles, {id: b.User, Roles: ["member"]})?
+  bc.Call(api.Members).Error.Status == 403
+end
+
+defn isChangeOutsideSeenWithinSessionCache()
+  (* a change that no route of the accounts made (here a write straight to Cepheus) is seen within SessionCache
+     seconds: kept until then, read again after; with SessionCache 0, at once *)
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  a.Call(api.Me)?
+  cepheus.Update(auth.User, a.User, {Disabled: true}, t.Db, why = "a test")?
+  bug.Assert(result.IsOk(a.Call(api.Me)), "kept for SessionCache seconds (2 by default)")
+  t.Advance(1.9)
+  bug.Assert(result.IsOk(a.Call(api.Me)), "still kept at 1.9 s")
+  t.Advance(0.2)
+  bug.Assert(a.Call(api.Me).Error.Status == 401, "read again after 2 s")
+  u = apptest.Start(App, settings = {SessionCache: "0"})?
+  c = u.SignUp(ana)?
+  c.Call(api.Me)?
+  cepheus.Update(auth.User, c.User, {Disabled: true}, u.Db, why = "a test")?
+  c.Call(api.Me).Error.Status == 401
+end
+
+defn isForgedCookieNobodyBesideAKeptOne()
+  (* a session kept by the state opens nothing to a cookie of its id with another secret, nor to a cookie that names
+     nobody, kept as nobody *)
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  a.Call(api.Me)?
+  id = text.Split(".", text.Split("=", a.Cookie)[2])[1]
+  forged = "sid=$id.$(text.Repeat(64, "b"))"
+  first = t.Anyone().Raw("GET", "/auth/me", headers = [{Name: "cookie", Value: forged}])
+  again = t.Anyone().Raw("GET", "/auth/me", headers = [{Name: "cookie", Value: forged}])
+  first.Status == 401 and again.Status == 401 and result.IsOk(a.Call(api.Me))
+end

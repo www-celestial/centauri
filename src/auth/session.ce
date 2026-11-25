@@ -51,10 +51,19 @@ defn NewSession(user, member, tenant, req, env, thing = 1)
   {Ops: ops, Value: id -> "$id.$secret"}
 end
 
+defn SessionKey(req, env)
+  (** What names the session of a request among those the state of the process keeps: the BLAKE2b of its cookie, or
+      missing for a request without one. A lookup by it tells nothing of the secret by its time, and a cookie made by
+      hand names no session kept: it is checked by Who first. *)
+  raw = dict.Get(CookieName(env), dict.GetOr("Cookies", {}, req))
+  if value.IsText(raw) and text.ByteLength(raw) <= 100 crypto.Blake2b(raw, env.Keys) else missing end
+end
+
 defn Who(req, env)
-  (** The user of a request's session: an Ok of {Id, Tenant, Member, Session, Roles, Super, Email, Name}, Roles with
-      every role they include, or an Ok of missing for no session, an ended one, a disabled user, or a member taken out
-      of his tenant. The time of the session is seen again at most every 5 minutes, by a write in a fiber of its own. *)
+  (** The user of a request's session: an Ok of {Id, Tenant, Member, Session, Roles, Super, Email, Name, Until}, Roles
+      with every role they include, Until the time the session ends unless it is seen again (its end, or its end of
+      idleness), or an Ok of missing for no session, an ended one, a disabled user, or a member taken out of his
+      tenant. The time of the session is seen again at most every 5 minutes, by a write in a fiber of its own. *)
   p = parts(dict.Get(CookieName(env), dict.GetOr("Cookies", {}, req)))
   if value.IsMissing(p)
     return result.Ok(missing)
@@ -83,7 +92,7 @@ defn Who(req, env)
     fiber.Spawn(() -> cepheus.Write([cepheus.Expect(p.Id, Session.Seen, s.Seen), cepheus.Add(p.Id, Session.Seen, now)], env.Db, by = s.User, why = "session seen"))
   end
   result.Ok({Id: s.User, Tenant: s.Tenant, Member: s.Member, Session: p.Id, Roles: roles, Super: u.Super == true, Email: u.Email,
-    Name: dict.GetOr("Name", "", u)})
+    Name: dict.GetOr("Name", "", u), Until: list.Min([s.Ends, s.Seen + env.Settings.SessionIdle])})
 end
 
 defn EndSessions(ids, by, why, db)

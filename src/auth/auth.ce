@@ -43,20 +43,22 @@ Settings = {
   PowBits: check.Int(1, 30, optional = true, default = 18),
   PowAfter: check.Int(1, 1000000, optional = true, default = 50),
   HashSlots: check.Int(1, 64, optional = true, default = 2),
+  SessionCache: check.Int(0, 60, optional = true, default = 2),
   Honeypot: check.Text(0, 40, optional = true, default = "Website"),
   InviteTime: check.Int(60, 31536000, optional = true, default = 604800),
 }
 
 defn Module(signUp = api.SignUp, facts = missing)
   (** The module of the accounts: its kinds, its endpoints (api.Accounts and api.AdminOfAccounts), the session of
-      each request (Who), its settings, and a keeper that forgets ended sessions, challenges and invitations. signUp is
+      each request (Who, kept SessionCache seconds by the state of the process under SessionKey), its settings, and a
+      keeper that forgets ended sessions, challenges and invitations. signUp is
       api.SignUp or one of api.SignUpOf. *)
   serve = [app.Serve(signUp, (r, x) -> signingUp(r, x, facts)), app.Serve(api.SignIn, signingIn), app.Serve(api.SignOut, signingOut),
     app.Serve(api.SignOutAll, signingOutAll), app.Serve(api.Me, me), app.Serve(api.Sessions, sessions), app.Serve(api.EndSession, endSession),
     app.Serve(api.ChangePassword, changePassword), app.Serve(api.Challenge, challenge), app.Serve(api.Members, members),
     app.Serve(api.Invite, invite), app.Serve(api.Join, joining), app.Serve(api.SetRoles, setRoles), app.Serve(api.RemoveMember, removeMember),
     app.Serve(api.MyTenants, myTenants), app.Serve(api.SwitchTenant, switchTenant)]
-  app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, settings = Settings, start = keep)
+  app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, key = SessionKey, settings = Settings, start = keep)
 end
 
 roleList(t) = [text.Trim(x) for x in text.Split(",", t) if text.Trim(x) != ""]   (* The roles of a setting, "owner, admin". *)

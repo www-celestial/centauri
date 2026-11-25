@@ -43,12 +43,15 @@ Serve(endpoint, handler) = {Endpoint: endpoint, Handler: handler}
 Kind(name, fields) = cepheus.Kind(name, fields) then dict.Put("name", name) then dict.Put("fields", fields)
 
 (** A module: its name, its kinds and rules of Cepheus, its routes (Serve), and for a module of the framework, who
-    (the function that reads the session of a request, as auth gives it), settings (the shapes of its own settings),
-    start (a function of env that runs in its own fiber once the app serves, as a keeper that ends old sessions).
+    (the function that reads the session of a request, as auth gives it), key (a function of the request and env that
+    gives a text naming its session, a hash of its cookie, or missing for none: the state of the process then keeps
+    what who read for SessionCache seconds, and a write of a signed-in user through this module's routes forgets all
+    of it), settings (the shapes of its own settings), start (a function of env that runs in its own fiber once the
+    app serves, as a keeper that ends old sessions).
 
       Module("notes", serve = []).Name --> "notes" *)
-Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing) = {Name: name, Kinds: kinds, Rules: rules,
-  Serve: serve, Who: who, Settings: settings, Start: start}
+Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing, key = missing) = {Name: name, Kinds: kinds,
+  Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key}
 
 (** The roles of an app unless it names its own: each role with the roles it includes. owner and admin manage the
     members of their tenant (the endpoints of auth need admin); member is the role of every user who signs up. *)
@@ -117,23 +120,43 @@ defn Start(a, s, db, readDb = missing, clock = missing)
       clock of a test, when given). An Ok of env; Handler(env) serves it. *)
   keys = crypto.Open()?
   hashSlots = dict.GetOr("HashSlots", 2, s)
-  state = State(slots = hashSlots, kept = s.LogLines, clock = clock)?
+  rates = {Ip: ipRate(s.LimitIp), User: ipRate(s.LimitUser), Tenant: ipRate(s.LimitTenant)}
+  state = State(slots = hashSlots, kept = s.LogLines, clock = clock, rates = rates)?
   key = if value.IsMissing(dict.Get("Secret", s)) crypto.Random(32, keys) else crypto.Blake2b("centauri cursor $(s.Secret)", keys) end
   who = missing
+  sessionKey = missing
+  whoModule = missing
   for m in a.Modules
     if value.IsMissing(who) and not value.IsMissing(m.Who)
       who = m.Who
+      sessionKey = dict.Get("Key", m)
+      whoModule = m.Name
     end
   end
-  served = list.Concat(adminOfApp(), a.Served)
+  served = [rated(b) for b in list.Concat(adminOfApp(), a.Served)]
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
+  guards = Guards(s.Csp, text.StartsWith("https://", s.Origin))
   env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles,
     Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
-    Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: Guards(s.Csp, text.StartsWith("https://", s.Origin)),
+    Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: guards,
     Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
     Now: if value.IsMissing(clock) (() -> sys.Now()) else (() -> Now(state)) end,
-    OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version))}
+    OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version)),
+    SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s),
+    WhoModule: whoModule, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards])}
   result.Ok(env)
+end
+
+defn rated(b)
+  (** A route with what each of its requests needs of its endpoint, made once: the rate of its own limit as door counts
+      it (or missing), the size of its page (or missing), its status, and its output as a function (outOf). *)
+  e = b.Endpoint
+  out = b
+  out.Rate = if value.IsMissing(e.Limit) missing else dict.Put("Name", e.Name, rateOf(e.Limit, 60, e.Limit)) end
+  out.Size = if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end
+  out.Status = api.Done(e)
+  out.Out = if value.IsDict(e.Out) and dict.Get("Kind", e.Out) != "file" outOf(e.Out) else missing end
+  out
 end
 
 defn App(env)

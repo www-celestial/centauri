@@ -72,18 +72,34 @@ defn Guards(csp, https)
   if https list.Append({Name: "strict-transport-security", Value: "max-age=63072000; includeSubDomains"}, out) else out end
 end
 
-defn Secure(response, guards)
-  (** A response with the headers of security (Guards) that it lacks, added in one copy of its headers. *)
+defn Secure(response, guards, names = missing)
+  (** A response with the headers of security (Guards) that it lacks, added in one copy of its headers; names, a map
+      of the guards' names to true, made once, spares the search when the response has none of them. *)
   headers = dict.GetOr("Headers", [], response)
-  names = [h.Name for h in headers]
   out = response
-  out.Headers = list.Concat(headers, [g for g in guards if not (g.Name in names)])
+  if not value.IsMissing(names)
+    clash = false
+    for h in headers
+      if dict.Has(h.Name, names)
+        clash = true
+      end
+    end
+    if not clash
+      out.Headers = if value.Len(headers) == 0 guards else list.Concat(headers, guards) end
+      return out
+    end
+  end
+  taken = [h.Name for h in headers]
+  out.Headers = list.Concat(headers, [g for g in guards if not (g.Name in taken)])
   out
 end
 
 defn Shared(response, request, cors)
   (** A response that a partner's page may read: its origin allowed, never with credentials (a partner has no
       session: SameSite=Strict keeps the cookie from it), and Vary: Origin for the caches. *)
+  if value.Len(cors) == 0
+    return response
+  end
   asked = http.HeaderValue("origin", request.Headers)
   if not (value.IsText(asked) and asked in cors)
     return response
