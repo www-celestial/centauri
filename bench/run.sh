@@ -26,7 +26,7 @@ startup)
     for s in plain centauri; do
       if [ $(( r % 2 )) = 0 ]; then s=$([ $s = plain ] && echo centauri || echo plain); fi
       if [ $s = plain ]; then out=$(PORT=18191 $P 18191 /hello $B run --allow native=cepheus,ffi=sodium,env,net=:18191 bench/plain.ce)
-      else out=$(APP_PORT=18192 APP_LOG_REQUESTS=false $P 18192 /hello $B run --allow native=cepheus,ffi=sodium,env,net=:18192 bench/serve.ce); fi
+      else out=$(APP_PORT=18192 APP_LOG_REQUESTS=false APP_GET_DB=same $P 18192 /hello $B run --allow native=cepheus,ffi=sodium,env,net=:18192 bench/serve.ce); fi
       set -- $out
       note startup "\"Server\":\"$s\",\"Round\":$r,\"Ms\":$1,\"RssKb\":$2"
       set -- startup
@@ -36,7 +36,7 @@ startup)
 load)
   ulimit -n 100000
   (PORT=18193 exec setsid taskset -c 0,1,4,5 $B run --allow native=cepheus,ffi=sodium,env,net=:18193 bench/plain.ce > /dev/null 2>&1) & p1=$!
-  (APP_PORT=18194 APP_LOG_REQUESTS=false APP_LIMIT_IP=1000000 exec setsid taskset -c 0,1,4,5 $B run --allow native=cepheus,ffi=sodium,env,net=:18194 bench/serve.ce > /dev/null 2>&1) & p2=$!
+  (APP_PORT=18194 APP_LOG_REQUESTS=false APP_LIMIT_IP=1000000 APP_GET_DB=same exec setsid taskset -c 0,1,4,5 $B run --allow native=cepheus,ffi=sodium,env,net=:18194 bench/serve.ce > /dev/null 2>&1) & p2=$!
   trap 'kill -TERM -- -$p1 -$p2 2>/dev/null' EXIT
   sleep 2
   for r in $(seq "$rounds"); do

@@ -287,10 +287,14 @@ defn served(b, e, req, env, rid)
     Id: rid, Route: e.Name, User: user, Db: db.Value, Why: "$(e.Name) #$rid", Settings: s, Now: env.Now(), Keys: env.Keys,
     Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
   got = if value.IsMissing(e.In) and value.IsMissing(e.Query) b.Handler(r) else b.Handler(r, x.Value) end
+  wrote = not value.IsMissing(before) and probe(db.Value) != before + 1
+  if not value.IsMissing(before)
+    cepheus.Close(db.Value)   (* a fork is kept until it is closed: one a GET would grow the process without end *)
+  end
   if result.IsErr(got)
     return failed(got.Error, rid, env, e)
   end
-  if not value.IsMissing(before) and probe(db.Value) != before + 1
+  if wrote
     log.Error("a GET wrote to the database", {Route: e.Name, Id: rid})
     return failed({Kind: "api", Status: 500, Message: "$(e.Name) wrote to the database: a GET only reads (A06)."}, rid, env, e)
   end
