@@ -38,6 +38,12 @@ Core = {
   AdminPort: check.Int(0, 65535, optional = true, default = 0),
   UploadPart: check.Int(65536, 16777216, optional = true, default = 1048576),
   UploadsAtOnce: check.Int(1, 100000, optional = true, default = 16),
+  CallTimeout: check.Int(1, 600, optional = true, default = 10),
+  CallPlain: check.OneOf(["refuse", "allow"], optional = true, default = "refuse"),
+  CallAllow: check.Text(0, 4000, optional = true, default = ""),
+  CallCa: check.Text(1, 1000, optional = true),
+  IdempotencyKey: check.OneOf(["honored", "required", "ignored"], optional = true, default = "honored"),
+  IdempotencyTime: check.Int(60, 31536000, optional = true, default = 86400),
   Csp: check.Text(1, 2000, optional = true, default = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
 }
 

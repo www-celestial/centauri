@@ -252,10 +252,17 @@ end
 tenantOf(user) = if value.IsMissing(user) 0 else dict.GetOr("Tenant", 0, user) end
 
 defn answer(b, req, env)
-  (** A request at its route. *)
+  (** A request at its route, its Idempotency-Key honored. *)
   e = b.Endpoint
   rid = dict.GetOr("Id", "-", req)
+  claim = if e.Method != "GET" and env.Settings.IdempotencyKey != "ignored" and not b.Upload claimed(b, req, env, rid) else missing end
+  if not value.IsMissing(claim) and dict.Has("Out", claim)
+    return claim.Out
+  end
   out = served(b, e, req, env, rid)
+  if not value.IsMissing(claim)
+    settled(claim, out, env)
+  end
   if not dict.Has("Route", out)
     out.Route = e.Name
     out.Done = true

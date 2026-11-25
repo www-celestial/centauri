@@ -1,0 +1,258 @@
+(* Calls to other services: app.Call, an HTTP request with a deadline and retries, that never reaches this machine or
+   a private network for whoever gave it the address (server-side request forgery, SSRF, OWASP's A10 of 2021): the
+   address checked is the one the connection reached, before any byte is sent (no second lookup that a server of
+   names could answer otherwise: DNS rebinding), each redirect it follows checked the same way; no user in the address;
+   https unless the settings allow plain http. *)
+use std/dict
+use std/fiber
+use std/http
+use std/list
+use std/math
+use std/random
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+(* The groups of an address of IPv4, from its text: missing when it is none. *)
+defn ipv4(s)
+  parts = text.Split(".", s)
+  if value.Len(parts) != 4
+    return missing
+  end
+  out = []
+  for p in parts
+    if text.ByteLength(p) == 0 or text.ByteLength(p) > 3 or not value.IsMissing(text.ByteFindAny("0123456789", 1, p, not = true))
+      return missing
+    end
+    n = text.Number(p)
+    if n > 255
+      return missing
+    end
+    out = list.Append(n, out)
+  end
+  out
+end
+
+defn ipv6(s)
+  (** The eight groups of an address of IPv6 as numbers, an address of IPv4 at its end read as two of them; missing
+      when it is none. *)
+  if not text.Contains(":", s)
+    return missing
+  end
+  zone = text.Split("%", s)[1]
+  halves = text.Split("::", zone)
+  if value.Len(halves) > 2
+    return missing
+  end
+  head = groupsOf(halves[1])
+  tail = if value.Len(halves) == 2 groupsOf(halves[2]) else [] end
+  if value.IsMissing(head) or value.IsMissing(tail)
+    return missing
+  end
+  fill = 8 - value.Len(head) - value.Len(tail)
+  if (value.Len(halves) == 1 and fill != 0) or fill < 0
+    return missing
+  end
+  list.Concat(list.Concat(head, list.Fill(0, fill)), tail)
+end
+
+defn groupsOf(part)
+  (** The groups of one side of the :: of an address of IPv6, or missing. *)
+  if part == ""
+    return []
+  end
+  out = []
+  for g in text.Split(":", part)
+    four = ipv4(g)
+    if not value.IsMissing(four)
+      out = list.Concat(out, [four[1] * 256 + four[2], four[3] * 256 + four[4]])
+    else
+      if text.ByteLength(g) == 0 or text.ByteLength(g) > 4 or not value.IsMissing(text.ByteFindAny("0123456789abcdefABCDEF", 1, g, not = true))
+        return missing
+      end
+      out = list.Append(hexNumber(g), out)
+    end
+  end
+  out
+end
+
+defn hexNumber(g)
+  (** A group of hexadecimal digits as a number. *)
+  n = 0
+  for c in text.Chars(text.Lower(g))
+    n = n * 16 + text.ByteFind(c, 1, "0123456789abcdef") - 1
+  end
+  n
+end
+
+(* The blocks of IPv4 that no call may reach: this network, private ones, shared, loopback, link-local, the IETF's,
+   those of documentation and of tests, 6to4 relays, multicast and reserved (IANA's special-purpose registry). *)
+v4blocks = [[0, 0, 0, 0, 8], [10, 0, 0, 0, 8], [100, 64, 0, 0, 10], [127, 0, 0, 0, 8], [169, 254, 0, 0, 16], [172, 16, 0, 0, 12],
+  [192, 0, 0, 0, 24], [192, 0, 2, 0, 24], [192, 88, 99, 0, 24], [192, 168, 0, 0, 16], [198, 18, 0, 0, 15], [198, 51, 100, 0, 24],
+  [203, 0, 113, 0, 24], [224, 0, 0, 0, 4], [240, 0, 0, 0, 4]]
+
+defn inBlock4(a, b)
+  (** Is an address of IPv4 in a block [a, b, c, d, bits]? *)
+  n = ((a[1] * 256 + a[2]) * 256 + a[3]) * 256 + a[4]
+  m = ((b[1] * 256 + b[2]) * 256 + b[3]) * 256 + b[4]
+  shift = 32 - b[5]
+  math.Div(n, math.BitShift(1, shift)) == math.Div(m, math.BitShift(1, shift))
+end
+
+defn Private(address)
+  (** Is an address one that a call made for others must not reach: this machine, a private or link-local network, or
+      any address of the special-purpose registries of IANA, in IPv4 or IPv6, an address of IPv4 inside one of IPv6
+      (mapped, NAT64, 6to4) read as itself; an address that is none at all, too.
+
+        Private("127.0.0.1") --> true
+        Private("10.1.2.3") --> true
+        Private("169.254.169.254") --> true
+        Private("::ffff:127.0.0.1") --> true
+        Private("fd00::1") --> true
+        Private("93.184.215.14") --> false
+        Private("2606:4700::6810:84e5") --> false *)
+  if not value.IsText(address)
+    return true
+  end
+  four = ipv4(address)
+  if not value.IsMissing(four)
+    return list.Any([inBlock4(four, b) for b in v4blocks])
+  end
+  g = ipv6(address)
+  if value.IsMissing(g)
+    return true
+  end
+  first = g[1]
+  if list.All([x == 0 for x in list.Take(7, g)]) and (g[8] == 0 or g[8] == 1)
+    return true
+  end
+  embedded = [math.Div(g[7], 256), math.Mod(g[7], 256), math.Div(g[8], 256), math.Mod(g[8], 256)]
+  if list.All([x == 0 for x in list.Take(5, g)]) and g[6] == 65535
+    return Private("$(embedded[1]).$(embedded[2]).$(embedded[3]).$(embedded[4])")
+  end
+  if first == 100 and g[2] == 65435
+    return Private("$(embedded[1]).$(embedded[2]).$(embedded[3]).$(embedded[4])") or (g[3] == 1)
+  end
+  if first == 8194
+    return Private("$(math.Div(g[2], 256)).$(math.Mod(g[2], 256)).$(math.Div(g[3], 256)).$(math.Mod(g[3], 256))")
+  end
+  (first == 256 and g[2] == 0 and g[3] == 0 and g[4] == 0) or (first == 8193 and g[2] < 512) or (first == 8193 and g[2] == 3512) or
+    math.Div(first, 512) == 126 or math.Div(first, 64) == 1018 or math.Div(first, 256) == 255
+end
+
+defn allowedHosts(env)
+  (** The hosts a call may reach on a private network, from the setting CallAllow: names and addresses. *)
+  [text.Lower(text.Trim(h)) for h in text.Split(",", dict.GetOr("CallAllow", "", env.Settings)) if text.Trim(h) != ""]
+end
+
+defn guard(host, env)
+  (** The check of the address a call reached: an Ok, or the Err that refuses it. *)
+  allowed = text.Lower(host) in allowedHosts(env)
+  address -> if allowed or not Private(address) result.Ok(missing) else result.Err({Kind: "call", Code: "refused",
+    Message: "$host is of this machine or of a private network ($address): a call never goes there (SSRF)."}) end
+end
+
+idempotent = ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]   (* The methods that a retry repeats without a second effect. *)
+
+defn checkedUrl(url, env)
+  (** The target of an address a call may take: an Ok of http.ParseUrl's, or an Err. *)
+  if not value.IsText(url) or text.ByteLength(url) > 4000
+    return result.Err({Kind: "call", Code: "refused", Message: "An address of 4,000 bytes at most."})
+  end
+  t = http.ParseUrl(url)
+  if result.IsErr(t)
+    return result.Err({Kind: "call", Code: "refused", Message: "No address of http or https: $(t.Error.Message)"})
+  end
+  if text.Contains("@", t.Value.Host) or text.Contains("@", text.Split("/", text.Split("://", url)[2])[1])
+    return result.Err({Kind: "call", Code: "refused", Message: "An address with a user and a password is refused: give them in headers."})
+  end
+  if not t.Value.Secure and dict.GetOr("CallPlain", "refuse", env.Settings) != "allow"
+    return result.Err({Kind: "call", Code: "refused", Message: "$url is plain http: a call goes over https (or the setting CallPlain allows it)."})
+  end
+  t
+end
+
+defn once(url, method, body, headers, timeout, most, env)
+  (** One request of a call, within timeout seconds, its connection included: an Ok of {Status, Headers, Body}, or an Err. *)
+  t = checkedUrl(url, env)?
+  secure = missing
+  if t.Secure
+    api = tls.Open()?
+    ca = dict.Get("CallCa", env.Settings)
+    secure = if value.IsMissing(ca) tls.Client(api) else tls.Client(api, ca = ca) end
+  end
+  task = fiber.Spawn(() -> http.Fetch(url, method = method, body = body, headers = headers, secure = secure, timeout = timeout, maxBody = most,
+    peer = guard(t.Host, env)))
+  got = fiber.Wait(task, timeout = timeout + 1)
+  if result.IsErr(got)
+    fiber.Cancel(task)
+    return result.Err({Kind: "call", Code: "timeout", Message: "$(t.Host) didn't answer within $timeout seconds."})
+  end
+  r = got.Value
+  if result.IsErr(r) and dict.Get("Kind", r.Error) == "timeout"
+    return result.Err({Kind: "call", Code: "timeout", Message: "$(t.Host) didn't answer within $timeout seconds."})
+  end
+  r
+end
+
+defn located(base, location)
+  (** The address a redirect names, from the address it answered. *)
+  if text.StartsWith("http://", location) or text.StartsWith("https://", location)
+    return location
+  end
+  t = http.ParseUrl(base)!
+  origin = "$(if t.Secure "https" else "http" end)://$(t.Host)$(if t.Port == (if t.Secure 443 else 80 end) "" else ":$(t.Port)" end)"
+  if text.StartsWith("/", location) "$origin$location" else "$origin/$location" end
+end
+
+defn Call(url, env, method = "GET", body = "", headers = [], timeout = missing, tries = 3, most = 1048576, follow = 0)
+  (** A request to another service: an Ok of {Status, Headers, Body} (a 404 is an answer: look at Status), or an Err
+      {Kind: "call", Code, Message}, Code "refused" (an address it may not reach), "timeout" or "failed". timeout, the
+      seconds of each try, its connection included (the setting CallTimeout, 10, unless given); tries, the tries in all
+      when the service can't be reached or answers 429, 502, 503 or 504, after a pause drawn at random (full jitter),
+      or the Retry-After it asks (10 seconds at most), but only for a method that a second try doesn't repeat (GET,
+      HEAD, PUT, DELETE) or a request with an Idempotency-Key; most, the bytes of its answer at most; follow, the
+      redirects it follows (none unless given), each address checked as the first. The address reached must be of no
+      private network (CallAllow names the hosts that may be), over https (CallPlain allows plain http). *)
+  wait = if value.IsMissing(timeout) dict.GetOr("CallTimeout", 10, env.Settings) else timeout end
+  repeatable = method in idempotent or not value.IsMissing(http.HeaderValue("idempotency-key", [{Name: text.Lower(h.Name), Value: h.Value} for h in headers]))
+  target = url
+  hops = 0
+  attempt = 1
+  while true
+    got = once(target, method, body, headers, wait, most, env)
+    if result.IsErr(got) and dict.Get("Code", got.Error) == "refused"
+      return got
+    end
+    status = if result.IsOk(got) got.Value.Status else 0 end
+    redirected = false
+    if result.IsOk(got) and status >= 300 and status < 400 and hops < follow
+      location = http.HeaderValue("location", got.Value.Headers)
+      if value.IsText(location)
+        target = located(target, location)
+        hops += 1
+        redirected = true
+        if status == 303
+          method = "GET"
+          body = ""
+        end
+      end
+    end
+    if not redirected
+      busy = result.IsErr(got) or status in [429, 502, 503, 504]
+      if not busy or not repeatable or attempt >= tries
+        if result.IsErr(got)
+          return result.Err({Kind: "call", Code: dict.GetOr("Code", "failed", got.Error), Message: dict.GetOr("Message", "The call failed.", got.Error)})
+        end
+        return got
+      end
+      after = if result.IsOk(got) http.HeaderValue("retry-after", got.Value.Headers) else missing end
+      asked = if value.IsText(after) text.Number(text.Trim(after)) else missing end
+      pause = if value.IsNumber(asked) list.Min([10, list.Max([0, asked])]) else random.Float() * list.Min([5, 0.2 * math.BitShift(1, attempt)]) end
+      sys.Sleep(pause)
+      attempt += 1
+    end
+  end
+end

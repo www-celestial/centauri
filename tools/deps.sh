@@ -25,7 +25,7 @@ if [ "$into" != "." ]; then
   rm -rf "$own"
   mkdir -p "$own/src"
   cp cesia.toml "$own/"
-  for p in app api auth apptest jobs mail; do cp -R "src/$p" "$own/src/"; done
+  for p in app api auth apptest jobs mail hooks; do cp -R "src/$p" "$own/src/"; done
   rm -f "$own"/src/*/*.test.ce
 fi
 cd "$into" && cesia run --allow read,write "$here/tools/lock.ce"

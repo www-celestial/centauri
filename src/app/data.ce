@@ -29,8 +29,13 @@ Bytes = Kind("centauri_bytes", {Bytes: cepheus.Text()})
 MigrationRun = Kind("centauri_migration", {Name: cepheus.Text(unique = true), State: cepheus.Text(), Started: cepheus.Date(),
   Ended: cepheus.Date(), Lease: cepheus.Date(), Error: cepheus.Text()})
 
+(** A request made with an Idempotency-Key (idem.ce): Key, unique, the hash of its caller, endpoint and key; Hash, that
+    of its method, path and body; its state (running, done), and its answer kept to be given again. *)
+Once = Kind("centauri_idempotency", {Key: cepheus.Text(unique = true), Hash: cepheus.Text(), State: cepheus.Text(), Status: cepheus.Int(),
+  Body: cepheus.Text(), Type: cepheus.Text(), At: cepheus.Date()})
+
 (** The kinds of package app. *)
-Kinds = [Event, Counter, Parts, Bytes, MigrationRun]
+Kinds = [Event, Counter, Parts, Bytes, MigrationRun, Once]
 
 defn IdOf(x)
   (** An id from outside, as a parameter of a path: an Int above 0 from a whole number or its digits, else missing.

@@ -1,0 +1,283 @@
+(** Calls to other services and webhooks, against what an attacker tries: an address of this machine or of a private
+    network in every spelling (SSRF), a name that resolves to one, a redirect to one, a user in an address, plain
+    http; a webhook forged, changed, replayed, too old or of the future. And the Idempotency-Key header: a request sent
+    twice runs once. Servers of https on this machine play the other services, with a certificate of an authority
+    made for the tests (.cesia/tls, by openssl). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/hooks
+use src/jobs
+use std/bug
+use std/check
+use std/crypto
+use std/dict
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+dir = ".cesia/tls"
+
+defn certs()
+  (** An authority and a certificate of localhost it signed, made once by openssl (the same as tests/mail.test.ce). *)
+  if result.IsOk(sys.Read("$dir/server.pem")) and result.IsOk(sys.Read("$dir/ca.pem"))
+    return result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+  end
+  sys.Mkdir(dir)?
+  sys.Write("$dir/san.txt", "subjectAltName=DNS:localhost,IP:127.0.0.1\n")?
+  steps = [["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=centauri test authority", "-days", "3650", "-keyout", "$dir/ca.key", "-out", "$dir/ca.pem"],
+    ["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost", "-keyout", "$dir/server.key", "-out", "$dir/server.csr"],
+    ["x509", "-req", "-in", "$dir/server.csr", "-CA", "$dir/ca.pem", "-CAkey", "$dir/ca.key", "-CAcreateserial", "-days", "3650", "-out", "$dir/server.pem", "-extfile", "$dir/san.txt"]]
+  for args in steps
+    p = sys.Start("openssl", args = args)?
+    _ = sys.ReadOutput(p)
+    if sys.WaitExit(p) != 0
+      return result.Err({Kind: "test", Message: "openssl $(args[1]) failed"})
+    end
+  end
+  result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+end
+
+defn partner(answers, plain = false)
+  (** A service on a free port, https unless plain: each request it takes goes to Box, and it answers the next of
+      answers (the last one again when they run out). An Ok of {Port, Box, Ca}. *)
+  c = certs()?
+  l = net.Listen(0)?
+  box = fiber.Channel()
+  left = fiber.Channel()
+  for a in answers
+    fiber.Send(a, left)
+  end
+  last = answers[value.Len(answers)]
+  wrap = if plain missing else tls.Server(c.Cert, c.Key, tls.Open()?)? end
+  fiber.Spawn(() -> http.Serve(http.App() then http.AnyMethod("/*", r -> took(r, box, left, last)), listener = l, wrap = wrap, timeout = 5))
+  result.Ok({Port: net.Port(l), Box: box, Ca: c.Ca})
+end
+
+defn took(r, box, left, last)
+  fiber.Send(r, box)
+  next = fiber.Receive(left, timeout = 0)
+  if result.IsOk(next) next.Value else last end
+end
+
+App = app.Of([auth.Module(), hooks.Module()], name = "calls")
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+defn isPrivateInEverySpelling()
+  privates = ["127.0.0.1", "127.255.1.2", "10.0.0.1", "172.16.5.4", "172.31.255.255", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0",
+    "224.0.0.1", "255.255.255.255", "198.18.0.1", "::", "::1", "fe80::1", "fd12:3456::1", "fc00::1", "ff02::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1",
+    "64:ff9b::7f00:1", "2002:7f00:1::1", "2001:db8::1", "2001::1", "not an address", "1.2.3"]
+  publics = ["93.184.215.14", "1.1.1.1", "172.32.0.1", "192.169.0.1", "2606:4700::6810:84e5", "2a00:1450:4007:80b::200e", "::ffff:93.184.215.14"]
+  bad = [a for a in privates if not app.Private(a)]
+  good = [a for a in publics if app.Private(a)]
+  bug.Assert(value.Len(bad) == 0 and value.Len(good) == 0, "misread: $bad $good")
+  true
+end
+
+defn isCallToThisMachineRefusedBeforeAByte()
+  (** Every spelling of this machine is refused, the address checked being the one connected: the service never hears
+      a byte, not even TLS's. *)
+  s = partner([http.Plain("secret of the network")], plain = true)?
+  t = apptest.Start(App, settings = {CallPlain: "allow"})?
+  urls = ["http://127.0.0.1:$(s.Port)/", "http://localhost:$(s.Port)/", "http://2130706433:$(s.Port)/", "http://0x7f000001:$(s.Port)/",
+    "http://127.1:$(s.Port)/", "http://0177.0.0.1:$(s.Port)/"]
+  outs = [app.Call(u, t.Env, timeout = 2) for u in urls]
+  refused = [o for o in outs if result.IsErr(o) and o.Error.Code == "refused"]
+  heard = fiber.Receive(s.Box, timeout = 0.3)
+  bug.Assert(value.Len(refused) == value.Len(urls) or value.Len([o for o in outs if result.IsOk(o)]) == 0, "refused: $outs")
+  bug.Assert(result.IsErr(heard), "the service heard nothing")
+  named = app.Call("http://arch:$(s.Port)/", t.Env, timeout = 2)
+  result.IsErr(named)
+end
+
+defn isCallShapeChecked()
+  t = apptest.Start(App)?
+  user = app.Call("https://ana:pw@example.com/", t.Env)
+  plain = app.Call("http://example.com/", t.Env)
+  other = app.Call("ftp://example.com/", t.Env)
+  user.Error.Code == "refused" and plain.Error.Code == "refused" and other.Error.Code == "refused"
+end
+
+defn isAllowedHostAndItsRedirects()
+  (** CallAllow lets a call reach a host of the network; a redirect it follows is checked as the first, and one to
+      another address of the network is refused; without follow, a redirect is an answer. *)
+  inner = partner([http.Plain("the inner one")])?
+  s = partner([http.Redirect("https://127.0.0.1:$(inner.Port)/admin"), http.Redirect("https://127.0.0.1:$(inner.Port)/admin"), http.Plain("ok")])?
+  t = apptest.Start(App, settings = {CallAllow: "localhost", CallCa: s.Ca})?
+  first = app.Call("https://localhost:$(s.Port)/", t.Env)?
+  bug.Assert(first.Status == 302, "not followed unless asked: $(first.Status)")
+  hop = app.Call("https://localhost:$(s.Port)/", t.Env, follow = 3)
+  bug.Assert(result.IsErr(hop) and hop.Error.Code == "refused" and result.IsErr(fiber.Receive(inner.Box, timeout = 0.3)), "a redirect to the network refused: $hop")
+  app.Call("https://localhost:$(s.Port)/", t.Env)?.Body == "ok"
+end
+
+defn isRetriedWhenItMayBe()
+  s = partner([http.Plain("busy", status = 503), http.Plain("busy", status = 503), http.Plain("done")])?
+  t = apptest.Start(App, settings = {CallAllow: "localhost", CallCa: s.Ca})?
+  got = app.Call("https://localhost:$(s.Port)/report", t.Env)?
+  bug.Assert(got.Body == "done", "a GET tried three times: $(got.Body)")
+  again = partner([http.Plain("busy", status = 503), http.Plain("done")])?
+  posted = app.Call("https://localhost:$(again.Port)/pay", t.Env, method = "POST", body = "{}")?
+  bug.Assert(posted.Status == 503, "a POST is never repeated without a key")
+  keyed = partner([http.Plain("busy", status = 503), http.Plain("done")])?
+  app.Call("https://localhost:$(keyed.Port)/pay", t.Env, method = "POST", body = "{}", headers = [{Name: "Idempotency-Key", Value: "k1"}])?.Body == "done"
+end
+
+defn isSilentServiceCut()
+  l = net.Listen(0)?
+  fiber.Spawn(() -> net.Accept(l))
+  t = apptest.Start(App, settings = {CallAllow: "localhost", CallPlain: "allow"})?
+  started = sys.Now()
+  got = app.Call("http://localhost:$(net.Port(l))/", t.Env, timeout = 1, tries = 1)
+  result.IsErr(got) and got.Error.Code == "timeout" and sys.Now() - started < 4
+end
+
+defn isSignedAsStandardWebhooks()
+  (** The test vector of the specification's reference libraries. *)
+  hooks.Sign("msg_p5jXN8AQM9LWM0D4loKWxJek", 1614265330, "{\"test\": 2432232314}", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw") == "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE="
+end
+
+Paid = api.Post("/invoices/:id/pay", out = check.Record({Id: check.Id()}), role = "member")
+Hooked = api.Post("/hooks/endpoints", body = check.Record({Url: check.Text(1, 2000)}), out = check.Record({Id: check.Id(), Secret: check.Text()}), role = "member")
+Thing = app.Kind("thing", {Tenant: cepheus.Link(), Status: cepheus.Text()})
+
+defn pay(r)
+  (** The write and its message, in one group. *)
+  ops = list.Concat(app.Facts(Thing, cepheus.New(1), {Tenant: r.User.Tenant, Status: "paid"}), hooks.Later("invoice.paid", {Invoice: r.Params.id, Total: 120.5}, r)?)
+  {Id: cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)?.Things[1]}
+end
+
+Sender = app.Of([auth.Module(), hooks.Module(), app.Module("things", kinds = [Thing], serve = [app.Serve(Paid, pay), app.Serve(Hooked, (r, x) -> hooks.Add(x.Url, [], r))])], name = "sender")
+
+defn isSentSignedAndTriedAgain()
+  s = partner([http.Plain("down", status = 500), {Status: 204, Body: ""}])?
+  t = apptest.Start(Sender, settings = {CallAllow: "localhost", CallCa: s.Ca, Secret: text.Repeat(40, "s")})?
+  a = t.SignUp(ana)?
+  e = a.Call(Hooked, {Url: "https://localhost:$(s.Port)/in"})?
+  bug.Assert(text.StartsWith("whsec_", e.Secret), "a secret given once")
+  kept = cepheus.Get(hooks.Endpoint, e.Id, t.Db)?
+  bug.Assert(not text.Contains(e.Secret, kept.Secret), "kept sealed")
+  a.Call(Paid, {id: 7})?
+  t.RunJobs()?
+  first = fiber.Receive(s.Box, timeout = 2)?
+  t.Advance(300)
+  t.RunJobs()?
+  second = fiber.Receive(s.Box, timeout = 2)?
+  id = http.HeaderValue("webhook-id", first.Headers)
+  ts = http.HeaderValue("webhook-timestamp", first.Headers)
+  sig = http.HeaderValue("webhook-signature", first.Headers)
+  bug.Assert(id == http.HeaderValue("webhook-id", second.Headers), "the same id at each try")
+  bug.Assert(sig == hooks.Sign(id, text.Number(ts), first.Body, e.Secret), "signed with the endpoint's secret")
+  body = json.Parse(second.Body)!
+  bug.Assert(body.type == "invoice.paid" and body.data.Total == 120.5, "the message: $body")
+  value.Len(t.Jobs("done")!) >= 1 and value.Len(t.Jobs("ready")!) == 0
+end
+
+defn isPrivateEndpointDeadAtOnce()
+  s = partner([{Status: 204, Body: ""}], plain = true)?
+  t = apptest.Start(Sender, settings = {CallPlain: "allow", Secret: text.Repeat(40, "s")})?
+  a = t.SignUp(ana)?
+  a.Call(Hooked, {Url: "http://127.0.0.1:$(s.Port)/in"})?
+  a.Call(Paid, {id: 7})?
+  t.RunJobs()?
+  dead = t.Jobs()!
+  value.Len(dead) == 1 and text.Contains("SSRF", dead[1].Error) and result.IsErr(fiber.Receive(s.Box, timeout = 0.3))
+end
+
+defn isGoneTurnedOff()
+  s = partner([{Status: 410, Body: ""}])?
+  t = apptest.Start(Sender, settings = {CallAllow: "localhost", CallCa: s.Ca, Secret: text.Repeat(40, "s")})?
+  a = t.SignUp(ana)?
+  e = a.Call(Hooked, {Url: "https://localhost:$(s.Port)/in"})?
+  a.Call(Paid, {id: 7})?
+  t.RunJobs()?
+  cepheus.Get(hooks.Endpoint, e.Id, t.Db)?.Active == false
+end
+
+secret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+Answer = api.Post("/partner/hooks", out = check.Record({Done: check.Bool()}), role = api.Public)
+Note = app.Kind("acknowledged", {Key: cepheus.Text(), At: cepheus.Date()})
+
+defn received(r)
+  (** A message of the partner: checked, done once, in one group with its id. *)
+  m = hooks.Verify(r, secret)?
+  if m.Again
+    return {Done: true}
+  end
+  made = cepheus.Write(list.Concat(app.Facts(Note, cepheus.New(1), {Key: m.Id, At: r.Now}), m.Seen), r.Db, why = r.Why)
+  if result.IsErr(made) and made.Error.Code == "unique"
+    return {Done: true}
+  end
+  made?
+  {Done: true}
+end
+
+Receiver = app.Of([auth.Module(), hooks.Module(), app.Module("partner", kinds = [Note], serve = [app.Serve(Answer, received)])], name = "receiver")
+
+defn sent(t, body, id = "msg_1", at = missing, sig = missing)
+  (** A message to the receiver as the partner would send it: its answer's status. *)
+  ts = if value.IsMissing(at) t.Env.Now() else at end
+  s = if value.IsMissing(sig) hooks.Sign(id, ts, body, secret) else sig end
+  t.Raw("POST", "/partner/hooks", body = body, headers = [{Name: "webhook-id", Value: id}, {Name: "webhook-timestamp", Value: "$ts"},
+    {Name: "webhook-signature", Value: "v1,bm90IHRoaXMgb25l $s"}, {Name: "content-type", Value: "application/json"}]).Status
+end
+
+defn isReceivedOnceAndForgeriesRefused()
+  t = apptest.Start(Receiver)?
+  body = "{\"type\":\"invoice.acknowledged\",\"data\":{\"Invoice\":7}}"
+  bug.Assert(sent(t, body) == 200, "a message signed, in its time")
+  bug.Assert(sent(t, body) == 200, "replayed: answered, not done again")
+  notes = cepheus.Find(2, (n, k) -> {Where: [[n, Note.Key, k]], Give: {K: k}}, t.Db)?
+  bug.Assert(value.Len(notes) == 1, "done once: $notes")
+  forged = sent(t, body, id = "msg_2", sig = "v1,$(text.Repeat(43, "A"))=")
+  changed = t.Raw("POST", "/partner/hooks", body = "{\"type\":\"invoice.acknowledged\",\"data\":{\"Invoice\":8}}", headers = [{Name: "webhook-id", Value: "msg_3"},
+    {Name: "webhook-timestamp", Value: "$(t.Env.Now())"}, {Name: "webhook-signature", Value: hooks.Sign("msg_3", t.Env.Now(), body, secret)}]).Status
+  old = sent(t, body, id = "msg_4", at = t.Env.Now() - 301)
+  future = sent(t, body, id = "msg_5", at = t.Env.Now() + 301)
+  other = sent(t, body, id = "msg_6", sig = hooks.Sign("msg_6", t.Env.Now(), body, "whsec_$(text.Repeat(32, "Q"))"))
+  bare = t.Raw("POST", "/partner/hooks", body = body).Status
+  value.Equal([forged, changed, old, future, other, bare], [401, 401, 401, 401, 401, 400])
+end
+
+Count = api.Post("/count", body = check.Record({N: check.Int(1, 10)}), out = check.Record({Id: check.Id(), N: check.Int()}), role = "member")
+Counted = app.Kind("counted", {Tenant: cepheus.Link(), N: cepheus.Int()})
+Counting = app.Of([auth.Module(), app.Module("count", kinds = [Counted], serve = [app.Serve(Count, (r, x) -> {Id: cepheus.Insert(Counted, {Tenant: r.User.Tenant, N: x.N}, r.Db)?, N: x.N})])], name = "count")
+
+defn keyed(c, key, n)
+  (** A POST /count with an Idempotency-Key. *)
+  c.Raw("POST", "/count", body = json.Text({N: n}), headers = [{Name: "idempotency-key", Value: key}])
+end
+
+defn isIdempotencyKeyRunOnce()
+  t = apptest.Start(Counting, settings = {SessionIdle: 31536000, SessionMax: 31536000})?
+  a = t.SignUp(ana)?
+  one = keyed(a, "pay-7", 1)
+  two = keyed(a, "pay-7", 1)
+  bug.Assert(one.Status == 201 and two.Status == 201 and one.Body == two.Body and http.HeaderValue("idempotent-replayed", two.Headers) == "true", "the same answer: $(one.Body) $(two.Body)")
+  other = keyed(a, "pay-7", 2)
+  bug.Assert(other.Status == 422, "the key of another request: $(other.Status)")
+  b = t.SignUp({Email: "bo@example.com", Password: "another long secret", Name: "Bo"})?
+  bug.Assert(keyed(b, "pay-7", 1).Status == 201, "a key is its caller's")
+  rows = cepheus.Find(2, (x, n) -> {Where: [[x, Counted.N, n]], Give: {N: n}}, t.Db)?
+  bug.Assert(value.Len(rows) == 2, "ran once for ana, once for bo: $rows")
+  t.Advance(86401)
+  app.ForgetKeys(t.Env)?
+  keyed(a, "pay-7", 2).Status == 201
+end
+
+defn isIdempotencyKeyRequiredAndChecked()
+  t = apptest.Start(Counting, settings = {IdempotencyKey: "required"})?
+  a = t.SignUp(ana)?
+  bare = a.Raw("POST", "/count", body = json.Text({N: 1}))
+  bad = keyed(a, "a key with spaces", 1)
+  bare.Status == 400 and bad.Status == 400 and keyed(a, "k-1", 1).Status == 201 and a.Call(api.Me).Value.Email == ana.Email
+end

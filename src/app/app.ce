@@ -178,7 +178,7 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
     Now: if value.IsMissing(clock) (() -> sys.Now()) else (() -> Now(state)) end,
     OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version)),
-    SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s),
+    SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s), SessionKeyOf: sessionKey,
     WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards)}
   result.Ok(env)
@@ -240,6 +240,14 @@ defn ready(what, x)
   x.Value
 end
 
+defn keeping(env)
+  (** The keeper of the app, every minute: the idempotency keys past their time forgotten. *)
+  while not sys.StopAsked()
+    sys.Sleep(60)
+    _ = ForgetKeys(env)
+  end
+end
+
 defn Run(a)
   (** Serves an app until a stop signal: reads its settings from the environment (each from APP_ and its name; a
       wrong or missing one stops the start, with all of them named), connects to Cepheus with the kinds of every
@@ -296,6 +304,7 @@ defn Run(a)
   if not value.IsMissing(dict.Get("Cert", s))
     wrap = ready("https", tls.Server(s.Cert, dict.Get("Key", s), ready("OpenSSL", tls.Open())))
   end
+  fiber.Spawn(() -> keeping(env))
   if s.AdminPort > 0
     fiber.Spawn(() -> http.Serve(http.App() then http.Get("/metrics", r -> http.Plain(metrics.Text())), port = s.AdminPort, host = "127.0.0.1"))
   end

@@ -1,0 +1,211 @@
+(** Webhooks, as the specification Standard Webhooks writes them: a message to another service when something happens
+    (an invoice paid), sent by a background job written in the group of the write that caused it, signed by
+    HMAC-SHA256 over its id, its timestamp and its body (headers webhook-id, webhook-timestamp, webhook-signature),
+    tried again after a backoff and dead after its tries, never to an address of this machine or a private network
+    (app.Call); and a message received, its signature and its time checked, its id kept unique in Cepheus in the
+    group of what it does, so that a message replayed is refused and one sent twice does its work once.
+
+      Sign("msg_2KWPBgLlAfxdpx2AI54pPJ85f4W", 1674087231, "{\"type\":\"invoice.paid\"}", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw") then text.StartsWith("v1,") --> true *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use src/jobs
+use std/check
+use std/crypto
+use std/dict
+use std/encode
+use std/http
+use std/json
+use std/list
+use std/log
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(** An endpoint of another service that gets the app's messages: its tenant, its address, its secret (sealed under the
+    app's key: the database never holds it in clear), the types of messages it takes (none: all), whether it still
+    takes them (a 410 Gone turns it off), and when it was made. *)
+Endpoint = app.Kind("centauri_hook", {Tenant: cepheus.Link(), Url: cepheus.Text(), Secret: cepheus.Text(), Types: cepheus.Text(many = true),
+  Active: cepheus.Bool(), Created: cepheus.Date()})
+
+(** A message received: the id its sender gave it, unique, and when it came; forgotten once its time can no longer be
+    accepted. *)
+Seen = app.Kind("centauri_hook_seen", {Key: cepheus.Text(unique = true), At: cepheus.Date()})
+
+(** The settings of the webhooks: the seconds a message received may be away from now (5 minutes, as the reference
+    library takes), and the seconds a try of a message sent has. *)
+Settings = {
+  HookTolerance: check.Int(10, 86400, optional = true, default = 300),
+  HookTimeout: check.Int(1, 120, optional = true, default = 15),
+}
+
+defn keyOf(secret)
+  (** The key of a secret of Standard Webhooks: the bytes of its base64 after whsec_. *)
+  raw = if text.StartsWith("whsec_", secret) text.ByteSlice(7, text.ByteLength(secret), secret) else secret end
+  got = encode.Unbase64(raw)
+  if result.IsOk(got) got.Value else raw end
+end
+
+defn Sign(id, timestamp, body, secret, keys = missing)
+  (** The webhook-signature of a message: v1, then the base64 of the HMAC-SHA256 of id.timestamp.body under the key of
+      the secret. *)
+  k = if value.IsMissing(keys) crypto.Open()! else keys end
+  "v1,$(encode.Base64(crypto.HmacSha256(keyOf(secret), "$id.$timestamp.$body", k)))"
+end
+
+defn NewSecret(keys)
+  (** A new secret of an endpoint: whsec_ and the base64 of 24 random bytes of the kernel. *)
+  "whsec_$(encode.Base64(crypto.Random(24, keys)))"
+end
+
+defn Add(url, types, r)
+  (** A new endpoint of the tenant of who asks, for these types of messages (none: all): an Ok of {Id, Secret}, the
+      secret given this once (the database keeps it sealed), or an Err for an address a call may not reach. *)
+  if not (text.StartsWith("https://", url) or (text.StartsWith("http://", url) and dict.GetOr("CallPlain", "refuse", r.Settings) == "allow"))
+    return app.Fail(422, "Check the fields.", fields = {Url: "An address that starts with https://."})
+  end
+  secret = NewSecret(r.Keys)
+  sealed = encode.Base64(crypto.Seal(secret, sealKey(r.Env), r.Keys))
+  made = cepheus.Write(app.Facts(Endpoint, cepheus.New(1), {Tenant: r.User.Tenant, Url: url, Secret: sealed, Types: types, Active: true, Created: r.Now}),
+    r.Db, by = r.User.Id, why = r.Why)?
+  result.Ok({Id: made.Things[1], Secret: secret})
+end
+
+sealKey(env) = crypto.Blake2b("centauri hooks\n$(env.Key)", env.Keys)   (* The key that seals the secrets of the endpoints. *)
+
+defn secretOf(e, env)
+  (** The secret of an endpoint, unsealed. *)
+  raw = encode.Unbase64(e.Secret)?
+  crypto.Unseal(raw, sealKey(env), env.Keys)
+end
+
+(** The job that sends a message to an endpoint: tried again after a backoff while it fails, dead after its tries, at
+    once when its address may not be reached. *)
+Send = jobs.Kind("centauri.hook", check.Record({Endpoint: check.Id(), Id: check.Text(1, 100), Type: check.Text(1, 200), Data: check.Text(0, 1000000, lines = true)}),
+  (job, env) -> sending(job, env), tries = 8, lease = 120)
+
+defn Later(type, data, r, thing = 1000002)
+  (** The facts of the jobs that tell each active endpoint of the tenant of who asks, subscribed to this type, about
+      data: to write in the group of the write that caused it (an invoice paid and its message, both or neither). Each
+      message has an id, the same at every try, which its receiver keeps to do it once. An Ok of the operations. *)
+  rows = cepheus.Find(2, (e, a) -> {Where: [[e, Endpoint.Tenant, r.User.Tenant], [e, Endpoint.Active, a]], Give: {Id: e, Active: a}}, r.Db)?
+  ops = []
+  k = 0
+  for row in rows
+    if row.Active == true
+      e = cepheus.Get(Endpoint, row.Id, r.Db)?
+      types = dict.GetOr("Types", [], e)
+      if value.Len(types) == 0 or type in types
+        id = "msg_$(encode.Hex(crypto.Random(16, r.Keys)))"
+        ops = list.Concat(ops, jobs.Later(Send, {Endpoint: row.Id, Id: id, Type: type, Data: json.Text(data)}, thing = thing + k))
+        k += 1
+      end
+    end
+  end
+  result.Ok(ops)
+end
+
+defn iso(t)
+  (** An instant in ISO 8601, in UTC, to the second. *)
+  d = jobs.Stamp(t, jobs.Utc)
+  "$(text.ByteSlice(1, 16, d)):$(two(math.Mod(math.Floor(t), 60)))Z"
+end
+
+two(n) = if n < 10 "0$n" else "$n" end   (* A number of two digits. *)
+
+defn sending(job, env)
+  (** Sends a message to its endpoint, signed; done on a 2xx, the endpoint turned off on a 410, tried again else. *)
+  e = cepheus.Get(Endpoint, job.Endpoint, env.Db)?
+  if value.IsMissing(e) or e.Active != true
+    return result.Ok(missing)
+  end
+  secret = secretOf(e, env)
+  if result.IsErr(secret)
+    return jobs.Stop("The secret of the endpoint $(job.Endpoint) can't be unsealed: was APP_SECRET changed?")
+  end
+  now = math.Floor(env.Now())
+  body = "{\"type\":$(json.Text(job.Type)),\"timestamp\":$(json.Text(iso(now))),\"data\":$(job.Data)}"
+  headers = [{Name: "content-type", Value: "application/json"}, {Name: "webhook-id", Value: job.Id}, {Name: "webhook-timestamp", Value: "$now"},
+    {Name: "webhook-signature", Value: Sign(job.Id, now, body, secret.Value, keys = env.Keys)}, {Name: "user-agent", Value: "Centauri-Webhooks/1"}]
+  got = app.Call(e.Url, env, method = "POST", body = body, headers = headers, timeout = env.Settings.HookTimeout, tries = 1, most = 65536)
+  if result.IsErr(got)
+    if got.Error.Code == "refused"
+      return jobs.Stop(got.Error.Message)
+    end
+    return got
+  end
+  status = got.Value.Status
+  if status == 410
+    _ = cepheus.Write([cepheus.Expect(job.Endpoint, Endpoint.Active, true), cepheus.Add(job.Endpoint, Endpoint.Active, false)], env.Db, why = "webhook endpoint gone")
+    log.Warn("a webhook endpoint answered 410 Gone: turned off", {Endpoint: job.Endpoint})
+    return result.Ok(missing)
+  end
+  if status >= 200 and status < 300
+    return result.Ok(missing)
+  end
+  result.Err({Kind: "hook", Message: "The endpoint answered $status."})
+end
+
+defn Verify(r, secret, tolerance = missing)
+  (** A message of another service received by a handler, checked as Standard Webhooks says: its headers, its time
+      within tolerance seconds of now (HookTolerance), its signature (any of those it carries, each compared in a time
+      that tells nothing). An Ok of {Id, Type, Data, Payload, Seen}, Payload its body read as JSON, Seen the operations
+      that keep its id, to write in the group of what the handler does with it, and Again, true for an id seen already:
+      the handler then answers 2xx and does nothing (its sender tries again until it gets one). Two of the same id at
+      the same moment: the second group is refused (Code "unique"), and it was done once. An Err of a 400 for a
+      message without its headers, a 401 for a wrong signature or a time too far from now. *)
+  h = r.Headers
+  id = http.HeaderValue("webhook-id", h)
+  ts = http.HeaderValue("webhook-timestamp", h)
+  sigs = http.HeaderValue("webhook-signature", h)
+  if not value.IsText(id) or not value.IsText(ts) or not value.IsText(sigs) or text.ByteLength(id) > 200
+    return app.Fail(400, "A webhook comes with webhook-id, webhook-timestamp and webhook-signature.")
+  end
+  t = text.Number(ts)
+  most = if value.IsMissing(tolerance) dict.GetOr("HookTolerance", 300, r.Settings) else tolerance end
+  if not value.IsInt(t) or math.Abs(r.Env.Now() - t) > most
+    return app.Fail(401, "This webhook is too old, or of the future.")
+  end
+  signed = Sign(id, t, r.Body, secret, keys = r.Keys)
+  expected = text.ByteSlice(4, text.ByteLength(signed), signed)
+  matched = false
+  for one in text.Split(" ", sigs)
+    cut = text.Split(",", one)
+    if value.Len(cut) == 2 and cut[1] == "v1" and text.ByteLength(cut[2]) == text.ByteLength(expected) and crypto.IsSame(cut[2], expected, r.Keys)
+      matched = true
+    end
+  end
+  if not matched
+    return app.Fail(401, "This webhook's signature is wrong.")
+  end
+  seen = cepheus.Find(1, s -> {Where: [[s, Seen.Key, id]], Give: {S: s}}, r.Db)?
+  payload = json.Parse(r.Body)
+  data = if result.IsOk(payload) payload.Value else missing end
+  result.Ok({Id: id, Type: if value.IsDict(data) dict.Get("type", data) else missing end, Data: if value.IsDict(data) dict.Get("data", data) else missing end,
+    Payload: data, Again: value.Len(seen) > 0, Seen: app.Facts(Seen, cepheus.New(999999), {Key: id, At: r.Env.Now()})})
+end
+
+defn forgetting(env)
+  (** The keeper of the webhooks, every minute: the ids seen too long ago to be accepted again forgotten. *)
+  while not sys.StopAsked()
+    sys.Sleep(60)
+    old = env.Now() - 2 * env.Settings.HookTolerance
+    rows = cepheus.Find(2, (s, a) -> {Where: [[s, Seen.At, a], cepheus.Below(a, old)], Give: {Id: s}, Limit: 500}, env.Db)
+    if result.IsOk(rows)
+      ops = []
+      for row in rows.Value
+        gone = app.Gone(Seen, row.Id, env.Db)
+        if result.IsOk(gone)
+          ops = list.Concat(ops, gone.Value)
+        end
+      end
+      if value.Len(ops) > 0
+        _ = cepheus.Write(ops, env.Db, why = "webhooks seen forgotten")
+      end
+    end
+  end
+end
+
+(** The module of the webhooks: their kinds, settings, the job that sends, and the keeper of the ids received. *)
+Module() = app.Module("hooks", kinds = [Endpoint, Seen], settings = Settings, jobs = [Send], start = forgetting) then dict.Put("Runner", jobs.Module())

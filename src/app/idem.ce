@@ -1,0 +1,100 @@
+(* Idempotency keys: a client that sends a request again after a broken connection, with the same Idempotency-Key
+   header (the IETF's draft-ietf-httpapi-idempotency-key-header), gets the answer of the first, which ran once. The
+   key is kept unique in Cepheus with its request's hash, so that two processes, two servers, never both run it: a
+   second at the same moment gets a 409, the same key with another request a 422. A key belongs to its caller (his
+   session, or his address without one) and its endpoint; it is kept IdempotencyTime seconds. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/crypto
+use std/dict
+use std/encode
+use std/http
+use std/list
+use std/result
+use std/text
+use std/value
+
+defn keyOk(k)
+  (** Is a key of 1 to 255 bytes of printable ASCII? *)
+  if not value.IsText(k) or text.ByteLength(k) == 0 or text.ByteLength(k) > 255
+    return false
+  end
+  list.All([b >= 33 and b <= 126 for b in text.Bytes(k)])
+end
+
+refusal(status, message, rid, env) = refuse(status, message, rid, env)   (* An answer that refuses at the door. *)
+
+defn claimed(b, req, env, rid)
+  (** The key of a request that changes something: missing without one (or with IdempotencyKey ignored), {Out} for an
+      answer given now (the answer kept of the first, or a refusal), or {Id} once this request holds the key. *)
+  s = env.Settings
+  e = b.Endpoint
+  given = http.HeaderValue("idempotency-key", req.Headers)
+  if value.IsMissing(given)
+    if s.IdempotencyKey == "required" and e.Role != "public"
+      return {Out: refusal(400, "This request needs an Idempotency-Key header.", rid, env)}
+    end
+    return missing
+  end
+  if not keyOk(given)
+    return {Out: refusal(400, "An Idempotency-Key is 1 to 255 printable characters.", rid, env)}
+  end
+  session = if value.IsMissing(env.SessionKeyOf) missing else env.SessionKeyOf(req, env) end
+  scope = if value.IsMissing(session) "ip:$(dict.GetOr("Ip", "", req))" else "s:$(encode.Hex(session))" end
+  key = encode.Hex(crypto.Blake2b("centauri once\n$scope\n$(e.Name)\n$given", env.Keys))
+  hash = encode.Hex(crypto.Blake2b("$(req.Method)\n$(req.Path)\n$(req.Query)\n$(req.Body)", env.Keys))
+  rows = cepheus.Find(1, o -> {Where: [[o, Once.Key, key]], Give: {Id: o}}, env.Db)
+  if result.IsErr(rows)
+    return {Out: Answer(Problem(rows.Error, rid))}
+  end
+  if value.Len(rows.Value) > 0
+    o = cepheus.Get(Once, rows.Value[1].Id, env.Db)
+    if result.IsErr(o) or value.IsMissing(o.Value)
+      return {Out: refusal(409, "A request with this Idempotency-Key is being answered: send it again in a moment.", rid, env)}
+    end
+    kept = o.Value
+    if kept.Hash != hash
+      return {Out: refusal(422, "This Idempotency-Key was used for another request.", rid, env)}
+    end
+    if kept.State != "done"
+      return {Out: refusal(409, "A request with this Idempotency-Key is being answered: send it again in a moment.", rid, env)}
+    end
+    out = {Status: kept.Status, Body: dict.GetOr("Body", "", kept), Headers: [{Name: "content-type", Value: dict.GetOr("Type", "application/json", kept)},
+      {Name: "idempotent-replayed", Value: "true"}], Route: e.Name, Done: true}
+    return {Out: out}
+  end
+  made = cepheus.Write(Facts(Once, cepheus.New(1), {Key: key, Hash: hash, State: "running", At: env.Now()}), env.Db, why = "idempotency key")
+  if result.IsErr(made)
+    return {Out: refusal(409, "A request with this Idempotency-Key is being answered: send it again in a moment.", rid, env)}
+  end
+  {Id: made.Value.Things[1]}
+end
+
+defn settled(claim, out, env)
+  (** The answer of a request that held a key, kept to be given again; or the key let go, for an answer that a retry
+      should not get again: a refusal of the door (401, 403, 409, 429), an error of the server (5xx), a stream. *)
+  id = claim.Id
+  if out.Status >= 500 or out.Status in [401, 403, 409, 429] or dict.Has("Stream", out) or not value.IsText(out.Body) or text.ByteLength(out.Body) > 1048576
+    ops = Gone(Once, id, env.Db)
+    if result.IsOk(ops) and value.Len(ops.Value) > 0
+      _ = cepheus.Write(ops.Value, env.Db, why = "idempotency key let go")
+    end
+    return missing
+  end
+  kind = http.HeaderValue("content-type", dict.GetOr("Headers", [], out))
+  _ = cepheus.Write([cepheus.Add(id, Once.State, "done"), cepheus.Add(id, Once.Status, out.Status), cepheus.Add(id, Once.Body, out.Body),
+    cepheus.Add(id, Once.Type, if value.IsText(kind) kind else "application/json" end)], env.Db, why = "idempotency key kept")
+end
+
+defn ForgetKeys(env)
+  (** The keys older than IdempotencyTime forgotten, 500 a round: an Ok of how many. *)
+  old = env.Now() - env.Settings.IdempotencyTime
+  rows = cepheus.Find(2, (o, a) -> {Where: [[o, Once.At, a], cepheus.Below(a, old)], Give: {Id: o}, Limit: 500}, env.Db)?
+  ops = []
+  for row in rows
+    ops = list.Concat(ops, Gone(Once, row.Id, env.Db)?)
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, env.Db, why = "idempotency keys forgotten")?
+  end
+  result.Ok(value.Len(rows))
+end
