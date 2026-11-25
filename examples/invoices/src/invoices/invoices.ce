@@ -3,6 +3,7 @@
    minute; and the dashboard's numbers. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/hooks
 use std/csv
 use std/date
 use std/dict
@@ -77,8 +78,9 @@ defn paying(r)
   if inv.Status == "paid"
     return app.Fail(409, "Invoice $(inv.Number) is paid already.")
   end
-  cepheus.Write([cepheus.Expect(inv.Id, Invoice.Status, inv.Status), cepheus.Add(inv.Id, Invoice.Status, "paid"), cepheus.Add(inv.Id, Invoice.PaidAt, r.Now)],
-    r.Db, by = r.User.Id, why = r.Why)?
+  told = hooks.Later("invoice.paid", {Invoice: inv.Id, Number: inv.Number, Total: inv.Total, PaidAt: r.Now}, r)?
+  cepheus.Write(list.Concat([cepheus.Expect(inv.Id, Invoice.Status, inv.Status), cepheus.Add(inv.Id, Invoice.Status, "paid"), cepheus.Add(inv.Id, Invoice.PaidAt, r.Now)],
+    told), r.Db, by = r.User.Id, why = r.Why)?
   invoiceOf(inv.Id, r)
 end
 

@@ -2,7 +2,17 @@
     owner is an admin, who makes clients and invoices and invites accountants, who make and pay invoices. *)
 use deps/www-celestial/centauri/src/app
 use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use std/check
 use src/invoices/endpoints as e
+
+(** The report, at 06:00 in Paris, every day: one run a day whatever the servers. *)
+Report = jobs.Every("report", "0 6 * * *", report, zone = "Europe/Paris")
+
+(** The clients made before they had a country get FR, once, before the app serves: an expand of the schema (the field
+    added), then this fill; the contract takes Country with FR by default meanwhile. *)
+Countries = app.Migration("2026-11-26 clients get a country", app.Fill(Client, "Country", c -> "FR"))
 
 (** The roles, each with those it includes. *)
 Roles = {owner: ["admin"], admin: ["accountant"], accountant: []}
@@ -11,7 +21,13 @@ Module = app.Module("invoices", kinds = Kinds, rules = Rules, start = keep, serv
   app.Serve(e.AddClient, addClient), app.Serve(e.Clients, clients), app.Serve(e.Client, client), app.Serve(e.EditClient, editClient),
   app.Serve(e.DeleteClient, deleteClient), app.Serve(e.AddInvoice, addInvoice), app.Serve(e.Invoices, invoices), app.Serve(e.Export, export),
   app.Serve(e.Invoice, r -> invoiceOf(r.Params.id, r)), app.Serve(e.EditInvoice, editInvoice), app.Serve(e.Pay, pay),
-  app.Serve(e.DeleteInvoice, deleteInvoice), app.Serve(e.Dashboard, dashboard)])
+  app.Serve(e.DeleteInvoice, deleteInvoice), app.Serve(e.Dashboard, dashboard), app.Serve(e.Scan, scan), app.Serve(e.ScanFile, scanFile),
+  app.Live(e.Unpaid, unpaid), app.Serve(e.AddPartner, addPartner), app.Serve(e.PartnerAnswer, partnerAnswer)], migrations = [Countries])
 
-(** The app: an accountant is who joins an office by invitation. *)
-App = app.Of([auth.Module(), Module], name = "invoices", roles = Roles, defaults = {MemberRoles: "accountant"})
+(** The settings of the app's own: the secret the partner signs his answers with. *)
+Settings = {PartnerSecret: check.Secret(10, 200, optional = true, default = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")}
+
+(** The app: an accountant is who joins an office by invitation; an address is checked by the link of its mail before
+    a session, and the sign-up answers the same whether an address has an account or not. *)
+App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), Module], name = "invoices", roles = Roles, settings = Settings,
+  defaults = {MemberRoles: "accountant", EmailCheck: "required", SignUpAnswer: "neutral"})

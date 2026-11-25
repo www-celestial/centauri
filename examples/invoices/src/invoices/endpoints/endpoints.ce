@@ -6,8 +6,10 @@ use std/check
 Statuses = ["unpaid", "late", "paid"]   (** The statuses of an invoice. *)
 Sorts = ["-number", "number", "-date", "due", "-total"]   (** The orders of the list of invoices; - is the largest first. *)
 
-ClientIn = check.Record({Name: check.Text(1, 120), Email: check.Email(), City: check.Text(0, 80, optional = true, default = "")})
-ClientOut = check.Record({Id: check.Id(), Name: check.Text(), Email: check.Email(), City: check.Text(), Overdue: check.Bool(optional = true)})
+ClientIn = check.Record({Name: check.Text(1, 120), Email: check.Email(), City: check.Text(0, 80, optional = true, default = ""),
+  Country: check.Text(2, 2, optional = true, default = "FR")})
+ClientOut = check.Record({Id: check.Id(), Name: check.Text(), Email: check.Email(), City: check.Text(), Overdue: check.Bool(optional = true),
+  Country: check.Text(optional = true)})
 Balance = check.Record({Total: check.Money(2), Count: check.Int(0)})
 
 AddClient = api.Post("/clients", body = ClientIn, out = ClientOut, role = "admin")
@@ -41,3 +43,20 @@ DeleteInvoice = api.Delete("/invoices/:id", role = "accountant")
 
 Payment = check.Record({Invoice: check.Id(), PaidAt: check.Time(), Number: check.Int(1), BillTo: check.Text(), Total: check.Money(2, 0, 1e15)})
 Dashboard = api.Get("/dashboard", out = check.Record({Unpaid: Balance, Late: Balance, Payments: check.List(Payment, 0, 10)}), role = "accountant")
+
+(** The scan of an invoice: a PDF, a JPEG or a PNG of 10 MB at most, its type checked by its first bytes, kept in the
+    vault; and read back, whole or by a range. *)
+Scan = api.Upload("/invoices/:id/scan", ["application/pdf", "image/jpeg", "image/png"], most = 10485760,
+  out = check.Record({File: check.Id(), Size: check.Int(0)}), role = "accountant")
+ScanFile = api.Get("/invoices/:id/scan", out = api.File(), role = "accountant")
+
+(** The invoices not paid of the office, live on every page that shows them: each change of the database, by any
+    server, comes to them. *)
+Unpaid = api.Live("invoices.unpaid", out = InvoiceRow, role = "accountant")
+
+(** An endpoint of a partner that is told when an invoice is paid: its address, and the secret that signs the
+    messages, given once. *)
+AddPartner = api.Post("/partners", body = check.Record({Url: check.Url(https = true)}), out = check.Record({Id: check.Id(), Secret: check.Text()}), role = "admin")
+
+(** The answers of the partner, signed as Standard Webhooks: he took the payment of an invoice. *)
+PartnerAnswer = api.Post("/partner/answers", out = check.Record({Done: check.Bool()}), role = api.Public)

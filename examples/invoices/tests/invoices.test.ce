@@ -32,8 +32,7 @@ end
 defn accountant(s)
   (** An accountant of the office, invited by its owner. *)
   code = s.Ada.Call(api.Invite, {Email: "bo@example.com", Roles: ["accountant"]})?.Code
-  s.T.Anyone().Call(api.SignUp, {Email: "bo@example.com", Password: "another long secret", Name: "Bo", Invite: code})?
-  s.T.SignIn("bo@example.com", "another long secret")
+  s.T.SignUp({Email: "bo@example.com", Password: "another long secret", Name: "Bo", Invite: code})
 end
 
 numbers(page) = [r.Number for r in page.Rows]

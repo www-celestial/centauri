@@ -3,14 +3,20 @@ use deps/www-celestial/cepheus/cesia/cepheus
 use deps/www-celestial/centauri/src/app
 
 (** A client. Search is its name folded (text.Fold), for the search as one types; Key, unique, is "tenant/e-mail";
-    Overdue is given by the rule Overdue, never written. *)
+    Overdue is given by the rule Overdue, never written; Country, added after the first version, filled for the
+    clients made before by the migration Countries. *)
 Client = app.Kind("client", {Tenant: cepheus.Link(), Name: cepheus.Text(), Search: cepheus.Text(), Email: cepheus.Text(),
-  Key: cepheus.Text(unique = true), City: cepheus.Text(), Overdue: cepheus.Bool()})
+  Key: cepheus.Text(unique = true), City: cepheus.Text(), Overdue: cepheus.Bool(), Country: cepheus.Text()})
 
 (** An invoice: BillTo is the client's name when it was made, as an invoice keeps it; Status "unpaid", "late" or
-    "paid"; Total the sum of its lines. *)
+    "paid"; Total the sum of its lines; Scan the file of its scan; Acknowledged when the partner said he took its
+    payment. *)
 Invoice = app.Kind("invoice", {Tenant: cepheus.Link(), Number: cepheus.Int(), Client: cepheus.Link(), BillTo: cepheus.Text(),
-  Search: cepheus.Text(), Date: cepheus.Date(), Due: cepheus.Date(), Status: cepheus.Text(), Total: cepheus.Money(2), PaidAt: cepheus.Date()})
+  Search: cepheus.Text(), Date: cepheus.Date(), Due: cepheus.Date(), Status: cepheus.Text(), Total: cepheus.Money(2), PaidAt: cepheus.Date(),
+  Scan: cepheus.Link(), Acknowledged: cepheus.Date()})
+
+(** The scans of the invoices, files in the vault of Cepheus, sealed under the key of their office. *)
+Scans = app.Files("scan")
 
 (** A line of an invoice. *)
 Line = app.Kind("line", {Tenant: cepheus.Link(), Invoice: cepheus.Link(), Position: cepheus.Int(), Label: cepheus.Text(),
@@ -23,5 +29,5 @@ Overdue = cepheus.Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], 
     deleted client, is refused, whatever the order of two requests that do both at once. *)
 NoInvoiceOfDeleted = cepheus.Rule("no-invoice-of-a-deleted-client", 3, (c, i, n) -> {Where: [[i, Invoice.Client, c], cepheus.Not([c, Client.Name, n])], Then: cepheus.Never})
 
-Kinds = [Client, Invoice, Line]
+Kinds = [Client, Invoice, Line, Scans]
 Rules = [Overdue, NoInvoiceOfDeleted]

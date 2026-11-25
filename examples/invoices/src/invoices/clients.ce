@@ -9,7 +9,7 @@ use std/value
 
 taken(x) = result.IsErr(x) and x.Error.Code == "unique"
 emailTaken() = app.Fail(409, "Check the fields.", fields = {Email: "Another client has this e-mail."})
-fields(x, r) = {Name: x.Name, Search: text.Fold(x.Name), Email: x.Email, Key: "$(r.User.Tenant)/$(x.Email)", City: x.City}
+fields(x, r) = {Name: x.Name, Search: text.Fold(x.Name), Email: x.Email, Key: "$(r.User.Tenant)/$(x.Email)", City: x.City, Country: x.Country}
 
 defn addClient(r, x)
   (** POST /clients. *)

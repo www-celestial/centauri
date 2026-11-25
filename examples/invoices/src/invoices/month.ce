@@ -1,0 +1,86 @@
+(* The first month of the invoices: the scan of an invoice kept in the vault and read by ranges, the unpaid invoices
+   live on every page, the partner told when an invoice is paid and his answers received, the report of each night
+   sent by mail, and the clients that get a country. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use deps/www-celestial/centauri/src/mail
+use std/dict
+use std/list
+use std/result
+use std/text
+use std/value
+
+defn scan(r, file)
+  (** POST /invoices/:id/scan: the file, checked already (its type by its first bytes, its size), stored as it comes,
+      and the invoice linked to it. *)
+  inv = app.Own(Invoice, r.Params.id, r)?
+  f = app.Store(Scans, file, r)?
+  cepheus.Write([cepheus.Expect(inv.Id, Invoice.Scan, dict.Get("Scan", inv)), cepheus.Add(inv.Id, Invoice.Scan, f)], r.Db, by = r.User.Id, why = r.Why)?
+  {File: f, Size: file.Size}
+end
+
+defn scanFile(r)
+  (** GET /invoices/:id/scan: the scan of an invoice of the office, whole or the range asked. *)
+  inv = app.Own(Invoice, r.Params.id, r)?
+  if value.IsMissing(dict.Get("Scan", inv))
+    return app.Missing("This invoice has no scan.")
+  end
+  app.Download(Scans, inv.Scan, r)
+end
+
+(** The invoices not paid of the office of the screen, as their rows of the list: a live question. *)
+unpaid(s, args) = cepheus.Watch(7, (i, no, b, d, u, st, t) -> {Where: [[i, Invoice.Tenant, s.User.Tenant], [i, Invoice.Number, no],
+  [i, Invoice.BillTo, b], [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, st], cepheus.Not([i, Invoice.Status, "paid"]), [i, Invoice.Total, t]],
+  Give: {Id: i, Number: no, BillTo: b, Date: d, Due: u, Status: st, Total: t}}, s.Db, until = s.Ended)
+
+addPartner(r, x) = hooks.Add(x.Url, ["invoice.paid"], r)   (* POST /partners: an endpoint told of each payment. *)
+
+defn partnerAnswer(r)
+  (** POST /partner/answers: a message of the partner, checked (its signature by APP_PARTNER_SECRET, its time), done
+      once: the invoice it names marked acknowledged, in one group with its id. *)
+  m = hooks.Verify(r, r.Settings.PartnerSecret)?
+  if m.Again or m.Type != "invoice.acknowledged"
+    return {Done: true}
+  end
+  inv = if value.IsDict(m.Data) app.IdOf(dict.Get("Invoice", m.Data)) else missing end
+  if value.IsMissing(inv)
+    return app.Fail(422, "This answer names no invoice.")
+  end
+  done = cepheus.Write(list.Concat([cepheus.Expect(inv, Invoice.Acknowledged), cepheus.Add(inv, Invoice.Acknowledged, r.Now)], m.Seen), r.Db, why = r.Why)
+  if result.IsErr(done) and done.Error.Code in ["unique", "conflict"]
+    return {Done: true}
+  end
+  done?
+  {Done: true}
+end
+
+defn owners(tenant, db)
+  (** The addresses of the owners of an office. *)
+  rows = cepheus.Find(3, (m, u, e) -> {Where: [[m, auth.Member.Tenant, tenant], [m, auth.Member.Roles, "owner"], [m, auth.Member.User, u],
+    [u, auth.User.Email, e]], Give: {Email: e}}, db)?
+  result.Ok(list.Unique([x.Email for x in rows]))
+end
+
+defn report(job, env)
+  (** The report of each night: to the owners of each office with invoices not paid, their count and their sum, one
+      mail an office, each by a job of its own (so that one office's mail that fails is tried again alone). *)
+  offices = cepheus.Find(3, (i, o, t) -> {Where: [[i, Invoice.Tenant, o], [i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])],
+    Give: {Office: o, Total: cepheus.Sum(t), Count: cepheus.Count()}}, env.Db)?
+  ops = []
+  k = 0
+  for o in offices
+    to = owners(o.Office, env.Db)?
+    if value.Len(to) > 0
+      ops = list.Concat(ops, mail.Later({To: to, Subject: "Unpaid invoices: $(o.Count)", Text: "Good morning,\n\n$(o.Count) invoices are not paid, $(text.Decimals(2, o.Total)) in all ($(job.Slot)).\n"},
+        thing = 1000 + k))
+      k += 1
+    end
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, env.Db, why = env.Why)?
+  end
+  result.Ok(missing)
+end

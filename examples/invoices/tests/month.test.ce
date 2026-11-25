@@ -1,0 +1,205 @@
+(** The first month of the invoices, the tutorials 6 to 11 of the book, each checked: signing up with the link of a
+    mail and a forgotten password, the report of each night by mail and tried again, the scan of an invoice read by
+    ranges, the unpaid invoices live, the partner told of a payment and his answer received, the clients that get a
+    country. An app in memory, and a server on a free port where a page or a partner talks to it. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use src/invoices
+use src/invoices/endpoints as e
+use std/bug
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+use std/websocket as ws
+
+now = 1794528000   (* 2026-11-13 00:00 UTC, a Friday *)
+ada = {Email: "ada@example.com", Password: "correct horse battery", Name: "Ada", Tenant: "Martin & Co"}
+lines = [{Label: "Design", Quantity: 3, Price: 400}, {Label: "Hosting", Quantity: 1, Price: 80.5}]
+
+defn office(settings = {})
+  (** An office: Ada its owner, a client, an invoice. *)
+  t = apptest.Start(invoices.App, now = now, settings = settings)?
+  a = t.SignUp(ada)?
+  c = a.Call(e.AddClient, {Name: "Ada Martin", Email: "am@example.com", City: "Lyon"})?
+  inv = a.Call(e.AddInvoice, {Client: c.Id, Date: "2026-11-01", Due: "2026-12-01", Lines: lines})?
+  result.Ok({T: t, Ada: a, Client: c, Invoice: inv})
+end
+
+defn isSignedUpByTheLinkOfItsMail()
+  (** Tutorial 6: no session before the link of the mail; the same answer for an address taken; a password forgotten
+      set again by the link of its mail. *)
+  t = apptest.Start(invoices.App, now = now)?
+  first = t.Anyone().Send(api.SignUp, ada)
+  bug.Assert(first.Status == 202 and value.IsMissing(http.HeaderValue("set-cookie", first.Headers)), "no session before the check")
+  t.RunJobs()?
+  code = t.Code(ada.Email)
+  a = t.Anyone().Call(api.CheckEmail, {Code: code})?
+  bug.Assert(a.Checked and a.TenantName == "Martin & Co", "checked, signed in: $a")
+  again = t.Anyone().Send(api.SignUp, dict.Put("Password", "a guess of eve's", ada))
+  bug.Assert(again.Status == 202 and again.Body == first.Body, "a taken address answered as a new one")
+  t.Anyone().Send(api.Forgot, {Email: ada.Email})
+  t.RunJobs()?
+  reset = t.Anyone().Call(api.Reset, {Code: t.Code(ada.Email), Password: "a new long password"})?
+  reset.Email == ada.Email and result.IsOk(t.SignIn(ada.Email, "a new long password"))
+end
+
+defn isReportOfTheNightSentAndTriedAgain()
+  (** Tutorial 7: at 06:00 in Paris, the owners of each office with invoices not paid get their count and sum; a
+      server of mail that can't be reached keeps the mail for later, never loses it. *)
+  s = office()?
+  t = s.T
+  t.Advance(5 * 3600 + 60)                           (* 05:01 UTC, 06:01 in Paris *)
+  t.RunJobs()?
+  m = [x for x in t.Mails() if text.StartsWith("Unpaid invoices", x.Subject)]
+  bug.Assert(value.Len(m) == 1 and value.Equal(m[1].To, ["ada@example.com"]) and text.Contains("1 invoices are not paid, 1280.50", m[1].Text), "the report: $m")
+  t.RunJobs()?
+  bug.Assert(value.Len([x for x in t.Mails() if text.StartsWith("Unpaid", x.Subject)]) == 1, "one a day")
+  down = office()?
+  down.T.Advance(5 * 3600 + 60)
+  l = net.Listen(0)?
+  fiber.Spawn(() -> closer(l))
+  broken = dict.Put("Settings", dict.Put("MailUrl", "smtps://a:b@localhost:$(net.Port(l))", down.T.Env.Settings), down.T.Env)   (* the server of mail down *)
+  jobs.RunDue(broken)?
+  waiting = [j for j in down.T.Jobs("ready")! if j.Kind == "centauri.mail" and j.Tries == 1]
+  value.Len(waiting) == 1 and waiting[1].RunAt > down.T.Env.Now()
+end
+
+defn closer(l)
+  (** A server of mail that closes each connection at once. *)
+  while true
+    c = net.Accept(l)
+    if result.IsErr(c)
+      return missing
+    end
+    net.Close(c.Value)
+  end
+end
+
+pdf = "%PDF-1.7\n$(text.Repeat(300000, "z"))"   (* A scan of 300,009 bytes. *)
+
+defn isScanKeptAndReadByRanges()
+  (** Tutorial 8: the scan of an invoice, a PDF by its first bytes, kept by parts, read back by a range. *)
+  s = office(settings = {UploadPart: 65536})?
+  up = s.Ada.Raw("POST", "/invoices/$(s.Invoice.Id)/scan?name=scan.pdf", body = pdf, headers = [{Name: "content-type", Value: "application/pdf"}])
+  bug.Assert(up.Status == 201, "kept: $(up.Status) $(up.Body)")
+  fake = s.Ada.Raw("POST", "/invoices/$(s.Invoice.Id)/scan?name=scan.pdf", body = "<script>alert(1)</script>", headers = [{Name: "content-type", Value: "application/pdf"}])
+  bug.Assert(fake.Status == 415, "a page sent as a PDF: $(fake.Status)")
+  part = s.Ada.Raw("GET", "/invoices/$(s.Invoice.Id)/scan", headers = [{Name: "range", Value: "bytes=65530-65545"}])
+  part.Status == 206 and apptest.Drained(part) == text.ByteSlice(65531, 65546, pdf)
+end
+
+defn served(db, extra = {}, clock = missing)
+  (** The app served on a free port over a database, as cesia do serve runs it: {Port, Env}. *)
+  l = net.Listen(0)!
+  s = app.Read(invoices.App.Fields, dict.Merge({Profile: "test", Origin: "http://localhost:$(net.Port(l))", Pow: "off", SessionCache: 0}, extra),
+    defaults = invoices.App.Defaults)!
+  env = app.Start(invoices.App, s, db, clock = clock)!
+  app.Migrate(invoices.App, env)!
+  fiber.Spawn(() -> http.Serve(app.App(env), listener = l, timeout = 5))
+  {Port: net.Port(l), Env: env}
+end
+
+defn isUnpaidLiveOnEveryPage()
+  (** Tutorial 9: a page shows the unpaid invoices; a payment, by any page of any server, takes it away. *)
+  s = office()?
+  one = served(s.T.Db, clock = s.T.Env.Now())
+  two = served(s.T.Db, clock = s.T.Env.Now())
+  cookie = s.Ada.Cookie
+  q = encode.UrlEncode(json.Text([{Show: "invoices.unpaid", Args: {}}]))
+  c = ws.Dial("ws://localhost:$(one.Port)/live?shows=$q", headers = [{Name: "origin", Value: "http://localhost:$(one.Port)"}, {Name: "cookie", Value: cookie}])?
+  ws.Send(json.Text({Hello: 1}), c)?
+  first = json.Parse(fiber.Receive(c.Messages, timeout = 3)?)!
+  bug.Assert(dict.Has("Rows", first[1]), "the answer: $first")
+  bug.Assert(value.Len(first[1].Rows) == 1 and first[1].Rows[1].Number == 1, "the unpaid one: $first")
+  paid = http.Fetch("http://localhost:$(two.Port)/invoices/$(s.Invoice.Id)/pay", method = "POST", headers = [{Name: "host", Value: "localhost:$(two.Port)"}, {Name: "cookie", Value: cookie}])?
+  bug.Assert(paid.Status == 200, "paid on the other server: $(paid.Status)")
+  change = json.Parse(fiber.Receive(c.Messages, timeout = 3)?)!
+  ws.Close(c)
+  value.Len(change[1].Removed) == 1 and change[1].Removed[1].Id == s.Invoice.Id
+end
+
+dir = ".cesia/tls"
+
+defn certs()
+  (** An authority and a certificate of localhost it signed, made once by openssl. *)
+  if result.IsOk(sys.Read("$dir/server.pem")) and result.IsOk(sys.Read("$dir/ca.pem"))
+    return result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+  end
+  sys.Mkdir(dir)?
+  sys.Write("$dir/san.txt", "subjectAltName=DNS:localhost,IP:127.0.0.1\n")?
+  steps = [["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=invoices test authority", "-days", "3650", "-keyout", "$dir/ca.key", "-out", "$dir/ca.pem"],
+    ["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost", "-keyout", "$dir/server.key", "-out", "$dir/server.csr"],
+    ["x509", "-req", "-in", "$dir/server.csr", "-CA", "$dir/ca.pem", "-CAkey", "$dir/ca.key", "-CAcreateserial", "-days", "3650", "-out", "$dir/server.pem", "-extfile", "$dir/san.txt"]]
+  for args in steps
+    p = sys.Start("openssl", args = args)?
+    _ = sys.ReadOutput(p)
+    if sys.WaitExit(p) != 0
+      return result.Err({Kind: "test", Message: "openssl $(args[1]) failed"})
+    end
+  end
+  result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+end
+
+defn isPartnerToldAndHisAnswerTaken()
+  (** Tutorial 10: a payment and its message to the partner in one group, signed, sent by a job; the partner's
+      answer, signed by its secret, marks the invoice acknowledged, once. *)
+  c = certs()?
+  l = net.Listen(0)?
+  box = fiber.Channel()
+  fiber.Spawn(() -> http.Serve(http.App() then http.Post("/in", r -> took(r, box)), listener = l, wrap = tls.Server(c.Cert, c.Key, tls.Open()?)?))
+  s = office(settings = {CallAllow: "localhost", CallCa: c.Ca, Secret: text.Repeat(40, "s")})?
+  p = s.Ada.Call(e.AddPartner, {Url: "https://localhost:$(net.Port(l))/in"})?
+  s.Ada.Call(e.Pay, {id: s.Invoice.Id})?
+  s.T.RunJobs()?
+  got = fiber.Receive(box, timeout = 3)?
+  ts = http.HeaderValue("webhook-timestamp", got.Headers)
+  bug.Assert(http.HeaderValue("webhook-signature", got.Headers) == hooks.Sign(http.HeaderValue("webhook-id", got.Headers), text.Number(ts), got.Body, p.Secret), "signed")
+  bug.Assert(json.Parse(got.Body)!.data.Number == 1, "the invoice paid: $(got.Body)")
+  answer = json.Text({type: "invoice.acknowledged", data: {Invoice: s.Invoice.Id}})
+  at = s.T.Env.Now()
+  sig = hooks.Sign("msg_ack_1", at, answer, "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw")
+  headers = [{Name: "webhook-id", Value: "msg_ack_1"}, {Name: "webhook-timestamp", Value: "$at"}, {Name: "webhook-signature", Value: sig}, {Name: "content-type", Value: "application/json"}]
+  bug.Assert(s.T.Raw("POST", "/partner/answers", body = answer, headers = headers).Status == 200, "the answer taken")
+  marked = cepheus.Get(invoices.Invoice, s.Invoice.Id, s.T.Db)?.Acknowledged
+  bug.Assert(s.T.Raw("POST", "/partner/answers", body = answer, headers = headers).Status == 200, "a replay answered")
+  forged = s.T.Raw("POST", "/partner/answers", body = answer, headers = list.Append({Name: "webhook-signature", Value: "v1,AAAA"}, list.Take(1, headers))).Status
+  marked == at and cepheus.Get(invoices.Invoice, s.Invoice.Id, s.T.Db)?.Acknowledged == at and forged >= 400
+end
+
+defn took(r, box)
+  fiber.Send(r, box)
+  {Status: 204, Body: ""}
+end
+
+defn isSchemaChangedWithoutAStop()
+  (** Tutorial 11: the clients made before Country existed get FR by the migration, once, before the new version
+      serves; a client made by the new version gives its own; a rename is refused until Cepheus has A2. *)
+  db = cepheus.Fork(cepheus.Empty, invoices.App.Kinds)?
+  tenant = cepheus.Insert(auth.Tenant, {Name: "Martin & Co", Search: "martin & co", Created: now}, db)?
+  old = cepheus.Insert(invoices.Client, {Tenant: tenant, Name: "Old client", Search: "old client", Email: "old@example.com", Key: "$tenant/old@example.com", City: "Lyon"}, db)?
+  s = app.Read(invoices.App.Fields, {Profile: "test", Origin: "http://app.test", Pow: "off"}, defaults = invoices.App.Defaults)?
+  env = app.Start(invoices.App, s, db)?
+  ran = app.Migrate(invoices.App, env)?
+  bug.Assert("2026-11-26 clients get a country" in ran and cepheus.Get(invoices.Client, old, db)?.Country == "FR", "filled: $ran")
+  bug.Assert(value.Len(app.Migrate(invoices.App, env)?) == 0, "once")
+  t = office()?
+  be = t.Ada.Call(e.AddClient, {Name: "Bo", Email: "bo@example.com", City: "Liège", Country: "BE"})?
+  fr = t.Ada.Call(e.AddClient, {Name: "Cy", Email: "cy@example.com"})?
+  renamed = app.Of([invoices.Module, app.Module("later", migrations = [app.Rename(invoices.Client, "City", "Town")])], name = "x", roles = invoices.Roles)
+  refused = app.Migrate(renamed, env)
+  be.Country == "BE" and fr.Country == "FR" and result.IsErr(refused) and text.Contains("A2", refused.Error.Message)
+end
