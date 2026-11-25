@@ -20,5 +20,7 @@ in [`examples/invoices`](https://github.com/www-celestial/centauri/tree/main/exa
    three tests Centauri makes of any app, `Isolated`, `Fuzz`, `Surface`.
 6. [Security](security.md): each threat of the OWASP Top 10, and the others, with Centauri's defense and its test.
 7. [The administration](administration.md): the endpoints of the super-admin pages, and what they show.
+8. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, and where
+   the time goes.
 
 The reference of the packages, every public name with its parameters, is under [Reference](ref/index.html).
