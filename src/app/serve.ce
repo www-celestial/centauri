@@ -73,9 +73,11 @@ defn front(base, req, env)
       noted(env, "origin", "ip:$ip", "A request that changes something came from another site.", missing, missing, ip, req.Method)
       out = refuse(403, "This request comes from another site than the app's.", rid, env)
     else if value.Len(req) == 6
-      (* the request of std/http, {Method, Path, Query, Headers, Body, Peer}, made again with three fields more:
-         a record made at once costs a tenth of three fields added to a copy *)
-      out = base({Method: req.Method, Path: req.Path, Query: req.Query, Headers: req.Headers, Body: req.Body, Peer: req.Peer, Id: rid, Ip: ip, Site: site})
+      (* the request of std/http, {Method, Path, Query, Headers, Body, Peer}, made again with three fields more, and
+         the two that std/http's routes give it, so that none is added to a copy: a record made at once costs a
+         tenth of three fields added *)
+      out = base({Method: req.Method, Path: req.Path, Query: req.Query, Headers: req.Headers, Body: req.Body, Peer: req.Peer, Id: rid, Ip: ip,
+        Site: site, Params: missing, Cookies: missing})
     else
       req.Id = rid
       req.Ip = ip
@@ -85,7 +87,7 @@ defn front(base, req, env)
   end
   if not dict.Has("Done", out)
     (* no route took it, so the limit of its address is counted here; a route counts it with the user's *)
-    refused = limited([ipLimit(ip, s)], env, ip, req.Method, missing, rid)
+    refused = limited(door(ip, env.State, missing, missing, missing, missing, 0), env, ip, req.Method, rid)
     if not value.IsMissing(refused)
       out = refused
     else if out.Status >= 400
@@ -116,19 +118,17 @@ defn front(base, req, env)
   out
 end
 
-ipLimit(ip, s) = Limit("ip:$ip", s.LimitIp, 60, list.Max([1, math.Floor(s.LimitIp / 4)]))   (* The limit of an address. *)
-ipRate(per) = rateOf(per, 60, list.Max([1, math.Floor(per / 4)]))   (* The rate of door of a limit a minute, as ipLimit's. *)
+ipRate(per) = rateOf(per, 60, list.Max([1, math.Floor(per / 4)]))   (* The rate of a limit a minute: a burst of a quarter. *)
 
-defn limited(limits, env, ip, route, user, rid)
-  (** The 429 of the first of these limits that refuses a request, or missing when all of them let it pass: one round
-      trip to the state for all of them. *)
-  allowed = Allow(limits, env.State)
-  if allowed.Ok
+defn limited(d, env, ip, route, rid)
+  (** The 429 of a request that the answer d of door refused, or missing when its limits let it pass. *)
+  if d.Ok
     return missing
   end
+  user = d.User
   metrics.Add("centauri_refused_total", labels = {reason: "limit"})
-  noted(env, "limited", allowed.Key, "Too many requests.", if value.IsMissing(user) missing else user.Id end, tenantOf(user), ip, route)
-  refuse(429, "Too many requests: wait $(allowed.Retry) seconds.", rid, env, retry = allowed.Retry)
+  noted(env, "limited", d.Key, "Too many requests.", if value.IsMissing(user) missing else user.Id end, tenantOf(user), ip, route)
+  refuse(429, "Too many requests: wait $(d.Retry) seconds.", rid, env, retry = d.Retry)
 end
 
 defn readiness(env)
@@ -215,19 +215,32 @@ defn unurl64(s)
 end
 
 defn seal(row, e, user, env)
-  (** The cursor after a row of a page: the row, sealed (XSalsa20-Poly1305 under the app's key) with the endpoint and
-      the tenant, so that it shows nothing of the row and cannot be made by hand nor used in another list. *)
-  url64(crypto.Seal(json.Text({E: e.Name, T: tenantOf(user), R: row}), env.Key, env.Keys))
+  (** The cursor after a row of a page: the row, sealed (XSalsa20-Poly1305) under a key of the app's for this endpoint
+      and tenant, so that it shows nothing of the row and cannot be made by hand nor used in another list. *)
+  url64(crypto.Seal(json.Text(row), listKey(e, user, env), env.Keys))
 end
 
+(* The key of the cursors of an endpoint for a tenant: the BLAKE2b of the app's key, the endpoint and the tenant, a
+   function no one computes without the app's key. *)
+listKey(e, user, env) = crypto.Blake2b("centauri list\n$(env.Key)\n$(e.Name)\n$(tenantOf(user))", env.Keys)
+
 defn opened(cursor, e, user, env)
-  (** The row of a cursor of seal: an Ok of it, or a 400. *)
+  (** The row of a cursor of seal: an Ok of it, or a 400. A cursor of before, the row sealed with the endpoint and the
+      tenant under the app's key itself, is still read. *)
   bad = Fail(400, "This cursor is not one of this list: ask the first page again.")
   if not value.IsText(cursor) or text.ByteLength(cursor) > 4096
     return bad
   end
   raw = unurl64(cursor)
-  plain = if result.IsOk(raw) crypto.Unseal(raw.Value, env.Key, env.Keys) else raw end
+  if result.IsErr(raw)
+    return bad
+  end
+  plain = crypto.Unseal(raw.Value, listKey(e, user, env), env.Keys)
+  if result.IsOk(plain)
+    row = json.Parse(plain.Value)
+    return if result.IsOk(row) and value.IsDict(row.Value) row else bad end
+  end
+  plain = crypto.Unseal(raw.Value, env.Key, env.Keys)
   c = if result.IsOk(plain) json.Parse(plain.Value) else plain end
   if result.IsErr(c) or not value.IsDict(c.Value) or dict.Get("E", c.Value) != e.Name or not value.Equal(dict.Get("T", c.Value), tenantOf(user))
     return bad
@@ -281,9 +294,7 @@ defn served(b, e, req, env, rid)
   end
   user = d.User
   if not d.Ok
-    metrics.Add("centauri_refused_total", labels = {reason: "limit"})
-    noted(env, "limited", d.Key, "Too many requests.", if value.IsMissing(user) missing else user.Id end, tenantOf(user), req.Ip, e.Name)
-    return refuse(429, "Too many requests: wait $(d.Retry) seconds.", rid, env, retry = d.Retry)
+    return limited(d, env, req.Ip, e.Name, rid)
   end
   status = if e.Role == api.Public 0 else allowedRole(e.Role, user, env.Roles) end
   if status != 0

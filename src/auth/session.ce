@@ -55,7 +55,8 @@ defn SessionKey(req, env)
   (** What names the session of a request among those the state of the process keeps: the BLAKE2b of its cookie, or
       missing for a request without one. A lookup by it tells nothing of the secret by its time, and a cookie made by
       hand names no session kept: it is checked by Who first. *)
-  raw = dict.Get(CookieName(env), dict.GetOr("Cookies", {}, req))
+  cookies = dict.Get("Cookies", req)
+  raw = if value.IsDict(cookies) dict.Get(CookieName(env), cookies) else missing end
   if value.IsText(raw) and text.ByteLength(raw) <= 100 crypto.Blake2b(raw, env.Keys) else missing end
 end
 

@@ -4,6 +4,7 @@ use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use std/bug
 use std/check
+use std/crypto
 use std/dict
 use std/fiber
 use std/http
@@ -107,6 +108,22 @@ defn isPagedBySealedCursors()
   bug.Assert(value.Len(first.Rows) == 2 and value.Len(second.Rows) == 1 and second.Rows[1].Text == "c" and not ("After" in second), "pages: $first $second")
   bug.Assert(not text.Contains("tenant", first.After) and not ("Tenant" in first.Rows[1]), "the cursor and the rows show nothing more")
   stranger.Status == 400 and forged.Status == 400
+end
+
+defn isCursorOfBeforeRead()
+  (* a cursor as Centauri sealed it before, the endpoint, the tenant and the row under the app's key, still reads the
+     next page; changed by a byte, it is refused *)
+  a = app()?
+  for t in ["a", "b", "c"]
+    ask(a, "POST", "/notes", body = {Text: t})
+  end
+  first = data(ask(a, "GET", "/notes"))
+  t7 = cepheus.Find(1, n -> {Where: [[n, Note.Text, "tenant 7"]], Give: {N: n}}, a.Env.Db)?[1].N
+  row = json.Parse(crypto.Unseal(unurl64(first.After)?, listKey(List, {Tenant: t7}, a.Env), a.Env.Keys)?)?
+  before = url64(crypto.Seal(json.Text({E: List.Name, T: t7, R: row}), a.Env.Key, a.Env.Keys))
+  second = data(ask(a, "GET", "/notes?After=$before"))
+  other = "$(text.ByteSlice(1, 9, before))$(if text.ByteSlice(10, 10, before) == "A" "B" else "A" end)$(text.ByteSlice(11, text.ByteLength(before), before))"
+  value.Len(second.Rows) == 1 and second.Rows[1].Text == "c" and ask(a, "GET", "/notes?After=$other").Status == 400
 end
 
 defn isGetThatWritesRefused()
