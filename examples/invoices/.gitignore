@@ -1,3 +1,7 @@
 deps/
 .cesia/
 cesia.lock
+admin/*.wasm
+admin/*.js
+admin/*.sites
+admin/*.br

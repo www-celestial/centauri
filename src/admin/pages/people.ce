@@ -1,0 +1,186 @@
+(* The people of the platform: the users (searched by the start of their e-mail, of a tenant, sorted by a click on a
+   title, disabled, enabled, signed out everywhere, made super-admins), one user (his tenants and roles, changed in
+   place, his sessions), the tenants and one tenant (its members and their roles). *)
+use deps/www-celestial/ceres/src/web
+use src/api
+use std/dict
+use std/list
+use std/text
+use std/value
+
+defn idOf(s)
+  (** The id a field holds, or missing: digits only. *)
+  t = text.Trim(s)
+  if t == "" or not list.All([c >= "0" and c <= "9" for c in text.Chars(t)]) missing else text.Number(t) end
+end
+
+defn Users(p)
+  (** The users, 50 a page. *)
+  search = web.Signal("")
+  tenant = web.Signal("")
+  l = Lister(api.AdminUsers, {}, p)
+  rows = ListRows(l)
+  asking = web.Signal(missing)
+  said = web.Signal(missing)
+  find = () -> Again(l, {Search: web.Get(search), Tenant: idOf(web.Get(tenant))})
+  table = web.Table(rows, [
+    web.Column("Id", u -> u.Id, sort = "Id", width = 80), web.Column("E-mail", u -> u.Email, sort = "Email"), web.Column("Name", u -> u.Name, sort = "Name"),
+    web.Column("Super", u -> Cell(u.Super), sort = "Super", width = 60), web.Column("Disabled", u -> Cell(u.Disabled), sort = "Disabled", width = 80),
+    web.Column("Created", u -> Local(u.Created), sort = "Created", width = 170),
+  ], height = 420, label = "Users")
+  web.Stack([
+    web.Title("Users"),
+    web.Row([Label("E-mail starts", width = 100), web.Input(search, label = "E-mail starts with", width = 220, onEnter = find), Label("Tenant id", width = 70),
+      web.Input(tenant, label = "Tenant id", width = 110, onEnter = find), web.Button("Search", find, key = "C-f")], gap = 8),
+    table,
+    ListState(l, rows),
+    () -> userActions(Chosen(table, rows), p, asking, said, l),
+    Question(asking),
+    () -> said1(web.Get(said)),
+  ], gap = 8)
+end
+
+defn said1(r)
+  (** What the last action answered: done, or its problem. *)
+  if value.IsMissing(r)
+    return missing
+  end
+  Replied(r, v -> web.Text("Done.", color = green))
+end
+
+defn acted(said, reply, l)
+  (** An action sent: its reply shown, the list read again. *)
+  web.Set(said, reply)
+  Again(l, web.Get(l.Args))
+end
+
+defn userActions(u, p, asking, said, l)
+  (** The actions on the user chosen in the table. *)
+  if value.IsMissing(u)
+    return web.Text("Choose a user in the table for his actions.", color = gray)
+  end
+  web.Row([
+    web.Text("$(u.Email):", font = "strong"),
+    web.Button("Open", () -> web.Go("/users/$(u.Id)", p), key = "C-o"),
+    if u.Disabled Confirm(asking, "Enable $(u.Email)", () -> acted(said, Call(api.AdminEnable, {id: u.Id}, p), l))
+    else Confirm(asking, "Disable $(u.Email)", () -> acted(said, Call(api.AdminDisable, {id: u.Id}, p), l)) end,
+    Confirm(asking, "Sign $(u.Email) out everywhere", () -> acted(said, Call(api.AdminSignOut, {id: u.Id}, p), l)),
+    if u.Super Confirm(asking, "Take the role super from $(u.Email)", () -> acted(said, Call(api.AdminSuper, {id: u.Id, Super: false}, p), l))
+    else Confirm(asking, "Make $(u.Email) a super-admin", () -> acted(said, Call(api.AdminSuper, {id: u.Id, Super: true}, p), l)) end,
+  ], gap = 8)
+end
+
+defn User(p)
+  (** One user: his account, his tenants with his roles (changed in place), his sessions. *)
+  id = idOf(p.Params.id)
+  got = web.Signal(Call(api.AdminUser, {id: id}, p))
+  asking = web.Signal(missing)
+  said = web.Signal(missing)
+  again = () -> web.Set(got, Call(api.AdminUser, {id: id}, p))
+  web.Stack([
+    web.Row([web.Link("Users", "/users"), web.Text("›", color = gray), web.Title("User $id")], gap = 8),
+    () -> shownReply(web.Get(web.Get(got)), u -> userView(u, p, asking, said, again), "…"),
+    Question(asking),
+    () -> said1(web.Get(said)),
+  ], gap = 8)
+end
+
+defn userView(u, p, asking, said, again)
+  (** A user's account, tenants and sessions. *)
+  a = u.User
+  done = defn (r)
+    web.Set(said, r)
+    again()
+  end
+  web.Stack([
+    web.Row([web.Text(a.Email, font = "strong"), web.Text(a.Name), web.Text("super" if a.Super else "", color = amber),
+      web.Text("disabled" if a.Disabled else "active", color = red if a.Disabled else green), web.Text("since $(Local(a.Created))", color = gray)], gap = 12),
+    web.Row([
+      if a.Disabled Confirm(asking, "Enable $(a.Email)", () -> done(Call(api.AdminEnable, {id: a.Id}, p)))
+      else Confirm(asking, "Disable $(a.Email)", () -> done(Call(api.AdminDisable, {id: a.Id}, p))) end,
+      Confirm(asking, "Sign $(a.Email) out everywhere", () -> done(Call(api.AdminSignOut, {id: a.Id}, p))),
+      if a.Super Confirm(asking, "Take the role super from $(a.Email)", () -> done(Call(api.AdminSuper, {id: a.Id, Super: false}, p)))
+      else Confirm(asking, "Make $(a.Email) a super-admin", () -> done(Call(api.AdminSuper, {id: a.Id, Super: true}, p))) end,
+    ], gap = 8),
+    web.Text("Tenants and roles (comma between roles; none takes him out of the tenant)", font = "strong"),
+    web.Stack([roleLine(a.Id, t.Tenant, t.Name, t.Roles, p, said, again) for t in u.Tenants], gap = 4),
+    web.Text("Sessions", font = "strong"),
+    web.Table(u.Sessions, [web.Column("Id", s -> s.Id, width = 80), web.Column("Started", s -> Local(s.Started), sort = "Started", width = 170),
+      web.Column("Seen", s -> Local(s.Seen), sort = "Seen", width = 170), web.Column("Address", s -> s.Ip, width = 140), web.Column("Browser", s -> s.Agent)],
+      height = 200, label = "Sessions"),
+  ], gap = 8)
+end
+
+defn roles(s)
+  (** The roles a field holds, comma between them. *)
+  [text.Trim(r) for r in text.Split(",", s) if text.Trim(r) != ""]
+end
+
+defn roleLine(user, tenant, name, now, p, said, again)
+  (** The roles of a user in a tenant, in a field, saved by its button. *)
+  v = web.Signal(text.Join(", ", now))
+  save = defn ()
+    web.Set(said, Call(api.AdminRoles, {id: tenant, user: user, Roles: roles(web.Get(v))}, p))
+    again()
+  end
+  web.Row([web.Link("$name ($tenant)", "/tenants/$tenant"), web.Input(v, label = "Roles in $name", width = 260, onEnter = save), web.Button("Save", save)], gap = 8)
+end
+
+defn Tenants(p)
+  (** The tenants, 50 a page, searched by the start of their name. *)
+  search = web.Signal("")
+  l = Lister(api.AdminTenants, {}, p)
+  rows = ListRows(l)
+  find = () -> Again(l, {Search: web.Get(search)})
+  table = web.Table(rows, [web.Column("Id", t -> t.Id, sort = "Id", width = 80), web.Column("Name", t -> t.Name, sort = "Name"),
+    web.Column("Created", t -> Local(t.Created), sort = "Created", width = 170)], height = 420, label = "Tenants")
+  web.Stack([
+    web.Title("Tenants"),
+    web.Row([Label("Name starts", width = 100), web.Input(search, label = "Name starts with", width = 220, onEnter = find), web.Button("Search", find, key = "C-f")], gap = 8),
+    table,
+    ListState(l, rows),
+    () -> tenantChosen(Chosen(table, rows), p),
+  ], gap = 8)
+end
+
+defn tenantChosen(t, p)
+  (** The tenant chosen, to open. *)
+  if value.IsMissing(t)
+    return web.Text("Choose a tenant in the table to open it.", color = gray)
+  end
+  web.Row([web.Text("$(t.Name):", font = "strong"), web.Button("Open", () -> web.Go("/tenants/$(t.Id)", p), key = "C-o")], gap = 8)
+end
+
+defn Tenant(p)
+  (** One tenant: its members and their roles, changed in place; a user added by his id. *)
+  id = idOf(p.Params.id)
+  got = web.Signal(Call(api.AdminTenant, {id: id}, p))
+  said = web.Signal(missing)
+  again = () -> web.Set(got, Call(api.AdminTenant, {id: id}, p))
+  user = web.Signal("")
+  given = web.Signal("member")
+  add = defn ()
+    web.Set(said, Call(api.AdminRoles, {id: id, user: idOf(web.Get(user)), Roles: roles(web.Get(given))}, p))
+    again()
+  end
+  web.Stack([
+    web.Row([web.Link("Tenants", "/tenants"), web.Text("›", color = gray), web.Title("Tenant $id")], gap = 8),
+    () -> shownReply(web.Get(web.Get(got)), t -> web.Stack([
+      web.Row([web.Text(t.Tenant.Name, font = "strong"), web.Text("since $(Local(t.Tenant.Created))", color = gray), web.Text("$(value.Len(t.Members)) members", color = gray)], gap = 12),
+      web.Stack([web.Row([web.Link(m.Email, "/users/$(m.User)"), web.Text(m.Name, color = gray), roleField(id, m, p, said, again)], gap = 8) for m in t.Members], gap = 4),
+    ], gap = 8), "…"),
+    web.Row([Label("Add user id", width = 100), web.Input(user, label = "User id to add", width = 110), Label("roles", width = 40),
+      web.Input(given, label = "Roles to give", width = 200), web.Button("Add", add)], gap = 8),
+    () -> said1(web.Get(said)),
+  ], gap = 8)
+end
+
+defn roleField(tenant, m, p, said, again)
+  (** The roles of a member, in a field, saved by its button. *)
+  v = web.Signal(text.Join(", ", m.Roles))
+  save = defn ()
+    web.Set(said, Call(api.AdminRoles, {id: tenant, user: m.User, Roles: roles(web.Get(v))}, p))
+    again()
+  end
+  web.Row([web.Input(v, label = "Roles of $(m.Email)", width = 240, onEnter = save), web.Button("Save", save)], gap = 6)
+end

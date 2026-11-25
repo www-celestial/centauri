@@ -1,0 +1,206 @@
+(* What every admin page uses: an endpoint called through the live screen, a reply shown or its problem, a list of an
+   endpoint of pages read page after page, a time in the viewer's zone, a value as a cell shows it. *)
+use deps/www-celestial/ceres/src/web
+use std/date
+use std/dict
+use std/json
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+(* The colors of the pages, as 0xRRGGBB: what is wrong, what waits, what is fine, and the gray of what explains. *)
+red = 0xb3261e
+amber = 0x8a5a00
+green = 0x1e6b2e
+gray = 0x5f6670
+
+(** Calls an endpoint of the app through the live screen of the page, as any client: a signal of its reply, missing
+    until it comes, then an Ok of its value or an Err of its problem. The app checks the session, the role, the limits
+    and the shapes again: the page is never trusted. *)
+Call(endpoint, args, p) = web.Act(endpoint.Name, args, p)
+
+defn Problem(e)
+  (** The text of a problem: its status and message, the fields that are wrong, the number of its request to quote,
+      and the seconds to wait on a 429. *)
+  if not value.IsDict(e)
+    return value.Text(e)
+  end
+  head = if value.IsNumber(dict.Get("Status", e)) "$(e.Status) " else "" end
+  fields = dict.GetOr("Fields", {}, e)
+  more = if value.IsDict(fields) and value.Len(fields) > 0 " ($(text.Join("; ", ["$(f.Key): $(f.Value)" for f in dict.Pairs(fields)])))" else "" end
+  inst = if value.IsText(dict.Get("Instance", e)) " — request $(e.Instance)" else "" end
+  retry = if value.IsNumber(dict.Get("Retry", e)) " — wait $(e.Retry) s" else "" end
+  "$head$(dict.GetOr("Message", "", e))$more$inst$retry"
+end
+
+(** A problem as the page shows it, in red. *)
+Wrong(e) = web.Text(Problem(e), color = red)
+
+defn Replied(reply, view, waiting = "…")
+  (** A live part of a reply: waiting until it comes, its problem if it failed, else view(its value). *)
+  () -> shownReply(web.Get(reply), view, waiting)
+end
+
+defn shownReply(r, view, waiting)
+  (** A reply as Replied shows it. *)
+  if value.IsMissing(r)
+    return web.Text(waiting, color = gray)
+  end
+  if result.IsErr(r) Wrong(r.Error) else view(r.Value) end
+end
+
+(** The value of an Ok reply, or missing while it waits or when it failed. *)
+OkOf(r) = if not value.IsMissing(r) and result.IsOk(r) r.Value else missing end
+
+(* ---- A list of an endpoint of pages (api.Page), read a page after another. *)
+
+defn Lister(endpoint, args, p)
+  (** The list of an endpoint of pages with these arguments: the pages asked so far, each a signal of its reply. *)
+  {Endpoint: endpoint, Args: web.Signal(args), P: p, Asked: web.Signal([Call(endpoint, args, p)])}
+end
+
+defn ListRows(l)
+  (** A memo of the rows of the pages of a list that came, in their order. *)
+  web.Memo(() -> list.Flatten([rowsOf(web.Get(s)) for s in web.Get(l.Asked)]))
+end
+
+rowsOf(r) = if value.IsDict(OkOf(r)) dict.GetOr("Rows", [], r.Value) else [] end   (* The rows of a reply of a page. *)
+
+defn lastReply(l)
+  (** The reply of the last page asked, missing while it waits. *)
+  asked = web.Get(l.Asked)
+  web.Get(asked[value.Len(asked)])
+end
+
+defn More(l)
+  (** Asks the next page of a list, when its last page came and has a next. *)
+  r = lastReply(l)
+  after = if value.IsDict(OkOf(r)) dict.Get("After", r.Value) else missing end
+  if value.IsText(after)
+    web.Set(l.Asked, list.Append(Call(l.Endpoint, dict.Put("After", after, web.Get(l.Args)), l.P), web.Get(l.Asked)))
+  end
+end
+
+defn Again(l, args)
+  (** The list asked again from its first page, with these arguments. *)
+  web.Set(l.Args, args)
+  web.Set(l.Asked, [Call(l.Endpoint, args, l.P)])
+end
+
+defn ListState(l, rows)
+  (** A line under a list: how many rows came, whether more wait, and the problem of the last page if it failed. *)
+  () -> listLine(l, rows)
+end
+
+defn listLine(l, rows)
+  r = lastReply(l)
+  n = value.Len(web.Get(rows))
+  if value.IsMissing(r)
+    return web.Text("$n rows, loading…", color = gray)
+  end
+  if result.IsErr(r)
+    return web.Row([web.Text("$n rows.", color = gray), Wrong(r.Error)], gap = 8)
+  end
+  next = value.IsDict(r.Value) and value.IsText(dict.Get("After", r.Value))
+  web.Row([web.Text(if next "$n rows, more after." else "$n rows, all of them." end, color = gray),
+    if next web.Button("More", () -> More(l), key = "C-m") else missing end], gap = 8)
+end
+
+(* ---- Times and cells. *)
+
+defn Seconds(x)
+  (** The seconds since 1970 of a time as the endpoints give it, ISO 8601 text, or a number already; missing else. *)
+  if value.IsNumber(x)
+    return x
+  end
+  if not value.IsText(x) or x == ""
+    return missing
+  end
+  d = date.Parse(x)
+  if result.IsOk(d) date.ToUnix(d.Value) else missing end
+end
+
+two(n) = if n < 10 "0$n" else "$n" end   (* A number of two figures. *)
+
+(** The offset of the viewer's clock from UTC at an instant, in seconds: 3600 at +01:00. *)
+OffsetAt(seconds) = date.Local(seconds).Offset
+
+(** An instant as ISO 8601 in UTC, as the endpoints take it: 2026-11-25T07:00:00Z. *)
+Utc(seconds) = date.Format(date.FromUnix(seconds))
+
+defn Local(x)
+  (** A time on the viewer's clock, as 2026-11-13 03:00:05, from ISO text or seconds: "" for none. *)
+  s = Seconds(x)
+  if value.IsMissing(s)
+    return ""
+  end
+  d = date.Local(s)
+  "$(d.Year)-$(two(d.Month))-$(two(d.Day)) $(two(d.Hour)):$(two(d.Minute)):$(two(d.Second))"
+end
+
+defn Span(seconds)
+  (** A length of time, short: 12 s, 5 min, 3 h, 2 d. *)
+  if not value.IsNumber(seconds)
+    return ""
+  end
+  d = math.Div(math.Floor(seconds), 1)
+  if d < 120 "$d s" else if d < 7200 "$(math.Div(d, 60)) min" else if d < 172800 "$(math.Div(d, 3600)) h" else "$(math.Div(d, 86400)) d" end
+end
+
+(** A label before a field, of a fixed width, so that the fields of a form line up. *)
+Label(t, width = 90) = web.Stack([web.Text(t, color = gray)], width = width)
+
+defn Cell(v)
+  (** A value as a cell shows it: a text as it is, a number, true and false as yes and no, a list joined, anything else
+      as JSON; missing as "". *)
+  if value.IsMissing(v)
+    ""
+  else if value.IsText(v)
+    v
+  else if value.IsBool(v)
+    if v "yes" else "no" end
+  else if value.IsNumber(v)
+    v
+  else if value.IsArray(v)
+    text.Join(", ", [value.Text(Cell(x)) for x in v])
+  else
+    json.Text(v)
+  end
+end
+
+defn Chosen(table, rows)
+  (** The row a click chose in a table of local rows, in the order the table shows them (sorted by a title clicked),
+      or missing. *)
+  k = web.Get(table.Chosen)
+  all = web.Get(rows)
+  if value.IsMissing(k) or k < 1 or k > value.Len(all)
+    return missing
+  end
+  order = web.Get(table.Sort)
+  shown = if value.IsMissing(order) all else list.SortBy(r -> r[order.By], all) end
+  shown = if value.IsSome(order) and order.Desc list.Reverse(shown) else shown end
+  shown[k]
+end
+
+defn Confirm(asking, label, run)
+  (** A button that asks first: a click shows label again with Yes and No beside it; Yes runs run(). asking is the
+      signal of the question shown, one for a page. *)
+  web.Button(label, () -> web.Set(asking, {Label: label, Run: run}))
+end
+
+defn Question(asking)
+  (** The question a Confirm asked, with its Yes and No, while one is asked. *)
+  () -> question(web.Get(asking), asking)
+end
+
+defn question(q, asking)
+  if value.IsMissing(q)
+    return missing
+  end
+  web.Row([web.Text("$(q.Label)?", font = "strong"), web.Button("Yes", defn ()
+    web.Set(asking, missing)
+    q.Run()
+  end, key = "C-y"), web.Button("No", () -> web.Set(asking, missing))], gap = 8, pad = 6, fill = 0xfff4e5, border = amber)
+end

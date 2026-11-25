@@ -1,0 +1,93 @@
+(* The work of the app: its jobs (by state and kind: run again, cancelled), the deliveries of its webhooks (jobs of
+   the kind centauri.hook) and their endpoints, its files, and its settings (where each comes from, the secrets
+   masked by the server: the page never gets one). *)
+use deps/www-celestial/ceres/src/web
+use src/api
+use std/dict
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+defn Jobs(p, kind = missing, title = "Jobs")
+  (** The jobs of a state, the latest first, of a kind when given. *)
+  state = web.Signal(if value.IsMissing(kind) "dead" else "ready" end)
+  named = web.Signal(if value.IsMissing(kind) "" else kind end)
+  got = web.Signal(Call(api.AdminJobs, {State: web.Get(state), Kind: given(web.Get(named))}, p))
+  asking = web.Signal(missing)
+  said = web.Signal(missing)
+  find = () -> web.Set(got, Call(api.AdminJobs, {State: web.Get(state), Kind: given(web.Get(named))}, p))
+  rows = web.Memo(() -> if value.IsArray(OkOf(web.Get(web.Get(got)))) web.Get(web.Get(got)).Value else [] end)
+  table = web.Table(rows, [web.Column("Id", j -> j.Id, sort = "Id", width = 80), web.Column("Kind", j -> j.Kind, sort = "Kind", width = 150),
+    web.Column("State", j -> j.State, width = 70), web.Column("Runs at", j -> Local(j.RunAt), sort = "RunAt", width = 170),
+    web.Column("Tries", j -> j.Tries, sort = "Tries", width = 50), web.Column("Error", j -> j.Error), web.Column("Arguments", j -> j.Args, width = 260)],
+    height = 420, label = title)
+  web.Stack([
+    if value.IsMissing(kind) web.Title(title) else missing end,
+    web.Row([Label("State", width = 40), web.Select(state, ["ready", "running", "done", "dead"], x -> x, x -> x, name = "State", width = 110),
+      Label("Kind", width = 35), web.Input(named, label = "Kind", width = 180, onEnter = find), web.Button("Show", find, key = "C-f")], gap = 6),
+    () -> shownReply(web.Get(web.Get(got)), v -> web.Text("$(value.Len(v)) jobs (200 at most).", color = gray), "…"),
+    table,
+    () -> jobActions(Chosen(table, rows), p, asking, said, find),
+    Question(asking),
+    () -> said1(web.Get(said)),
+  ], gap = 8)
+end
+
+defn jobActions(j, p, asking, said, find)
+  (** What can be done to the job chosen: a dead one run again, a waiting one cancelled. *)
+  if value.IsMissing(j)
+    return web.Text("Choose a job in the table for its actions.", color = gray)
+  end
+  done = defn (r)
+    web.Set(said, r)
+    find()
+  end
+  web.Row([web.Text("Job $(j.Id) ($(j.Kind)):", font = "strong"),
+    if j.State == "dead" Confirm(asking, "Run job $(j.Id) again", () -> done(Call(api.AdminJobRetry, {id: j.Id}, p))) else missing end,
+    if j.State == "ready" Confirm(asking, "Cancel job $(j.Id)", () -> done(Call(api.AdminJobCancel, {id: j.Id}, p))) else missing end,
+    if j.State == "running" web.Text("It runs: it can be neither cancelled nor run again now.", color = gray) else missing end], gap = 8)
+end
+
+defn Hooks(p)
+  (** The webhooks: their deliveries (the jobs centauri.hook, run again from here when dead) and their endpoints. *)
+  web.Stack([
+    web.Title("Webhooks"),
+    web.Text("Deliveries", font = "strong"),
+    Jobs(p, kind = "centauri.hook", title = "Deliveries"),
+    web.Text("Endpoints (their secrets stay sealed on the server)", font = "strong"),
+    Things(p, "centauri_hook", height = 220),
+  ], gap = 8)
+end
+
+defn Files(p)
+  (** The files of the app: each kind of files (app.Files) and its things, their names, types and sizes. *)
+  kinds = Call(api.AdminKinds, {}, p)
+  web.Stack([
+    web.Title("Files"),
+    Replied(kinds, ks -> fileKinds([k for k in ks if isFiles(k)], p)),
+  ], gap = 8)
+end
+
+isFiles(k) = list.All([n in [f.Name for f in k.Fields] for n in ["Name", "Size", "Type", "Parts"]])   (* Is a kind one of app.Files? *)
+
+defn fileKinds(ks, p)
+  (** A table for each kind of files. *)
+  if value.Len(ks) == 0
+    return web.Text("This app keeps no files (no kind of app.Files).", color = gray)
+  end
+  web.Stack([web.Stack([web.Text(k.Name, font = "strong"), Things(p, k.Name, height = 260)], gap = 4) for k in ks], gap = 12)
+end
+
+defn Settings(p)
+  (** The settings: each with its variable, its value as the server shows it (a secret is "(secret)"), and where it
+      came from: the environment, the app's code, or Centauri's default. *)
+  got = Call(api.AdminSettings, {}, p)
+  web.Stack([
+    web.Title("Settings"),
+    web.Text("Read once at the start, from the environment: a change takes a restart. The server masks every secret before it answers.", color = gray),
+    Replied(got, rows -> web.Table(rows, [web.Column("Name", s -> s.Name, sort = "Name", width = 180), web.Column("Variable", s -> s.Env, sort = "Env", width = 230),
+      web.Column("Value", s -> s.Value), web.Column("From", s -> s.From, sort = "From", width = 80)], height = 560, label = "Settings")),
+  ], gap = 8)
+end

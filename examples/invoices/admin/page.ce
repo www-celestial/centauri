@@ -1,0 +1,58 @@
+(** The admin pages of the invoices: Centauri's, and the app's own, a page of the unpaid invoices of every office with
+    their sum by office, the invoices in the data browser with their number, client, status and total, and the action
+    of the support, Mark paid, an endpoint of the role super (e.AdminPay). Compiled to WebAssembly by
+    cesia build --target wasm admin/page.ce, which writes page.wasm, its loader page.js and their glue beside it;
+    admin.Module(folder = "admin") serves them at /admin. *)
+use deps/www-celestial/centauri/src/admin/pages
+use deps/www-celestial/ceres/src/web
+use src/invoices/endpoints as e
+use std/dict
+use std/list
+use std/plot
+use std/value
+
+defn byOffice(rows)
+  (** The unpaid sum of each office, as bars. *)
+  sums = {}
+  for i in rows
+    sums[i.Tenant] = dict.GetOr(i.Tenant, 0, sums) + i.Total
+  end
+  offices = dict.Keys(sums)
+  plot.Of([plot.Bars(["$o" for o in offices], [sums[o] for o in offices], color = "#b3261e")], title = "Unpaid by office (€)", x = "office", y = "€")
+end
+
+defn unpaid(p)
+  (** The unpaid invoices of every office, 50 a page, the latest first; the one chosen marked paid. *)
+  l = pages.Lister(e.AdminInvoices, {Status: "unpaid"}, p)
+  rows = pages.ListRows(l)
+  asking = web.Signal(missing)
+  said = web.Signal(missing)
+  table = web.Table(rows, [web.Column("Office", i -> i.Tenant, sort = "Tenant", width = 90), web.Column("Number", i -> i.Number, sort = "Number", width = 90),
+    web.Column("Bill to", i -> i.BillTo, sort = "BillTo"), web.Column("Due", i -> i.Due, sort = "Due", width = 120),
+    web.Column("Total", i -> web.Money(i.Total), sort = "Total", width = 140)], height = 340, label = "Unpaid invoices")
+  web.Stack([
+    web.Title("Unpaid invoices"),
+    web.Plot(() -> byOffice(web.Get(rows)), height = 200, width = 640, label = "Unpaid by office"),
+    table,
+    pages.ListState(l, rows),
+    () -> paying(pages.Chosen(table, rows), p, l, asking, said),
+    pages.Question(asking),
+    () -> if value.IsMissing(web.Get(said)) missing else pages.Replied(web.Get(said), v -> web.Text("Paid."))() end,
+  ], gap = 8)
+end
+
+defn paying(i, p, l, asking, said)
+  (** The action on the invoice chosen. *)
+  if value.IsMissing(i)
+    return web.Text("Choose an invoice to mark it paid.")
+  end
+  pages.Confirm(asking, "Mark invoice $(i.Number) of office $(i.Tenant) paid", defn ()
+    web.Set(said, pages.Call(e.AdminPay, {id: i.Id}, p))
+    pages.Again(l, web.Get(l.Args))
+  end)
+end
+
+pages.Run(title = "Invoices — admin",
+  kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number"), pages.Column("BillTo", title = "Bill to"), pages.Column("Status"),
+    pages.Column("Total", show = v -> "$v €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
+  more = [pages.Page("Unpaid", "/unpaid", unpaid)])

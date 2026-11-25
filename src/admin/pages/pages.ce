@@ -1,0 +1,175 @@
+(** The super-admin's pages, in the browser: pages of Ceres compiled to WebAssembly from Cesia, that the app builds from
+    its own entry and that admin.Module serves. They read and change the app only by its endpoints of the role super,
+    called through the live screen of the page (the same door, rights and limits as any client), and sign in and out
+    by HTTP, the session a cookie no script reads. Run starts them, in the app's entry of its admin; an app adds its own
+    pages (Page), the columns of its kinds (Kind, Column) and its actions (Action) with a few lines: the book's chapter
+    The admin, and its tutorial, an admin page of the invoices. The pages: the dashboard, the users, the tenants and their members, the events, the log, the jobs, the webhooks, the
+    files, the settings, the data of each kind, the audit trail. *)
+use deps/www-celestial/ceres/src/browser
+use deps/www-celestial/ceres/src/web
+use src/api
+use std/dict
+use std/encode
+use std/http
+use std/js
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+(** A page of the app's own among the admin's: its title in the menu, its path (a route of Ceres, as "/unpaid" or
+    "/clients/:id"), and view(p), the widgets it shows; p is the page of Ceres ({Path, Params, Screen, Nav}), and
+    pages.Call(endpoint, args, p) calls an endpoint of the role super from it.
+
+      Page("Unpaid", "/unpaid", p -> web.Text("…")).Path --> "/unpaid" *)
+Page(title, path, view) = {Title: title, Path: path, View: view}
+
+(** How the data browser shows a kind: its name (as app.Kind has it), its title, its columns (pages.Column; its first
+    fields when none) and its actions on the thing chosen (pages.Action).
+
+      Kind("invoice", columns = [Column("Number")]).Columns[1].Field --> "Number" *)
+Kind(name, title = missing, columns = [], actions = []) = {Name: name, Title: if value.IsMissing(title) name else title end, Columns: columns, Actions: actions}
+
+(** A column of a kind's table: a field of its things, its title (the field by default), show(v), what a cell shows of
+    a value (pages.Cell by default), and its width in pixels.
+
+      Column("Total", show = v -> "$v €").Title --> "Total" *)
+Column(field, title = missing, show = missing, width = missing) = {Field: field, Title: if value.IsMissing(title) field else title end, Show: show, Width: width}
+
+(** An action on the thing chosen in a kind's table: an endpoint of the role super, args(thing) its input ({id: its
+    id} by default, for a path as /admin/invoices/:id/pay), asked first unless confirm = false.
+
+      Action("Mark paid", api.Post("/admin/invoices/:id/pay", role = api.Super)).Label --> "Mark paid" *)
+Action(label, endpoint, args = missing, confirm = true) = {Label: label, Endpoint: endpoint, Args: args, Confirm: confirm}
+
+(* The pages of the admin, in the order of its menu: title, path and view. *)
+own = [{Title: "Dashboard", Path: "/", View: Dashboard}, {Title: "Users", Path: "/users", View: Users}, {Title: "Tenants", Path: "/tenants", View: Tenants},
+  {Title: "Events", Path: "/events", View: Events}, {Title: "Log", Path: "/logs", View: Logs}, {Title: "Jobs", Path: "/jobs", View: Jobs},
+  {Title: "Webhooks", Path: "/hooks", View: Hooks}, {Title: "Files", Path: "/files", View: Files}, {Title: "Settings", Path: "/settings", View: Settings},
+  {Title: "Data", Path: "/data", View: Data}, {Title: "Audit", Path: "/audit", View: Audit}]
+
+(* The pages reached from another, not in the menu. *)
+inner = [{Path: "/users/:id", View: User}, {Path: "/tenants/:id", View: Tenant}, {Path: "/data/:kind", View: Data}]
+
+defn fetchJson(path, method = "GET", body = "")
+  (** A request of HTTP to the app from the page, with its cookie: {Status, Data}, Data the JSON of its body or
+      missing. *)
+  got = http.Fetch(path, method = method, body = body, headers = if body == "" [] else [{Name: "content-type", Value: "application/json"}] end, timeout = 30)
+  if result.IsErr(got)
+    return {Status: 0, Data: {detail: got.Error.Message}}
+  end
+  data = if got.Value.Body == "" result.Ok(missing) else json.Parse(got.Value.Body) end
+  {Status: got.Value.Status, Data: if result.IsOk(data) data.Value else missing end}
+end
+
+reload() = js.Call("./admin.js", "Reload", [])   (* Loads the page again, to open its screen with a new session. *)
+
+defn Run(title = "Admin", more = [], kinds = [], shows = [])
+  (** Runs the admin pages in the page's canvas: the sign-in until a super-admin is signed in, then the dashboard and
+      the other pages, the app's own pages (more, pages.Page) in the menu after them, its kinds shown as kinds says
+      (pages.Kind), and the app's own live shows (shows, api.Live endpoints of the role super) on the page's screen,
+      which web.Live reads by their names. *)
+  me = fetchJson("/auth/me")
+  if me.Status != 200 or not value.IsDict(me.Data) or me.Data.Super != true
+    note = if me.Status == 200 "$(me.Data.Email) is no super-admin of this platform." else "" end
+    browser.Run(web.App([web.Route("/", p -> signIn(p, title, note))], title = title))
+    return missing
+  end
+  asked = [{Show: s.Name, Args: {}} for s in list.Concat(api.AdminShows, shows)]
+  live = "/live?shows=$(encode.UrlEncode(json.Text(asked)))"
+  menu = list.Concat(own, [{Title: x.Title, Path: x.Path, View: x.View} for x in more])
+  site = {Title: title, Me: me.Data, Menu: menu, Kinds: dict.Dict([{Key: k.Name, Value: k} for k in kinds]), App: web.Signal(missing)}
+  routes = [web.Route(m.Path, framed(m, site)) for m in list.Concat(menu, inner)]
+  browser.Run(web.App(routes, live = live, title = title))
+end
+
+defn framed(m, site)
+  (** The view of a page inside the frame of the admin: the band at the top, the menu at the left. *)
+  p -> frame(p, m, site)
+end
+
+defn frame(p, m, site)
+  (** The frame of every page: who is signed in and the app, the menu, the page. *)
+  q = p
+  q.Site = site
+  if value.IsMissing(web.Get(site.App))
+    web.Set(site.App, Call(api.AdminApp, {}, p))
+  end
+  web.Stack([
+    web.Row([web.Text(site.Title, font = "strong"), () -> appLine(web.Get(site.App)), web.Spacer(), () -> screenLine(p),
+      web.Text(site.Me.Email, color = gray), web.Button("Sign out", () -> signOut(), key = "C-q")], gap = 12, pad = 6, fill = 0xf2f4f7),
+    web.Row([
+      web.Stack([web.Link(x.Title, x.Path) for x in site.Menu], gap = 6, width = 130),
+      web.Grow(m.View(q)),
+    ], align = "start", gap = 16),
+  ], gap = 10)
+end
+
+defn appLine(r)
+  (** The app in a line: its name, version, profile and how long it has run. *)
+  if value.IsMissing(r)
+    return web.Text("…", color = gray)
+  end
+  a = web.Get(r)
+  v = OkOf(a)
+  if value.IsMissing(v)
+    return if value.IsMissing(a) web.Text("…", color = gray) else Wrong(a.Error) end
+  end
+  web.Text("$(v.Name) $(v.Version) · $(v.Profile) · up $(Span(v.Uptime)) · $(text.Join(", ", v.Modules))", color = gray)
+end
+
+defn screenLine(p)
+  (** Whether the live screen is connected: its problem when it ended. *)
+  if value.IsMissing(p.Screen)
+    return missing
+  end
+  e = web.Get(p.Screen.Error)
+  if value.IsSome(e)
+    return web.Row([web.Text("Screen closed: $(Problem(e))", color = red), web.Button("Again", () -> reload())], gap = 6)
+  end
+  if web.Get(p.Screen.Up) web.Text("live", color = green) else web.Text("connecting…", color = amber) end
+end
+
+defn signOut()
+  (** Ends the session by HTTP, so that its cookie goes, and loads the page again: the sign-in. *)
+  _ = fetchJson("/auth/signout", method = "POST", body = "{}")
+  reload()
+end
+
+defn signIn(p, title, note)
+  (** The sign-in of a super-admin: an e-mail and a password, sent by HTTP; the cookie that comes back no script
+      reads, and the page loads again with it. *)
+  email = web.Signal("")
+  password = web.Signal("")
+  said = web.Signal(note)
+  go = () -> signingIn(email, password, said)
+  web.Stack([
+    web.Title(title),
+    web.Text("Sign in with the account of a super-admin of the platform.", color = gray),
+    web.Row([Label("E-mail"), web.Input(email, label = "E-mail", width = 280)], gap = 8),
+    web.Row([Label("Password"), web.Input(password, label = "Password", width = 280, secret = true, onEnter = go)], gap = 8),
+    web.Row([web.Button("Sign in", go)], gap = 8),
+    () -> web.Text(web.Get(said), color = red),
+  ], gap = 10, pad = 24, width = 480)
+end
+
+defn signingIn(email, password, said)
+  (** Sends the sign-in; on success the page loads again, signed in. *)
+  web.Set(said, "Signing in…")
+  got = fetchJson("/auth/signin", method = "POST", body = json.Text({Email: web.Get(email), Password: web.Get(password)}))
+  web.Set(password, "")
+  ok = got.Status >= 200 and got.Status < 300
+  if ok and value.IsDict(got.Data) and got.Data.Super == true
+    reload()
+  else if ok
+    _ = fetchJson("/auth/signout", method = "POST", body = "{}")
+    web.Set(said, "This account is no super-admin of the platform.")
+  else if got.Status == 428
+    web.Set(said, "The server asks a proof of work (it is under attack): sign in again in a while, or set APP_POW=off for this time.")
+  else
+    d = if value.IsDict(got.Data) got.Data else {} end
+    fields = dict.GetOr("errors", {}, d)
+    web.Set(said, "$(got.Status) $(dict.GetOr("detail", "The sign-in failed.", d))$(if value.IsDict(fields) and value.Len(fields) > 0 " ($(text.Join("; ", ["$(f.Key): $(f.Value)" for f in dict.Pairs(fields)])))" else "" end)")
+  end
+end

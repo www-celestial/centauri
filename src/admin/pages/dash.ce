@@ -1,0 +1,79 @@
+(* The dashboard: the counts of the platform, then the last five minutes of this process a second at a time (requests
+   and failures, the times of the requests, the refusals at the door and the signs of bots, the jobs), and the last
+   events as they are written. *)
+use deps/www-celestial/ceres/src/web
+use src/api
+use std/dict
+use std/list
+use std/math
+use std/plot
+use std/value
+
+defn Dashboard(p)
+  (** The dashboard. *)
+  points = web.Live("admin.series", p)
+  events = web.Live("admin.events", p)
+  stats = Call(api.AdminStats, {}, p)
+  web.Stack([
+    web.Title("Dashboard"),
+    Replied(stats, s -> web.Row([tile("Users", s.Users), tile("Tenants", s.Tenants), tile("Sessions", s.Sessions), tile("Requests", s.Requests),
+      tile("Refused", s.Refused), tile("Failed sign-ins/min", s.Failures)], gap = 8)),
+    () -> nowLine(web.Get(points)),
+    web.Row([
+      web.Plot(() -> lines(web.Get(points), [["Requests", "requests/s", "#1f5fbf"], ["Errors", "5xx/s", "#b3261e"]], "Requests a second", "/s"), height = 210, width = 520,
+        label = "Requests a second"),
+      web.Plot(() -> lines(web.Get(points), [["P50", "p50", "#1e6b2e"], ["P99", "p99", "#8a5a00"]], "Time of a request (ms)", "ms"), height = 210, width = 520,
+        label = "Time of a request"),
+    ], gap = 12, align = "start"),
+    web.Row([
+      web.Plot(() -> lines(web.Get(points), [["Origin", "other site", "#b3261e"], ["Limit", "limit", "#8a5a00"], ["Signin", "no session", "#5f6670"],
+        ["Role", "role", "#6a3fb3"], ["Failures", "failed sign-ins/min", "#1f5fbf"]],
+        "Refused at the door, and failed sign-ins", "/s"), height = 210, width = 520, label = "Refusals and bots"),
+      web.Plot(() -> lines(web.Get(points), [["Ready", "ready", "#1f5fbf"], ["Running", "running", "#1e6b2e"], ["Dead", "dead", "#b3261e"]], "Jobs", "jobs"), height = 210, width = 520,
+        label = "Jobs"),
+    ], gap = 12, align = "start"),
+    web.Text("Last events", font = "strong"),
+    () -> lastEvents(web.Get(events)),
+  ], gap = 10)
+end
+
+defn tile(name, n)
+  (** A count in a box: its number, large, and what it counts. *)
+  web.Stack([web.Text(n, size = 20, font = "code"), web.Text(name, color = gray)], gap = 2, pad = 8, border = 0xd0d5dd, width = 150)
+end
+
+defn sorted(points)
+  (** The points by their time. *)
+  list.SortBy(x -> x.At, points)
+end
+
+defn nowLine(points)
+  (** The last second in words: what the graphs end at. *)
+  if value.Len(points) == 0
+    return web.Text("Waiting for the first second…", color = gray)
+  end
+  ps = sorted(points)
+  last = ps[value.Len(ps)]
+  minute = list.Skip(list.Max([0, value.Len(ps) - 60]), ps)
+  web.Text("Last second: $(last.Requests) requests, $(last.Errors) failed, p50 $(last.P50) ms, p99 $(last.P99) ms · last minute: $(list.Sum([x.Requests for x in minute])) requests, $(list.Sum([x.Origin + x.Limit + x.Signin + x.Role for x in minute])) refused · jobs: $(last.Ready) ready, $(last.Running) running, $(last.Dead) dead", font = "code")
+end
+
+defn lines(points, series, title, unit)
+  (** A graph of some fields of the points, one line each, over the seconds before the last. *)
+  ps = sorted(points)
+  if value.Len(ps) < 2
+    return plot.Of([plot.Line([-1, 0], [0, 0], label = "waiting")], title = title, x = "s", y = unit)
+  end
+  last = ps[value.Len(ps)].At
+  xs = [x.At - last for x in ps]
+  plot.Of([plot.Line(xs, [x[s[1]] for x in ps], label = s[2], color = s[3], width = 1.5) for s in series], title = title, x = "s", y = unit)
+end
+
+defn lastEvents(rows)
+  (** The last 12 events, the newest first. *)
+  if value.Len(rows) == 0
+    return web.Text("No event in the last hour.", color = gray)
+  end
+  newest = list.Take(12, list.Reverse(list.SortBy(e -> e.At, rows)))
+  web.Stack([web.Row([web.Text(Local(e.At), font = "code"), web.Text(e.Kind, font = "strong"), web.Text(e.Ip, font = "code"), web.Text(e.Detail)], gap = 10) for e in newest], gap = 2)
+end

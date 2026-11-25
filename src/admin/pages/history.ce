@@ -1,0 +1,124 @@
+(* What happened: the events (filtered by kind, user, tenant, route and time, read page after page, or live as they are
+   written), the log of the process (by level and a text it holds, or live), and the audit trail (what the
+   super-admins changed). *)
+use deps/www-celestial/ceres/src/web
+use src/api
+use std/dict
+use std/list
+use std/text
+use std/value
+
+(* The kinds of the events that the super-admins' changes write. *)
+audited = ["disabled", "enabled", "signout-all", "super", "roles", "data-edited", "job-retried", "job-cancelled"]
+
+defn given(s)
+  (** A field's text, or missing when it is empty. *)
+  t = text.Trim(s)
+  if t == "" missing else t end
+end
+
+defn Events(p)
+  (** The events: a filter, the pages of the history, or the live tail of the last hour. *)
+  kind = web.Signal("")
+  user = web.Signal("")
+  tenant = web.Signal("")
+  route = web.Signal("")
+  since = web.Signal("")
+  until = web.Signal("")
+  live = web.Signal(false)
+  args = () -> {Kind: given(web.Get(kind)), User: idOf(web.Get(user)), Tenant: idOf(web.Get(tenant)), Route: given(web.Get(route)),
+    Since: Iso(web.Get(since)), Until: Iso(web.Get(until))}
+  l = Lister(api.AdminEvents, {}, p)
+  rows = ListRows(l)
+  tailRows = web.Live("admin.events", p)
+  find = defn ()
+    web.Set(live, false)
+    Again(l, args())
+  end
+  shown = web.Memo(() -> if web.Get(live) filtered(web.Get(tailRows), web.Get(kind), web.Get(route)) else web.Get(rows) end)
+  web.Stack([
+    web.Title("Events"),
+    web.Row([Label("Kind", width = 40), web.Input(kind, label = "Kind", width = 120, onEnter = find), Label("User id", width = 55), web.Input(user, label = "User id", width = 90, onEnter = find),
+      Label("Tenant id", width = 65), web.Input(tenant, label = "Tenant id", width = 90, onEnter = find), Label("Route", width = 45), web.Input(route, label = "Route", width = 160, onEnter = find)], gap = 6),
+    web.Row([Label("From", width = 40), web.Input(since, label = "From", placeholder = "2026-11-25 08:00", width = 150, onEnter = find), Label("to", width = 20),
+      web.Input(until, label = "To", placeholder = "2026-11-26", width = 150, onEnter = find), web.Button("Search", find, key = "C-f"),
+      web.Button("Live", () -> web.Set(live, not web.Get(live)), key = "C-l"), () -> web.Text(if web.Get(live) "live: the last hour, as it comes" else "history" end, color = green if web.Get(live) else gray)], gap = 6),
+    web.Table(shown, [web.Column("At", e -> Local(e.At), sort = "At", width = 170), web.Column("Kind", e -> e.Kind, sort = "Kind", width = 120),
+      web.Column("User", e -> Cell(dict.Get("User", e)), sort = "User", width = 80), web.Column("Tenant", e -> Cell(dict.Get("Tenant", e)), sort = "Tenant", width = 80),
+      web.Column("Address", e -> e.Ip, sort = "Ip", width = 130), web.Column("Route", e -> e.Route, sort = "Route", width = 200), web.Column("What", e -> e.Detail)],
+      height = 460, label = "Events"),
+    () -> if web.Get(live) web.Text("$(value.Len(web.Get(shown))) events in the last hour.", color = gray) else ListState(l, rows)() end,
+  ], gap = 8)
+end
+
+defn filtered(rows, kind, route)
+  (** The rows of the live tail that a filter keeps, the newest first. *)
+  k = text.Trim(kind)
+  r = text.Trim(route)
+  list.Reverse(list.SortBy(e -> e.At, [e for e in rows if (k == "" or e.Kind == k) and (r == "" or e.Route == r)]))
+end
+
+defn Iso(s)
+  (** A time typed in the viewer's zone, as 2026-11-25 or 2026-11-25 08:00, as ISO 8601 in UTC, or missing. *)
+  t = text.Trim(s)
+  if t == ""
+    return missing
+  end
+  full = if value.Len(t) == 10 "$t 00:00:00" else if value.Len(t) == 16 "$t:00" else t end
+  local = Seconds(text.Replace(" ", "T", full))
+  if value.IsMissing(local)
+    return t
+  end
+  (* the text was read as UTC: the viewer's offset at that time moves it to the instant meant *)
+  Utc(local - OffsetAt(local))
+end
+
+defn Logs(p)
+  (** The log of this process: by level and a text, or live as it goes. *)
+  level = web.Signal(missing)
+  search = web.Signal("")
+  live = web.Signal(true)
+  got = web.Signal(Call(api.AdminLogs, {}, p))
+  tailRows = web.Live("admin.logs", p)
+  find = defn ()
+    web.Set(live, false)
+    web.Set(got, Call(api.AdminLogs, {Level: web.Get(level), Search: given(web.Get(search))}, p))
+  end
+  rows = web.Memo(() -> logRows(web.Get(live), web.Get(tailRows), web.Get(web.Get(got)), web.Get(level), web.Get(search)))
+  web.Stack([
+    web.Title("Log"),
+    web.Row([Label("Level", width = 40), web.Select(level, ["info", "warn", "error"], x -> x, x -> x, placeholder = "any", name = "Level", width = 100),
+      Label("Holds", width = 40), web.Input(search, label = "Holds", width = 240, onEnter = find), web.Button("Search", find, key = "C-f"),
+      web.Button("Live", () -> web.Set(live, not web.Get(live)), key = "C-l"),
+      () -> web.Text(if web.Get(live) "live: each line as it is written" else "the lines kept" end, color = green if web.Get(live) else gray)], gap = 6),
+    web.Table(rows, [web.Column("At", x -> Local(x.At), sort = "At", width = 170), web.Column("Level", x -> x.Level, sort = "Level", width = 60),
+      web.Column("Message", x -> x.Message, sort = "Message", width = 180), web.Column("Fields", x -> x.Fields)], height = 500, label = "Log"),
+    () -> web.Text("$(value.Len(web.Get(rows))) lines of this process (each server keeps its own).", color = gray),
+  ], gap = 8)
+end
+
+defn logRows(live, tail, got, level, search)
+  (** The lines shown: the live tail filtered here, or the answer of the search; the newest first. *)
+  if not live
+    return if value.IsArray(OkOf(got)) got.Value else [] end
+  end
+  s = text.Trim(search)
+  list.Reverse(list.SortBy(x -> x.Seq, [x for x in tail if (value.IsMissing(level) or x.Level == level) and (s == "" or text.Contains(s, x.Message) or text.Contains(s, x.Fields))]))
+end
+
+defn Audit(p)
+  (** What the super-admins changed: the events of their changes, the newest first, by kind or all of them. *)
+  kind = web.Signal(missing)
+  asked = web.Signal([Call(api.AdminEvents, {Kind: k}, p) for k in audited])
+  find = () -> web.Set(asked, [Call(api.AdminEvents, {Kind: k}, p) for k in (if value.IsMissing(web.Get(kind)) audited else [web.Get(kind)] end)])
+  rows = web.Memo(() -> list.Reverse(list.SortBy(e -> Seconds(e.At), list.Flatten([rowsOf(web.Get(s)) for s in web.Get(asked)]))))
+  web.Stack([
+    web.Title("Audit trail"),
+    web.Text("Each change a super-admin made, with who made it (the user of the event), from where and by which route. Cepheus keeps every write in its history too, with who wrote it and why.", color = gray),
+    web.Row([Label("Change", width = 50), web.Select(kind, audited, x -> x, x -> x, placeholder = "all", name = "Change", width = 160), web.Button("Show", find, key = "C-f")], gap = 6),
+    web.Table(rows, [web.Column("At", e -> Local(e.At), sort = "At", width = 170), web.Column("Change", e -> e.Kind, sort = "Kind", width = 110),
+      web.Column("By", e -> Cell(dict.Get("User", e)), sort = "User", width = 70), web.Column("Address", e -> e.Ip, width = 130),
+      web.Column("Route", e -> e.Route, width = 230), web.Column("What", e -> e.Detail)], height = 480, label = "Audit trail"),
+    () -> web.Text("$(value.Len(web.Get(rows))) changes (the last 50 of each kind).", color = gray),
+  ], gap = 8)
+end

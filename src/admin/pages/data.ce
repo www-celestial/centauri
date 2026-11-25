@@ -1,0 +1,162 @@
+(* The data browser, as Django's admin has one: the kinds of the app, the things of one kind page after page in a table
+   (its columns as the app chose them with pages.Kind, else its first fields), and the thing chosen, its fields changed
+   in place, each read by the server through the shape of its type and checked by Cepheus; a secret field is shown
+   "(secret)" and never changed. The app's actions on a thing (pages.Action) are buttons beside it. *)
+use deps/www-celestial/ceres/src/web
+use src/api
+use std/dict
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+defn Data(p)
+  (** The kinds of the app, or the things of one (/data/:kind). *)
+  name = dict.Get("kind", p.Params)
+  if value.IsSome(name)
+    return web.Stack([web.Row([web.Link("Data", "/data"), web.Text("›", color = gray), web.Title(kindTitle(name, p))], gap = 8), Things(p, name)], gap = 8)
+  end
+  kinds = Call(api.AdminKinds, {}, p)
+  web.Stack([
+    web.Title("Data"),
+    web.Text("Each kind of the database that app.Kind declares, by the module that declares it.", color = gray),
+    Replied(kinds, ks -> web.Stack([web.Row([web.Link(k.Name, "/data/$(k.Name)"), web.Text(k.Module, color = gray),
+      web.Text(text.Join(", ", ["$(f.Name)$(if f.Secret == true " (secret)" else "" end)" for f in k.Fields]), color = gray)], gap = 10) for k in ks], gap = 4)),
+  ], gap = 8)
+end
+
+defn kindTitle(name, p)
+  (** The title of a kind: the app's, or its name. *)
+  k = dict.Get(name, p.Site.Kinds)
+  if value.IsMissing(k) name else k.Title end
+end
+
+defn parsed(row)
+  (** A row of AdminData with its fields read: {Id, ...the fields}. *)
+  f = json.Parse(row.Fields)
+  out = if result.IsOk(f) and value.IsDict(f.Value) f.Value else {} end
+  out.Id = row.Id
+  out
+end
+
+defn Things(p, name, height = 380)
+  (** The things of a kind, 50 a page, and the one chosen, to change. *)
+  kinds = Call(api.AdminKinds, {}, p)
+  l = Lister(api.AdminData, {kind: name}, p)
+  pagesRows = ListRows(l)
+  rows = web.Memo(() -> [parsed(r) for r in web.Get(pagesRows)])
+  web.Stack([
+    Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, l, rows, height)),
+  ], gap = 8)
+end
+
+defn columnsOf(kind, p)
+  (** The columns of a kind's table: the app's (pages.Kind), else its id and its first six fields. *)
+  own = dict.Get(kind.Name, p.Site.Kinds)
+  if value.IsSome(own) and value.Len(own.Columns) > 0
+    return list.Concat([web.Column("Id", t -> t.Id, sort = "Id", width = 80)],
+      [web.Column(c.Title, if value.IsMissing(c.Show) (t -> Cell(dict.Get(c.Field, t))) else (t -> c.Show(dict.Get(c.Field, t))) end, sort = c.Field, width = c.Width) for c in own.Columns])
+  end
+  fields = list.Take(6, [f for f in kind.Fields])
+  list.Concat([web.Column("Id", t -> t.Id, sort = "Id", width = 80)],
+    [web.Column(f.Name, if f.Type == "date" (t -> Local(dict.Get(f.Name, t))) else (t -> Cell(dict.Get(f.Name, t))) end, sort = f.Name) for f in fields])
+end
+
+defn thingsOf(kind, p, l, rows, height)
+  (** The table of a kind's things and the editor of the one chosen. *)
+  if value.IsMissing(kind)
+    return web.Text("There is no such kind.", color = red)
+  end
+  table = web.Table(rows, columnsOf(kind, p), height = height, label = kind.Name)
+  said = web.Signal(missing)
+  asking = web.Signal(missing)
+  web.Stack([
+    table,
+    ListState(l, rows),
+    () -> editor(Chosen(table, rows), kind, p, l, said, asking),
+    Question(asking),
+    () -> said1(web.Get(said)),
+  ], gap = 8)
+end
+
+defn shownValue(v, f)
+  (** A field's value as its input shows it: a date on the viewer's clock, a list with commas. *)
+  if value.IsMissing(v)
+    ""
+  else if f.Type == "date" and value.IsNumber(v)
+    Local(v)
+  else if value.IsArray(v)
+    text.Join(", ", [value.Text(x) for x in v])
+  else
+    value.Text(v)
+  end
+end
+
+defn typed(s, f)
+  (** The value an input's text gives a field of a type, as the server takes it; the text itself when it can't be
+      read, so that the server says what is wrong. *)
+  t = text.Trim(s)
+  one = defn (x)
+    if f.Type == "int" or f.Type == "float" or f.Type == "money" or f.Type == "link"
+      n = text.Number(x)
+      return if value.IsNumber(n) n else x end
+    end
+    if f.Type == "bool"
+      return if x in ["yes", "true", "1"] true else if x in ["no", "false", "0"] false else x end
+    end
+    if f.Type == "date"
+      iso = Iso(x)
+      s1 = if value.IsMissing(iso) missing else Seconds(iso) end
+      return if value.IsMissing(s1) x else s1 end
+    end
+    if f.Type == "text" s else x end
+  end
+  if f.Many [one(text.Trim(x)) for x in text.Split(",", t) if text.Trim(x) != ""] else one(t) end
+end
+
+defn editor(thing, kind, p, l, said, asking)
+  (** The fields of the thing chosen, each in an input, saved together: only those changed are sent. *)
+  if value.IsMissing(thing)
+    return web.Text("Choose a thing in the table to see all its fields and change them.", color = gray)
+  end
+  inputs = [{Field: f, Was: shownValue(dict.Get(f.Name, thing), f), Value: web.Signal(shownValue(dict.Get(f.Name, thing), f))} for f in kind.Fields]
+  save = defn ()
+    changes = {}
+    for x in inputs
+      if x.Field.Secret != true and web.Get(x.Value) != x.Was
+        changes[x.Field.Name] = typed(web.Get(x.Value), x.Field)
+      end
+    end
+    if value.Len(changes) == 0
+      web.Set(said, web.Signal(result.Err({Message: "Nothing changed."})))
+      return missing
+    end
+    web.Set(said, Call(api.AdminEdit, {kind: kind.Name, id: thing.Id, Fields: json.Text(changes)}, p))
+    Again(l, web.Get(l.Args))
+  end
+  own = dict.Get(kind.Name, p.Site.Kinds)
+  acts = if value.IsMissing(own) [] else own.Actions end
+  web.Stack([
+    web.Row([web.Text("$(kind.Name) $(thing.Id)", font = "strong"), web.Button("Save", save, key = "C-s"),
+      web.Row([action(a, thing, p, said, asking, l) for a in acts], gap = 6)], gap = 10),
+    web.Stack([fieldRow(x, save) for x in inputs], gap = 4),
+  ], gap = 6, pad = 8, border = 0xd0d5dd)
+end
+
+defn fieldRow(x, save)
+  (** A field of the editor: its name, its input (or "(secret)"), its type. *)
+  f = x.Field
+  box = if f.Secret == true web.Text("(secret)", color = gray) else web.Input(x.Value, label = f.Name, width = 420, onEnter = save) end
+  web.Row([Label(f.Name, width = 120), box, web.Text("$(f.Type)$(if f.Many " list" else "" end)$(if f.Unique " unique" else "" end)", color = gray)], gap = 8)
+end
+
+defn action(a, thing, p, said, asking, l)
+  (** A button of an action of the app on the thing. *)
+  args = if value.IsMissing(a.Args) {id: thing.Id} else a.Args(thing) end
+  run = defn ()
+    web.Set(said, Call(a.Endpoint, args, p))
+    Again(l, web.Get(l.Args))
+  end
+  if a.Confirm Confirm(asking, "$(a.Label) ($(thing.Id))", run) else web.Button(a.Label, run) end
+end

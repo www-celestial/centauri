@@ -60,3 +60,15 @@ AddPartner = api.Post("/partners", body = check.Record({Url: check.Url(https = t
 
 (** The answers of the partner, signed as Standard Webhooks: he took the payment of an invoice. *)
 PartnerAnswer = api.Post("/partner/answers", out = check.Record({Done: check.Bool()}), role = api.Public)
+
+(** An invoice as the platform's support sees it, in the admin pages: of any office. *)
+AdminRow = check.Record({Id: check.Id(), Tenant: check.Id(), Number: check.Int(1), BillTo: check.Text(), Due: check.Date(),
+  Status: check.OneOf(Statuses), Total: check.Money(2, 0, 1e15)})
+
+(** The invoices of every office, of a status (unpaid by default), the latest first: for the super-admin only. *)
+AdminInvoices = api.Get("/admin/invoices", query = check.Record({Status: check.OneOf(["unpaid", "paid"], optional = true, default = "unpaid")}),
+  out = api.Page(AdminRow, 50), role = api.Super, about = "The invoices of every office.")
+
+(** An invoice of any office marked paid by the support, its partner told as for a payment of the office. *)
+AdminPay = api.Post("/admin/invoices/:id/pay", role = api.Super, about = "Marks an invoice paid, for the support.")
+

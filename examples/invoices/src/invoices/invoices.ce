@@ -87,6 +87,31 @@ end
 (** POST /invoices/:id/pay: paid once; a second payment, or one at the same moment, gets a 409. *)
 pay(r) = app.Retry(() -> paying(r))
 
+defn adminInvoices(r, q)
+  (** GET /admin/invoices: the invoices of every office of a status, the latest first; late ones count as unpaid. *)
+  statuses = if q.Status == "paid" ["paid"] else ["unpaid", "late"] end
+  cepheus.Find(7, (i, t, no, b, u, st, tot) -> {Where: [[i, Invoice.Tenant, t], [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Due, u],
+    [i, Invoice.Status, st], cepheus.In(st, statuses), [i, Invoice.Total, tot]], Give: {Id: i, Tenant: t, Number: no, BillTo: b, Due: u, Status: st, Total: tot},
+    Sort: [cepheus.Desc(i)], Limit: r.Limit, After: r.After}, r.Db)
+end
+
+defn adminPaying(r)
+  (** An invoice of any office paid by the support: in its office, as the office would pay it. *)
+  id = app.IdOf(r.Params.id)
+  inv = if value.IsMissing(id) missing else cepheus.Get(Invoice, id, r.Db)? end
+  if value.IsMissing(inv) or value.IsMissing(inv.Tenant)
+    return app.Missing()
+  end
+  office = r
+  office.User = dict.Put("Tenant", inv.Tenant, r.User)
+  office.Params = {id: "$id"}
+  paying(office)?
+  result.Ok(missing)
+end
+
+(** POST /admin/invoices/:id/pay. *)
+adminPay(r) = app.Retry(() -> adminPaying(r))
+
 defn deleteInvoice(r)
   (** DELETE /invoices/:id: an invoice not paid, with its lines, as it was read. *)
   inv = invoiceOf(r.Params.id, r)?
