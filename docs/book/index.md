@@ -18,9 +18,23 @@ in [`examples/invoices`](https://github.com/www-celestial/centauri/tree/main/exa
    prod, health, metrics, a stop that loses no request, TLS, an image.
 5. [Tests without a server or Docker](testing.md): `apptest`, an app in memory, clients that sign up and call; the
    three tests Centauri makes of any app, `Isolated`, `Fuzz`, `Surface`.
-6. [Security](security.md): each threat of the OWASP Top 10, and the others, with Centauri's defense and its test.
-7. [The administration](administration.md): the endpoints of the super-admin pages, and what they show.
-8. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
-   Spring Boot, and where the time goes.
+6. [Sign up with an e-mail check, and a forgotten password](check-email.md): addresses checked by the link of a mail,
+   before a session or after, a new password by the link of a mail, the same answer whether an address has an account
+   or not (mail, background jobs, codes kept as their hash).
+7. [The report of each night](nightly-report.md): a mail at 06:00 in Paris, one run a day whatever the servers, tried
+   again when the server of mail is down (jobs in the group of their write, schedules of cron with real zones,
+   retries, the dead list, SMTP over TLS, Postmark).
+8. [The scan of an invoice](scans.md): a file sent as it comes, its type checked by its first bytes, kept in Cepheus's
+   vault by parts, read back by ranges (`api.Upload`, `app.Store`, `app.Download`, `Range`).
+9. [The unpaid invoices, live](live.md): every page changes as the database does, from any server, without a broker
+   (WebSocket, `cepheus.Watch`, the session and the rights, the endpoints as actions).
+10. [Tell a partner, and take his answers](partner.md): webhooks signed as Standard Webhooks, tried again, received once;
+    calls that never reach the app's own network (SSRF); `Idempotency-Key`.
+11. [Change the schema without a stop](schema.md): migrations run once whatever the processes, a field filled, expand then
+    contract, and what waits for Cepheus's A2.
+12. [Security](security.md): each threat of the OWASP Top 10, and the others, with Centauri's defense and its test.
+13. [The administration](administration.md): the endpoints of the super-admin pages, and what they show.
+14. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
+    Spring Boot, where the time goes, and what the pieces of the first month cost.
 
 The reference of the packages, every public name with its parameters, is under [Reference](ref/index.html).

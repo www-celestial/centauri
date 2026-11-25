@@ -54,6 +54,13 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_LOG_REQUESTS`, `APP_LOG_LINES` | true (false in test), 1000 | one line of the log a request; the lines the administration keeps |
 | `APP_ADMIN_PORT` | 0 (none) | `/metrics` for Prometheus, on 127.0.0.1 only |
 | `APP_CSP` | the app's own scripts and WebAssembly | the Content-Security-Policy |
+| `APP_UPLOAD_PART`, `APP_UPLOADS_AT_ONCE` | 1 MiB, 16 | the parts of a file in the vault; the uploads a process takes at once ([scans](scans.md)) |
+| `APP_CALL_TIMEOUT`, `APP_CALL_PLAIN`, `APP_CALL_ALLOW`, `APP_CALL_CA` | 10 s, `refuse`, none | the calls to other services: their deadline, plain http, the hosts of the network they may reach, their authorities ([partner](partner.md)) |
+| `APP_IDEMPOTENCY_KEY`, `APP_IDEMPOTENCY_TIME` | `honored`, a day | the `Idempotency-Key` header: honored, required or ignored; how long a key is kept |
+| `APP_JOB_WORKERS`, `APP_JOB_KEEP` | 4, a week | the fibers of a process that run the jobs (0: none here); how long a job done is kept ([report](nightly-report.md)) |
+| `APP_MAIL_URL`, `APP_MAIL_FROM`, `APP_MAIL_TIMEOUT`, `APP_MAIL_CA` | `log:` in dev, `test:` in test, required in prod | the transport of the mails, their sender, their deadline, the authorities of a company's server |
+| `APP_EMAIL_CHECK`, `APP_SIGN_UP_ANSWER`, `APP_CHECK_TIME`, `APP_RESET_TIME`, `APP_CHECK_PAGE`, `APP_RESET_PAGE`, `APP_MAILS_PER_HOUR` | `off`, `tell`, 2 days, 1 hour, `/check-email`, `/reset-password`, 5 | the checks of addresses and the new passwords by mail ([check](check-email.md)) |
+| `APP_HOOK_TOLERANCE`, `APP_HOOK_TIMEOUT` | 300 s, 15 s | the webhooks: how far from now a message received may be, the deadline of each try |
 
 ## 2. Three profiles
 

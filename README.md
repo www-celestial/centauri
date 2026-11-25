@@ -61,11 +61,21 @@ endpoints and `/openapi.json` in dev.
 - **Tests**: `apptest.Start` runs an app in memory on a fork of the database; `apptest.Isolated` proves on every
   endpoint that no tenant reads another's data, `apptest.Fuzz` that no broken input makes a 500, `apptest.Surface` that
   no change breaks a client.
+- **Background jobs** (`jobs`): written in the group of the write that asks for them, taken once, tried again after a
+  backoff, dead and retried by hand; schedules of cron on the clock of a real zone, one run a slot across servers.
+- **Mail** (`mail`): SMTP over TLS or STARTTLS only, Postmark, files and the log in dev, a box in tests; addresses
+  checked by the link of a mail, forgotten passwords, a sign-up that answers the same for every address.
+- **Files**: uploads read as they come, their type by their first bytes, kept in Cepheus's vault by parts, read by
+  ranges.
+- **Live screens**: `std/live` at `/live` with the session and the rights, each show a `cepheus.Watch` (no broker), the
+  endpoints as actions.
+- **Webhooks** (`hooks`) as Standard Webhooks, sent and received; `app.Call` that never reaches the app's own network
+  (SSRF); `Idempotency-Key`; migrations run once.
 
 ## Status
 
-Version 0.1, the first batch (L1). Background jobs, mail, files, live screens and migrations come in L2; the admin
-pages with [Ceres](https://github.com/www-celestial/ceres) in L2; OpenID Connect, passkeys, TOTP and API keys in L3.
-It needs `std/check` of Cesia (its branch `stdcheck`, not yet in a release).
+Version 0.2, the first two batches (L1, L2). The admin pages wait for [Ceres](https://github.com/www-celestial/ceres)
+in the browser; OpenID Connect, passkeys, TOTP and API keys come in L3. It needs Cesia's main and its branch
+`centauri-l2` (bodies in pieces, `Fetch`'s `peer`, `tls.Client`'s `ca`), not yet in a release.
 
 MIT licence.

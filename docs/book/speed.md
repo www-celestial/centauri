@@ -87,6 +87,50 @@ processor to a request, where it adds 18 in the program: with 256 requests in fl
 waits for the state, and the collector, about an eighth of the server's time in a sampled profile, moves and marks more
 of it.
 
+## The first month: what L2 adds, and what its pieces cost
+
+L2 must not make a request of L1 slower. Measured as L1 was, `bench/micro.ce` in the program, 21 runs alternated
+between Centauri's main (0.1, f4b845d, on Cesia's main) and L2 (on Cesia with the bodies in pieces), on cores 0, 1, 4,
+5 (2026-11-26, load 2.8 to 4.0), medians in µs with their [min, max]:
+
+| request | main | L2 |
+|---|---:|---:|
+| std/http alone, a JSON of one field | 3.47 [3.33, 6.33] | 3.64 [3.44, 6.34] |
+| Centauri, public, a JSON of one field | 21.25 [20.55, 38.16] | 21.65 [21.15, 41.57] |
+| Centauri, signed in, a thing by its id (`app.Own`) | 39.02 [37.00, 55.03] | 39.65 [38.74, 56.19] |
+| Centauri, signed in, a page of 20 things | 143.37 [140.21, 221.00] | 145.36 [140.95, 183.80] |
+
+The ranges overlap everywhere; the medians differ by 1.4 to 1.9 % for Centauri, and by 5 % for std/http alone, which L2
+doesn't change: the difference is that of the two builds of Cesia, not of L2's door. What L2 adds to a request of L1:
+for a request that changes something, one look for an `Idempotency-Key` header; for every request, two tests of a
+flag (an upload, a stream).
+
+What the new pieces cost, in the program, 21 runs, the mean of 500 calls a run (`bench/month.ce`, 2026-11-26, load
+2.5 to 2.8), medians [min, max]:
+
+| piece | cost |
+|---|---:|
+| a job written in a group, taken, run (nothing), finished, on a fork | 93.1 µs [91.3, 169.7] |
+| a mail made (1 KB of text: its headers checked, its text in base64) | 343 µs [335, 397] |
+| a webhook signed (HMAC-SHA256 of 80 bytes) | 15.7 µs [15.4, 23.3] |
+| an address checked against the special blocks (SSRF) | 21.9 µs [21.4, 24.3] |
+| the next slot of a schedule of cron in Paris | 10.4 µs [9.7, 11.5] |
+| a `POST`, without a key / with a new `Idempotency-Key` / with a key seen | 94.8 [92.7, 128.9] / 198 [194, 306] / 52.6 [51.3, 84.1] µs |
+| a write seen by a live page through a WebSocket, median of 20 writes | 0.12 ms [0.11, 0.12] |
+| a file of 10 MiB stored by parts, on a fork | 270 MB/s [238, 278] |
+
+On a real Cepheus server on this machine's SSD, 21 runs (load 1.3 to 2.9): 10 MiB of random bytes uploaded and stored
+in 274 ms [210, 2986] (38 MB/s), read back in 51 ms [46, 56] (207 MB/s), a range of 64 KiB in its middle in 0.9 ms
+[0.9, 1.1]. A job on a server costs, beside its CPU above, its three groups (written with its write, taken, finished),
+each forced to the disk: of the order of the 7,021 groups a second [1,799, 8,604] that 64 fibers write through one
+connection (measured by Cepheus), so a few thousand jobs a second a database, where an app of management asks tens.
+
+Where it is slow, and why: a mail is made in 343 µs, most of it base64 written in Cesia (a loop of the interpreter: 2.4
+times faster since Cesia's last change, still 0.2 µs a byte); a job's CPU is its two writes and its arguments read
+back through their shape. Neither is on the path of a request. What was not measured against the giants: Spring
+Boot's `@Scheduled` with ShedLock, its JavaMailSender, its multipart uploads to S3, its STOMP with a broker; the
+numbers above are Centauri's alone.
+
 ## What it says
 
 - Starting stays instant: 7 ms over std/http and Cepheus, against 3.4 s for Spring Boot 4 on this machine (the

@@ -24,7 +24,35 @@ by default, and the test that proves it. The tests are in `src/app/app.test.ce` 
 | token theft | no token in the page; the cookie unreadable by a script; a session ended is ended at once in its process, and within `APP_SESSION_CACHE` seconds (2) in the other workers | auth `isSignedOutForGood`, `isSessionsListedAndEnded`, `isChangeOutsideSeenWithinSessionCache` |
 | API breaks (never break user space) | the surface compared at each test | `apptest.Surface`, and it catching what breaks (apptest `isSurfaceKept`) |
 
+The threats of L2, the first month (the jobs, mail, files, live screens, webhooks and calls), each with its test in
+`tests/jobs.test.ce`, `tests/mail.test.ce`, `tests/checks.test.ce`, `tests/files.test.ce`, `tests/live.test.ce`,
+`tests/calls.test.ce`, `tests/migrate.test.ce`, and Cesia's `tests/net/http-pieces.ce`:
+
+| threat | defense | test |
+|---|---|---|
+| **A10 (2021)** server-side request forgery: a call made for someone else to this machine or its network (`169.254.169.254`, `localhost`, `10.0.0.1`) | `app.Call` checks the address the connection reached, before any byte (TLS's too), against the special blocks of IPv4 and IPv6 (mapped, NAT64 and 6to4 read as IPv4); every spelling (`2130706433`, `0x7f000001`, `127.1`, `0177.0.0.1`) is the address it connects to; `APP_CALL_ALLOW` names the hosts that may be private | calls `isPrivateInEverySpelling`, `isCallToThisMachineRefusedBeforeAByte` (the service hears nothing) |
+| SSRF by DNS rebinding: a name that answers a public address to a check and a private one to the connection | no check before the connection: the address checked is the one connected (`net.Peer`), with no second lookup | calls `isCallToThisMachineRefusedBeforeAByte` (a name of `/etc/hosts` resolved to 127.0.1.1) |
+| SSRF by a redirect, a user in the address, plain http | redirects not followed unless asked, and then each checked as the first; a user in an address refused; https unless allowed | calls `isAllowedHostAndItsRedirects`, `isCallShapeChecked` |
+| a webhook sent to a private address | the job is dead at once, the service never reached | calls `isPrivateEndpointDeadAtOnce` |
+| webhook forgery: a message made or changed by someone without the secret | HMAC-SHA256 over id, timestamp and body (Standard Webhooks), compared in constant time; any of the signatures sent | calls `isReceivedOnceAndForgeriesRefused`, `isSignedAsStandardWebhooks` |
+| webhook replay: a message caught and sent again | its time within 5 minutes; its id kept unique in Cepheus, in the group of what it does: done once | calls `isReceivedOnceAndForgeriesRefused` |
+| a webhook's secret read in the database | sealed under the app's key; given once | calls `isSentSignedAndTriedAgain` |
+| upload bombs: a file too large, many at once, a slow one | the most bytes refused before a byte is read; the body in pieces, never whole; uploads at once bounded (503); a piece within the timeout; no file decoded | files `isTooLargeRefused`, `isUploadsAtOnceBounded`, `isStreamedOverTheNetwork`; Cesia `http-pieces` |
+| a file that lies about its type, opened in the app's origin (stored XSS) | the type believed by its first bytes; downloads as attachments, nosniff, `sandbox` | files `isTypeTrustedByItsBytesOnly`, `isStoredByPartsAndReadByRanges` |
+| path tricks: a name that climbs out of a folder or adds a header | a file names no path; its name its last part, cleaned; a zone's name of tzdata checked too | files `isNameKeptHarmless`; jobs `isZoneNameChecked` |
+| mail header injection: a line end in an address, a subject or a name | each refused; plain addresses of RFC 5321; RFC 2047 for the rest; the text in base64 | mail `isHeaderInjectionRefused` |
+| mail in clear, or to a server that isn't the one named | smtps, or STARTTLS required; the certificate checked against the system's authorities or `APP_MAIL_CA` | mail `isSentByStartTlsOnly`, `isUntrustedCertificateRefused` |
+| job poisoning: a job that would hold the queue (an unknown kind, arguments that don't fit, a panic, a run without end) | dead at once, or failed and tried again, or stopped past its most; its error kept on one line, 1,000 bytes; the others run | jobs `isPoisonDeadOrStopped` |
+| a job run twice by two processes | taken by a group that expects it ready; a lease renewed while it runs | jobs `isTakenOnceByTwoAtOnce`, `isTakenBackFromADeadProcess` |
+| enumeration through the sign-up | `SignUpAnswer = neutral`: the same answer, byte for byte, after the same work; the owner told | checks `isSignUpNeutral` |
+| enumeration through a forgotten password | `202` always, one write always; the mail only to an account | checks `isPasswordSetByItsMail` |
+| a link of a mail used twice, late, or for another thing; its code read in the database | once, with its end and its kind; its hash only; in the fragment of the link | checks `isCheckedBeforeASession`, `isOldLinkRefused`, `isNoCodeKept` |
+| a stranger's box filled with our mails | `MailsPerHour` an address | checks `isStrangersBoxNotFilled` |
+| a live screen of another site, without a session, of a role one hasn't, or kept after a sign-out | SameOrigin at the upgrade; the session of its cookie; the role and the shape of each show; the screens of a session ended with it | live `isRefusedWithoutRights`, `isEndedBySignOut` |
+| another tenant's rows on a screen | the server writes the question, the tenant in it | live `isShownAsWritesComeAcrossServers` |
+| a request sent twice that runs twice (a payment) | `Idempotency-Key` kept unique in Cepheus with its request's hash | calls `isIdempotencyKeyRunOnce`, `isIdempotencyKeyRequiredAndChecked` |
+| a migration run twice, or half | its fact unique, its lease, its state; a fill that never overwrites | migrate `isOnceAcrossProcesses`, `isFilledWithoutOverwriting`, `isTakenAgainAfterItsLease` |
+
 What L1 does not do yet: the third wall, a token of Cepheus per role that reads only its kinds (G16), for roles that
 must never see some kinds (an outside accountant); multi-factor and passkeys (L3); checking a new password against the
-lists of leaked ones; mail that answers a sign-up with an e-mail taken without saying it is taken (L2: until then the
-sign-up says so, which the limits and proof of work slow down).
+lists of leaked ones. The neutral answer of a sign-up came with L2 (`SignUpAnswer`, with mail).

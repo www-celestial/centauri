@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 (not released)
+
+The second batch, L2: what an app of management asks in its first month. Nothing of 0.1 changes: every app of 0.1
+runs as it did (the module of the accounts brings the module of the jobs along, and every new setting has the default
+of 0.1's behaviour); the request of 0.1 costs the same (Speed).
+
+- `jobs`: durable background jobs on Cepheus (`Kind`, `Later` in the group of the write, `Stop`), taken once by a
+  group that expects them ready, leased and renewed, tried again after a full jitter, dead after their tries and
+  retried (`Retry`, `api.AdminJobs`, `api.AdminJobRetry`), taken back from a process that died; workers woken by a
+  `cepheus.Watch`; schedules (`Every`) of cron on the clock of a zone read from tzdata (summer time included), one run
+  a slot across servers by a unique key; `Module`; in tests `t.RunJobs()`, `t.Jobs()`.
+- `mail`: `Send` and `Later`, by `smtps://`, `smtp://` with STARTTLS required, `postmark://`, `file://`, `log:`,
+  `test:` (`APP_MAIL_URL`); every header checked; refused for good or for later; in tests `t.Mails()`.
+- `auth`: addresses checked by the link of a mail (`APP_EMAIL_CHECK` off, required, later), forgotten passwords
+  (`Forgot`, `Reset`), the neutral answer of a sign-up (`APP_SIGN_UP_ANSWER`), codes kept as their hash, serving
+  once, `APP_MAILS_PER_HOUR`; `Checked` in the account; `auth.Ends`, the end of a session's screens.
+- `app`: files (`Files`, `Store`, `Download` with `Range`, `Raw`), `api.Upload` served with the body in pieces and
+  its type by its first bytes; live screens (`Live`) at `/live` with the session, the rights and the endpoints as
+  actions; migrations (`Migration`, `Fill`, `Migrate`, and `Rename`, `Retype`, `Drop` that say A2 is needed);
+  `Call` with its deadline, retries and its checks of addresses (`Private`); `Idempotency-Key` at the door;
+  `Module` takes `jobs`, `verify`, `migrations`, `ends`.
+- `hooks`: Standard Webhooks sent (`Add`, `Later`, signed, tried again, 410 turns an endpoint off) and received
+  (`Verify`, the id kept in the group of what it does), `Sign`, `Module`.
+- `apptest`: modules verified and migrations run at the start; `t.SignUp` follows the link of the mail; `t.Code`,
+  `Drained`.
+- The book: tutorials 6 to 11, with Spring Boot beside; Security, Settings and Speed for L2. The invoices of the
+  example in their first month (`examples/invoices/tests/month.test.ce`).
+
 ## 0.1.0 (not released)
 
 The first batch, L1.
