@@ -43,9 +43,8 @@ end
 defn Things(p, name, height = 380)
   (** The things of a kind, 50 a page, and the one chosen, to change. *)
   kinds = Call(api.AdminKinds, {}, p)
-  l = Lister(api.AdminData, {kind: name}, p)
-  pagesRows = ListRows(l)
-  rows = web.Memo(() -> [parsed(r) for r in web.Get(pagesRows)])
+  l = Lister(api.AdminData, {kind: name}, p, each = parsed)
+  rows = ListRows(l)
   web.Stack([
     Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, l, rows, height)),
   ], gap = 8)

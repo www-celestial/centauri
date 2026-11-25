@@ -56,22 +56,33 @@ OkOf(r) = if not value.IsMissing(r) and result.IsOk(r) r.Value else missing end
 
 (* ---- A list of an endpoint of pages (api.Page), read a page after another. *)
 
-defn Lister(endpoint, args, p)
-  (** The list of an endpoint of pages with these arguments: the pages asked so far, each a signal of its reply. *)
-  {Endpoint: endpoint, Args: web.Signal(args), P: p, Asked: web.Signal([Call(endpoint, args, p)])}
+defn Lister(endpoint, args, p, each = missing)
+  (** The list of an endpoint of pages with these arguments: the pages asked so far, each {Reply, Rows}, Reply the signal
+      of its reply and Rows a memo of its rows made once by each(row) when given, as the rows of the data browser are
+      read from their JSON. All, true while every page is asked one after the other. *)
+  out = {Endpoint: endpoint, Args: web.Signal(args), P: p, Each: each, Asked: web.Signal([]), All: web.Signal(false)}
+  web.Set(out.Asked, [asked(out, args)])
+  out
+end
+
+defn asked(l, args)
+  (** A page of a list asked: its reply's signal, and the memo of its rows. *)
+  reply = Call(l.Endpoint, args, l.P)
+  each = l.Each
+  {Reply: reply, Rows: web.Memo(() -> if value.IsMissing(each) rowsOf(web.Get(reply)) else [each(x) for x in rowsOf(web.Get(reply))] end)}
 end
 
 defn ListRows(l)
   (** A memo of the rows of the pages of a list that came, in their order. *)
-  web.Memo(() -> list.Flatten([rowsOf(web.Get(s)) for s in web.Get(l.Asked)]))
+  web.Memo(() -> list.Flatten([web.Get(a.Rows) for a in web.Get(l.Asked)]))
 end
 
 rowsOf(r) = if value.IsDict(OkOf(r)) dict.GetOr("Rows", [], r.Value) else [] end   (* The rows of a reply of a page. *)
 
 defn lastReply(l)
   (** The reply of the last page asked, missing while it waits. *)
-  asked = web.Get(l.Asked)
-  web.Get(asked[value.Len(asked)])
+  pages = web.Get(l.Asked)
+  web.Get(pages[value.Len(pages)].Reply)
 end
 
 defn More(l)
@@ -79,24 +90,30 @@ defn More(l)
   r = lastReply(l)
   after = if value.IsDict(OkOf(r)) dict.Get("After", r.Value) else missing end
   if value.IsText(after)
-    web.Set(l.Asked, list.Append(Call(l.Endpoint, dict.Put("After", after, web.Get(l.Args)), l.P), web.Get(l.Asked)))
+    web.Set(l.Asked, list.Append(asked(l, dict.Put("After", after, web.Get(l.Args))), web.Get(l.Asked)))
   end
 end
 
 defn Again(l, args)
   (** The list asked again from its first page, with these arguments. *)
+  web.Set(l.All, false)
   web.Set(l.Args, args)
-  web.Set(l.Asked, [Call(l.Endpoint, args, l.P)])
+  web.Set(l.Asked, [asked(l, args)])
 end
 
+(** The most rows All asks for. *)
+MostRows = 200000
+
 defn ListState(l, rows)
-  (** A line under a list: how many rows came, whether more wait, and the problem of the last page if it failed. *)
+  (** A line under a list: how many rows came, whether more wait (More asks the next page, All every page, 200,000
+      rows at most), and the problem of the last page if it failed. *)
   () -> listLine(l, rows)
 end
 
 defn listLine(l, rows)
   r = lastReply(l)
   n = value.Len(web.Get(rows))
+  all = web.Get(l.All)
   if value.IsMissing(r)
     return web.Text("$n rows, loading…", color = gray)
   end
@@ -104,8 +121,13 @@ defn listLine(l, rows)
     return web.Row([web.Text("$n rows.", color = gray), Wrong(r.Error)], gap = 8)
   end
   next = value.IsDict(r.Value) and value.IsText(dict.Get("After", r.Value))
+  if next and all and n < MostRows
+    More(l)
+    return web.Row([web.Text("$n rows, the next page asked…", color = gray), web.Button("Stop", () -> web.Set(l.All, false))], gap = 8)
+  end
   web.Row([web.Text(if next "$n rows, more after." else "$n rows, all of them." end, color = gray),
-    if next web.Button("More", () -> More(l), key = "C-m") else missing end], gap = 8)
+    if next web.Button("More", () -> More(l), key = "C-m") else missing end,
+    if next web.Button("All", () -> web.Set(l.All, true)) else missing end], gap = 8)
 end
 
 (* ---- Times and cells. *)
