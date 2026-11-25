@@ -51,7 +51,9 @@ cookie = ana.Cookie
 plain = http.Handler(http.App()
   then http.Get("/hello", r -> http.Json({Text: "Hello"}))
   then http.Get("/notes/:id", r -> http.Json(result.Unwrap(cepheus.Get(Note, text.Number(r.Params.id), t.Db))))
-  then http.Get("/notes", r -> http.Json({Rows: result.Unwrap(cepheus.Find(2, (x, y) -> {Where: [[x, Note.Text, y]], Give: {Id: x, Text: y}, Sort: [x], Limit: 21}, t.Db))})))
+  then http.Get("/notes", r -> http.Json({Rows: result.Unwrap(cepheus.Find(2, (x, y) -> {Where: [[x, Note.Text, y]], Give: {Id: x, Text: y}, Sort: [x], Limit: 21}, t.Db))}))
+  then http.Get("/tenant/notes", r -> http.Json({Rows: result.Unwrap(cepheus.Find(2, (x, y) -> {Where: [[x, Note.Tenant, ana.Tenant], [x, Note.Text, y]], Give: {Id: x, Text: y},
+    Sort: [x], Limit: 21}, t.Db))})))
 
 ask(path, c) = {Method: "GET", Path: path, Query: "", Headers: [{Name: "host", Value: "notes.example"}, {Name: "cookie", Value: c}], Body: "", Peer: "203.0.113.7"}
 
@@ -61,6 +63,7 @@ cases = [
   {Name: "std/http, a thing by its id", Handle: plain, Request: ask("/notes/$first", "")},
   {Name: "Centauri, signed in, a thing by its id (app.Own)", Handle: t.Handle, Request: ask("/notes/$first", cookie)},
   {Name: "std/http, a page of 20 things", Handle: plain, Request: ask("/notes", "")},
+  {Name: "std/http, a page of 20 things of a tenant, Centauri's question", Handle: plain, Request: ask("/tenant/notes", "")},
   {Name: "Centauri, signed in, a page of 20 things", Handle: t.Handle, Request: ask("/notes", cookie)}]
 
 for c in cases
