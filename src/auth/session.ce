@@ -61,7 +61,8 @@ defn SessionKey(req, env)
 end
 
 defn Who(req, env)
-  (** The user of a request's session: an Ok of {Id, Tenant, Member, Session, Roles, Super, Email, Name, Until}, Roles
+  (** The user of a request's session: an Ok of {Id, Tenant, Member, Session, Roles, Super, Email, Name, Until, Checked},
+      Checked whether his address was checked by the link of a mail, Roles
       with every role they include, Until the time the session ends unless it is seen again (its end, or its end of
       idleness), or an Ok of missing for no session, an ended one, a disabled user, or a member taken out of his
       tenant. The time of the session is seen again at most every 5 minutes, by a write in a fiber of its own. *)
@@ -93,7 +94,7 @@ defn Who(req, env)
     fiber.Spawn(() -> cepheus.Write([cepheus.Expect(p.Id, Session.Seen, s.Seen), cepheus.Add(p.Id, Session.Seen, now)], env.Db, by = s.User, why = "session seen"))
   end
   result.Ok({Id: s.User, Tenant: s.Tenant, Member: s.Member, Session: p.Id, Roles: roles, Super: u.Super == true, Email: u.Email,
-    Name: dict.GetOr("Name", "", u), Until: list.Min([s.Ends, s.Seen + env.Settings.SessionIdle])})
+    Name: dict.GetOr("Name", "", u), Until: list.Min([s.Ends, s.Seen + env.Settings.SessionIdle]), Checked: not value.IsMissing(dict.Get("Checked", u))})
 end
 
 defn EndSessions(ids, by, why, db)

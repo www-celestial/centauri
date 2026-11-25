@@ -28,7 +28,8 @@ defn Start(a, settings = {}, now = Epoch)
   (** An app in memory: an Ok of its test t, with t.Db its fork, t.Env what its requests share, and t.SignUp(x),
       t.SignIn(email, password), t.Anyone(), t.Super(), t.As(u, roles), t.Make(u, kind, fields), t.Advance(seconds),
       t.Raw(method, path), t.RunJobs() (the background jobs due on its clock, one after the other: an Ok of how many
-      ran) and t.Jobs(state) (the jobs of a state, "dead" unless given). settings are given as the environment would give them, over the profile test, proof of work
+      ran) and t.Jobs(state) (the jobs of a state, "dead" unless given), t.Mails() (the mails sent, the oldest first: {From, To,
+      Subject, Text, Html, Id, Raw}), t.Code(email) (the code of the last link mailed to an address). settings are given as the environment would give them, over the profile test, proof of work
       off and generous limits, which a test of them sets back. *)
   db = cepheus.Fork(cepheus.Empty, a.Kinds)?
   if value.Len(a.Rules) > 0
@@ -41,6 +42,18 @@ defn Start(a, settings = {}, now = Epoch)
     return result.Err({Kind: "apptest", Message: text.Join("; ", s.Error)})
   end
   env = app.Start(a, s.Value, db, clock = now)?
+  wrong = []
+  for m in a.Modules
+    if not value.IsMissing(dict.Get("Verify", m))
+      got = m.Verify(env)
+      if result.IsErr(got)
+        wrong = list.Concat(wrong, if value.IsArray(got.Error) got.Error else [value.Text(got.Error)] end)
+      end
+    end
+  end
+  if value.Len(wrong) > 0
+    return result.Err({Kind: "apptest", Message: text.Join("; ", wrong)})
+  end
   t = {App: a, Db: db, Env: env, Handle: app.Handler(env)}
   made(t)
 end
@@ -58,6 +71,8 @@ defn made(t)
   out.Advance = seconds -> app.Advance(seconds, t.Env.State)
   out.RunJobs = () -> jobs.RunDue(t.Env)
   out.Jobs = (state = "dead") -> jobs.List(state, t.Db)
+  out.Mails = () -> app.Mails(t.Env.State)
+  out.Code = email -> CodeOf(t, email)
   result.Ok(out)
 end
 
@@ -138,13 +153,36 @@ end
 
 call(t, cookie, ip, e, x) = Answer(send(t, cookie, ip, e, x))
 
+defn CodeOf(t, email)
+  (** The code of the last link mailed to an address (after #code=), or missing. *)
+  for m in list.Reverse(app.Mails(t.Env.State))
+    if email in m.To and text.Contains("#code=", m.Text)
+      return text.ByteSlice(1, 64, text.Split("#code=", m.Text)[2])
+    end
+  end
+  missing
+end
+
 defn signUp(t, x)
-  (** A client signed up with x, its fields as the endpoint takes them (Name, Email, Password at least). *)
+  (** A client signed up with x, its fields as the endpoint takes them (Name, Email, Password at least). When the
+      address must be checked first (EmailCheck required), the link of its mail is followed, as its owner would. *)
   ip = "198.51.100.$(1 + math.Mod(value.Len(x.Email) * 7, 200))"
   out = send(t, missing, ip, api.SignUp, x)
   got = Answer(out)
   if result.IsErr(got)
     return got
+  end
+  if out.Status == 202
+    jobs.RunDue(t.Env)?
+    code = CodeOf(t, x.Email)
+    if value.IsMissing(code)
+      return result.Err({Status: 202, Message: "No mail came to $(x.Email).", Fields: {}, Problem: {}})
+    end
+    out = send(t, missing, ip, api.CheckEmail, {Code: code})
+    got = Answer(out)
+    if result.IsErr(got)
+      return got
+    end
   end
   result.Ok(client(t, got.Value, cookieOf(out), out, ip))
 end
@@ -196,7 +234,8 @@ end
 
 (* The endpoints that the generated tests leave alone: those that end or move the session that calls them, and those
    that make accounts, which the tests make themselves. *)
-skipped = [api.SignUp.Name, api.SignIn.Name, api.SignOut.Name, api.SignOutAll.Name, api.SwitchTenant.Name, api.Join.Name, api.ChangePassword.Name]
+skipped = [api.SignUp.Name, api.SignIn.Name, api.SignOut.Name, api.SignOutAll.Name, api.SwitchTenant.Name, api.Join.Name, api.ChangePassword.Name,
+  api.CheckEmail.Name, api.Reset.Name]
 
 defn ownKinds(t)
   (** The kinds of the app's modules that belong to a tenant: those of app.Kind with a field Tenant. *)

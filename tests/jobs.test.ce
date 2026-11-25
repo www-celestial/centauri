@@ -256,7 +256,9 @@ defn isOneRunASlotWhateverTheProcesses()
 end
 
 defn isJobsWithoutTheirModuleRefused()
-  (** An app whose modules have jobs and no module to run them is a bug, said at once. *)
-  got = fiber.Wait(fiber.Spawn(() -> app.Of([auth.Module(), Notes], name = "notes")))
-  result.IsErr(got) and text.Contains("jobs.Module()", got.Error.Message)
+  (** An app whose modules have jobs and no module to run them is a bug, said at once; auth brings its own runner, so
+      an app of accounts written before the jobs works as it did. *)
+  got = fiber.Wait(fiber.Spawn(() -> app.Of([Notes], name = "notes")))
+  brought = app.Of([auth.Module(), Notes], name = "notes")
+  result.IsErr(got) and text.Contains("jobs.Module()", got.Error.Message) and "jobs" in [m.Name for m in brought.Modules]
 end

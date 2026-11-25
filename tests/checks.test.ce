@@ -1,0 +1,124 @@
+(** The accounts with mail: an address checked by the link of its mail before a session (EmailCheck required) or after
+    (later), a forgotten password set again by the link of its mail, and what an attacker tries there: learning which
+    addresses have an account through the sign-up or the forgotten password (the answers are the same, byte for
+    byte), using a link twice, a link of one kind for another, an old link, filling a stranger's box, finding the
+    codes in the database or the logs. Each test is an app in memory (apptest). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/jobs
+use std/bug
+use std/dict
+use std/http
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+App = app.Of([auth.Module(), jobs.Module()], name = "Invoices")
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+status(got) = if result.IsOk(got) 200 else got.Error.Status end
+mailsTo(t, email) = [m for m in t.Mails() if email in m.To]   (* The mails to an address. *)
+
+defn isCheckedBeforeASession()
+  t = apptest.Start(App, settings = {EmailCheck: "required"})?
+  out = t.Anyone().Send(api.SignUp, ana)
+  bug.Assert(out.Status == 202 and out.Body == "{}" and value.IsMissing(http.HeaderValue("set-cookie", out.Headers)), "no session yet: $(out.Status) $(out.Body)")
+  bug.Assert(t.SignIn(ana.Email, ana.Password).Error.Status == 403, "no sign-in before the check")
+  t.RunJobs()?
+  m = mailsTo(t, ana.Email)
+  bug.Assert(value.Len(m) == 2 and text.Contains("http://app.test/check-email#code=", m[1].Text), "the link, then a second for the sign-in tried: $(value.Len(m))")
+  code = t.Code(ana.Email)
+  a = t.Anyone().Call(api.CheckEmail, {Code: code})?
+  bug.Assert(a.Checked and a.Email == ana.Email, "checked and signed in: $a")
+  again = t.Anyone().Call(api.CheckEmail, {Code: code})
+  bug.Assert(status(again) == 403, "a code serves once")
+  t.SignIn(ana.Email, ana.Password)?.Account.Checked
+end
+
+defn isSignUpThatChecksLater()
+  t = apptest.Start(App, settings = {EmailCheck: "later"})?
+  a = t.SignUp(ana)?
+  bug.Assert(not a.Account.Checked, "a session at once, not yet checked")
+  t.RunJobs()?
+  t.Anyone().Call(api.CheckEmail, {Code: t.Code(ana.Email)})?.Checked and a.Call(api.Me)?.Checked
+end
+
+defn isOldLinkRefused()
+  t = apptest.Start(App, settings = {EmailCheck: "required", CheckTime: 3600})?
+  t.Anyone().Send(api.SignUp, ana)
+  t.RunJobs()?
+  t.Advance(3601)
+  status(t.Anyone().Call(api.CheckEmail, {Code: t.Code(ana.Email)})) == 403
+end
+
+shape(out) = {Status: out.Status, Body: out.Body, Headers: list.Sort([h.Name for h in out.Headers])}   (* What a client sees of an answer. *)
+
+defn isSignUpNeutral()
+  (** With SignUpAnswer neutral, a sign-up with a taken address answers as one with a new address, byte for byte, and
+      the owner of the address is told, not the sender. *)
+  t = apptest.Start(App, settings = {EmailCheck: "required", SignUpAnswer: "neutral"})?
+  t.SignUp(ana)?
+  fresh = t.Anyone().Send(api.SignUp, {Email: "bo@example.com", Password: "another long secret", Name: "Bo"})
+  taken = t.Anyone().Send(api.SignUp, {Email: ana.Email, Password: "an attacker's guess", Name: "Eve"})
+  bug.Assert(value.Equal(shape(fresh), shape(taken)), "the same answer: $(shape(fresh)) $(shape(taken))")
+  t.RunJobs()?
+  told = mailsTo(t, ana.Email)
+  bug.Assert(text.Contains("Someone tried to sign up", told[value.Len(told)].Subject), "the owner is told: $(told[value.Len(told)].Subject)")
+  t.SignIn(ana.Email, ana.Password)?.Account.Name == "Ana"
+end
+
+defn isNeutralWithoutCheckRefused()
+  got = apptest.Start(App, settings = {SignUpAnswer: "neutral"})
+  result.IsErr(got) and text.Contains("APP_SIGN_UP_ANSWER", got.Error.Message)
+end
+
+defn isPasswordSetByItsMail()
+  (** A forgotten password: the same 202 for an address with an account and one without, a mail to the first only;
+      its link sets a new password once, ends every session, the old password no longer works. *)
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  known = t.Anyone().Send(api.Forgot, {Email: ana.Email})
+  unknown = t.Anyone().Send(api.Forgot, {Email: "nobody@example.com"})
+  bug.Assert(value.Equal(shape(known), shape(unknown)) and known.Status == 202, "the same answer: $(shape(known)) $(shape(unknown))")
+  t.RunJobs()?
+  bug.Assert(value.Len(mailsTo(t, "nobody@example.com")) == 0 and value.Len(mailsTo(t, ana.Email)) == 1, "a mail to the account only")
+  code = t.Code(ana.Email)
+  bug.Assert(status(t.Anyone().Call(api.CheckEmail, {Code: code})) == 403, "a code of reset checks nothing")
+  b = t.Anyone().Call(api.Reset, {Code: code, Password: "a brand new secret"})?
+  bug.Assert(b.Email == ana.Email and b.Checked, "signed in, the address checked: $b")
+  bug.Assert(status(t.Anyone().Call(api.Reset, {Code: code, Password: "again a new secret"})) == 403, "once")
+  bug.Assert(status(a.Call(api.Me)) == 401, "the sessions before ended")
+  bug.Assert(status(t.SignIn(ana.Email, ana.Password)) == 401, "the old password is gone")
+  t.SignIn(ana.Email, "a brand new secret")?.Account.Email == ana.Email
+end
+
+defn isStrangersBoxNotFilled()
+  (** MailsPerHour mails a hour for one address, whoever asks. *)
+  t = apptest.Start(App, settings = {MailsPerHour: 3})?
+  t.SignUp(ana)?
+  codes = [t.Anyone().Send(api.Forgot, {Email: ana.Email}).Status for k in 1..5]
+  value.Equal(codes, [202, 202, 202, 429, 429])
+end
+
+defn isNoCodeKept()
+  (** The database keeps the hash of a code, never the code; the logs neither. *)
+  t = apptest.Start(App, settings = {EmailCheck: "required"})?
+  t.Anyone().Send(api.SignUp, ana)
+  t.RunJobs()?
+  code = t.Code(ana.Email)
+  rows = cepheus.Find(2, (c, h) -> {Where: [[c, auth.Code.Hash, h]], Give: {H: h}}, t.Db)?
+  jobsText = json.Text(t.Jobs("done")?)
+  boss = t.Super()?
+  logs = json.Text(boss.Call(api.AdminLogs)?)
+  value.Len(rows) == 1 and rows[1].H != code and not text.Contains(code, jobsText) and not text.Contains(code, logs)
+end
+
+defn isAccountsIsolatedAndFuzzedWithMail()
+  (** The generated tests on an app whose sign-up checks addresses: its new endpoints leak nothing and never fail. *)
+  apptest.Isolated(App, settings = {EmailCheck: "required"})? and apptest.Fuzz(App, settings = {EmailCheck: "later"})?
+end

@@ -5,9 +5,10 @@ use deps/www-celestial/cepheus/cesia/cepheus
 use src/app
 
 (** A user: his e-mail (unique), his name, the Argon2id hash of his password, Super for an administrator of the whole
-    platform, Disabled for one who may no longer sign in, and when he signed up. *)
+    platform, Disabled for one who may no longer sign in, when he signed up, and when his address was checked (by the
+    link of a mail: missing before). *)
 User = app.Kind("centauri_user", {Email: cepheus.Text(unique = true), Name: cepheus.Text(), Hash: cepheus.Text(), Super: cepheus.Bool(),
-  Disabled: cepheus.Bool(), Created: cepheus.Date()})
+  Disabled: cepheus.Bool(), Created: cepheus.Date(), Checked: cepheus.Date()})
 
 (** A tenant: its name, its name in small letters for a search by its start, when it was made, its first owner, and
     Key, unique, for the one tenant of a single-tenant app ("single"). *)
@@ -37,5 +38,9 @@ Failure = app.Kind("centauri_failure", {Key: cepheus.Text(unique = true), Count:
     forgotten once it has ended. *)
 Proof = app.Kind("centauri_proof", {Key: cepheus.Text(unique = true), Ends: cepheus.Date()})
 
+(** A code sent by mail, to check an address or to set a new password: its user, its kind ("check" or "reset"), the
+    hash of the code (unique: the mail holds the code, the database never), and when it ends. A code serves once. *)
+Code = app.Kind("centauri_code", {User: cepheus.Link(), Kind: cepheus.Text(), Hash: cepheus.Text(unique = true), Ends: cepheus.Date()})
+
 (** The kinds of package auth. *)
-Kinds = [User, Tenant, Member, Session, Invite, Failure, Proof]
+Kinds = [User, Tenant, Member, Session, Invite, Failure, Proof, Code]

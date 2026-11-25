@@ -93,6 +93,7 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
       tenant says defaults = {Tenancy: "single"}), its name and version (for OpenAPI and the admin), and pages, the
       folder of its front (dist/), served for the paths that no route takes. An endpoint whose role is no role of the
       table, nor api.Public, api.Signed or api.Super, stops here: a role written wrong never opens a route. *)
+  modules = withRunner(modules)
   fields = Core
   kinds = Kinds
   rules = []
@@ -105,9 +106,7 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
     names = list.Concat(names, [dict.Get("name", k) for k in m.Kinds if not value.IsMissing(dict.Get("name", k))])
     rules = list.Concat(rules, m.Rules)
     for j in dict.GetOr("Jobs", [], m)
-      same = [k for k in jobs if k.Name == j.Name]
-      bug.Assert(value.Len(same) == 0 or same[1].Run == j.Run, "Two kinds of jobs are named $(j.Name).")
-      if value.Len(same) == 0
+      if not (j.Name in [k.Name for k in jobs])
         jobs = list.Append(j, jobs)
       end
     end
@@ -127,6 +126,22 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
   bug.Assert(value.Len(jobs) == 0 or "jobs" in [m.Name for m in modules], "The modules of this app have jobs ($(text.Join(", ", [j.Name for j in jobs]))), and no module runs them: add jobs.Module() to app.Of.")
   {Name: name, Version: version, Modules: modules, Fields: fields, Defaults: defaults, Roles: roles, Kinds: kinds, Rules: rules,
     Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served], Jobs: jobs}
+end
+
+defn withRunner(modules)
+  (** The modules of an app, and the module that runs their jobs when they have some and none of them is it: the one a
+      module brings along (as auth brings that of package jobs, in its Runner), so that an app of accounts written
+      before the jobs works as it did. *)
+  names = [m.Name for m in modules]
+  if "jobs" in names or not list.Any([value.Len(dict.GetOr("Jobs", [], m)) > 0 for m in modules])
+    return modules
+  end
+  for m in modules
+    if dict.Has("Runner", m)
+      return list.Append(m.Runner, modules)
+    end
+  end
+  modules
 end
 
 defn Start(a, s, db, readDb = missing, clock = missing)

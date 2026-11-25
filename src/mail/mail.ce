@@ -1,0 +1,463 @@
+(** Mail: a message sent by SMTP over TLS, by the HTTP API of a provider (Postmark), written to files or to the log in
+    dev, or kept in a box in a test, as the setting MailUrl says: one Send, whatever goes under it. Later sends it from
+    a background job, written in the group of the write that asks for it, and tried again when the server of mail
+    fails for a while. Every header is checked: an address is a plain address of RFC 5321, a subject or a name holds no
+    line end (no header can be added through them), a subject or a name not in ASCII is written as RFC 2047 says, and
+    the text goes in base64, so that no line of it is ever read as the end of the message.
+
+      Message({To: "ana@example.com", Subject: "Welcome", Text: "Hello Ana."}, "Shop <no-reply@shop.example>", 1794528000, "a1b2").Subject --> "Welcome" *)
+use src/app
+use src/jobs
+use std/bug
+use std/check
+use std/crypto
+use std/date
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/log
+use std/math
+use std/metrics
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+(** The settings of mail. MailUrl, a secret since it holds the password or the token:
+    smtps://user:password@host:465 (TLS from the start, RFC 8314, which it recommends),
+    smtp://user:password@host:587 (STARTTLS, required: a server that doesn't offer it is refused),
+    postmark://TOKEN (the HTTP API of Postmark, over https), file:///folder (each mail a file .eml, for dev),
+    log: (each mail a line of the log: dev's default) or test: (kept in a box of the process, for t.Mails(): test's
+    default). prod needs one. MailFrom is the sender, as "Invoices <no-reply@invoices.example>" (no-reply at the host
+    of Origin unless given); MailTimeout the seconds a mail has to go; MailCa the authorities to trust, for a server
+    of mail of the company's own. *)
+Settings = {
+  MailUrl: check.Secret(1, 2000, optional = true),
+  MailFrom: check.Text(3, 300, optional = true),
+  MailTimeout: check.Int(1, 600, optional = true, default = 30),
+  MailCa: check.Text(1, 1000, optional = true),
+}
+
+(** The shape of a message: to whom (one address or a list), its subject, its text, its HTML if it has one, who
+    answers (ReplyTo), and its sender when it is not MailFrom. *)
+Shape = check.Record({To: check.List(check.Email(), 1, 50), Subject: check.Text(1, 300), Text: check.Text(0, 1000000, lines = true),
+  Html: check.Text(0, 2000000, lines = true, optional = true), ReplyTo: check.Email(optional = true), From: check.Text(3, 300, optional = true)})
+
+(* What an address may hold, beside letters and digits: the dot-atom of RFC 5321, with no quotes, brackets or spaces. *)
+addressBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$$%&'*+/=?^_`{|}~-@"
+
+defn Address(x)
+  (** An e-mail address as a mail may carry it: an Ok of it in small letters, or an Err. It refuses what could add a
+      header or a command of SMTP: a line end, a space, <, >, a quote, a comma.
+
+        Address("Ana@Example.com") --> result.Ok("ana@example.com")
+        Address("ana@example.com>\r\nRCPT TO:<eve@evil.example") then result.IsErr() --> true *)
+  got = check.Read(check.Email(), x)
+  if result.IsErr(got) or not value.IsMissing(text.ByteFindAny(addressBytes, 1, got.Value, not = true))
+    return result.Err({Kind: "mail", Message: "This is no e-mail address a mail can carry: $(text.ByteSlice(1, list.Min([100, text.ByteLength(value.Text(x))]), value.Text(x)))."})
+  end
+  result.Ok(got.Value)
+end
+
+defn lineFree(s, what)
+  (** An Ok when a text of a header holds no line end nor other control byte, else an Err. *)
+  for b in text.Bytes(s)
+    if b < 32 or b == 127
+      return result.Err({Kind: "mail", Message: "The $what of a mail can't hold a line end or a control character."})
+    end
+  end
+  result.Ok(s)
+end
+
+defn ascii(s)
+  (** Is a text of printable ASCII only? *)
+  for b in text.Bytes(s)
+    if b < 32 or b > 126
+      return false
+    end
+  end
+  true
+end
+
+defn Words(s)
+  (** A text for a header: as it is in plain ASCII, else as encoded words of RFC 2047, UTF-8 in base64, cut on whole
+      characters so that no word passes 75 bytes.
+
+        Words("Welcome") --> "Welcome"
+        Words("Bienvenue, Zoé") --> "=?UTF-8?B?QmllbnZlbnVlLCBab8Op?=" *)
+  if ascii(s)
+    return s
+  end
+  out = []
+  piece = ""
+  for c in text.Chars(s)
+    if text.ByteLength(piece) + text.ByteLength(c) > 45
+      out = list.Append("=?UTF-8?B?$(encode.Base64(piece))?=", out)
+      piece = ""
+    end
+    piece = "$piece$c"
+  end
+  if piece != ""
+    out = list.Append("=?UTF-8?B?$(encode.Base64(piece))?=", out)
+  end
+  text.Join(" ", out)
+end
+
+defn Sender(from)
+  (** A sender, as "Invoices <no-reply@invoices.example>" or a plain address: an Ok of {Name, Address, Header}, or an
+      Err.
+
+        Sender("Shop <no-reply@shop.example>").Value.Header --> "Shop <no-reply@shop.example>" *)
+  lineFree(from, "sender")?
+  open = text.ByteFind("<", 1, from)
+  if value.IsMissing(open)
+    a = Address(from)?
+    return result.Ok({Name: "", Address: a, Header: a})
+  end
+  close = text.ByteFind(">", open, from)
+  if value.IsMissing(close) or close != text.ByteLength(text.Trim(from))
+    return result.Err({Kind: "mail", Message: "A sender is a name and <an address>."})
+  end
+  a = Address(text.ByteSlice(open + 1, close - 1, from))?
+  name = text.Trim(if open == 1 "" else text.ByteSlice(1, open - 1, from) end)
+  if text.Contains("\"", name) or text.Contains("\\", name)
+    return result.Err({Kind: "mail", Message: "The name of a sender holds no quote."})
+  end
+  result.Ok({Name: name, Address: a, Header: if name == "" a else "$(Words(name)) <$a>" end})
+end
+
+dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+two(n) = if n < 10 "0$n" else "$n" end   (* A number of two digits. *)
+
+defn DateLine(t)
+  (** The Date of a mail, as RFC 5322 writes it, in UTC.
+
+        DateLine(1794528000) --> "Fri, 13 Nov 2026 00:00:00 +0000" *)
+  d = date.FromUnix(t)
+  "$(dayNames[date.Weekday(d)]), $(d.Day) $(monthNames[d.Month]) $(d.Year) $(two(d.Hour)):$(two(d.Minute)):$(two(d.Second)) +0000"
+end
+
+defn lines76(b64)
+  (** Base64 cut in lines of 76, as MIME asks (RFC 2045, 6.8). *)
+  n = text.ByteLength(b64)
+  text.Join("\r\n", [text.ByteSlice(k, list.Min([n, k + 75]), b64) for k in list.Range(1, n, step = 76)])
+end
+
+defn normal(m)
+  (** A message with its To as a list: one address may be given alone. *)
+  if value.IsDict(m) and value.IsText(dict.Get("To", m)) dict.Put("To", [m.To], m) else m end
+end
+
+defn Message(m, from, now, id)
+  (** The message of a mail, checked: {From, To, Subject, ReplyTo, Id, Text, Html, Raw}, Raw its text as RFC 5322 and
+      MIME write it, its lines ended by CRLF, its bodies in base64. A header that is wrong is a bug of the program,
+      which stops it here: the app writes its mails; what comes from outside is checked before, by the shapes. *)
+  got = check.Read(Shape, normal(m))
+  bug.Assert(result.IsOk(got), "This mail doesn't fit mail.Shape: $(if result.IsErr(got) json.Text(got.Error) else "" end).")
+  x = got.Value
+  to = [result.Unwrap(Address(a)) for a in x.To]
+  sender = result.Unwrap(Sender(if value.IsMissing(dict.Get("From", x)) from else x.From end))
+  subject = result.Unwrap(lineFree(x.Subject, "subject"))
+  domain = text.Split("@", sender.Address)[2]
+  head = ["Date: $(DateLine(now))", "From: $(sender.Header)", "To: $(text.Join(", ", to))", "Subject: $(Words(subject))",
+    "Message-ID: <$id@$domain>", "MIME-Version: 1.0"]
+  if not value.IsMissing(dict.Get("ReplyTo", x))
+    head = list.Append("Reply-To: $(result.Unwrap(Address(x.ReplyTo)))", head)
+  end
+  textPart = "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n$(lines76(encode.Base64(x.Text)))"
+  body = ""
+  if value.IsMissing(dict.Get("Html", x))
+    body = "$(text.Join("\r\n", head))\r\n$textPart\r\n"
+  else
+    edge = "=_centauri_$id"
+    htmlPart = "Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n$(lines76(encode.Base64(x.Html)))"
+    body = "$(text.Join("\r\n", head))\r\nContent-Type: multipart/alternative; boundary=\"$edge\"\r\n\r\n--$edge\r\n$textPart\r\n--$edge\r\n$htmlPart\r\n--$edge--\r\n"
+  end
+  {From: sender.Address, FromHeader: sender.Header, To: to, Subject: subject, ReplyTo: dict.Get("ReplyTo", x), Id: "$id@$domain", Text: x.Text,
+    Html: dict.Get("Html", x), Raw: body}
+end
+
+
+defn fromOf(env)
+  (** The sender of the app's mails: MailFrom, or no-reply at the host of Origin. *)
+  given = dict.Get("MailFrom", env.Settings)
+  if value.IsText(given)
+    return given
+  end
+  host = text.Split(":", text.Split("/", text.Replace("https://", "", text.Replace("http://", "", env.Settings.Origin)))[1])[1]
+  "no-reply@$(if text.Contains(".", host) host else "$host.localdomain" end)"
+end
+
+defn urlOf(env)
+  (** The transport of the app's mails: MailUrl, or log: in dev and test: in test. *)
+  given = dict.Get("MailUrl", env.Settings)
+  if value.IsText(given) given else if env.Settings.Profile == "test" "test:" else "log:" end
+end
+
+defn Target(url)
+  (** The transport of a MailUrl: an Ok of {Scheme, Host, Port, User, Password, Path}, or an Err that never holds the
+      password.
+
+        Target("smtps://ana:secret@mail.example:465").Value.Port --> 465
+        Target("smtp://mail.example").Value.Port --> 587
+        Target("postmark://token").Value.Host --> "api.postmarkapp.com" *)
+  cut = text.Split("://", url)
+  scheme = if value.Len(cut) == 2 cut[1] else text.Split(":", url)[1] end
+  if scheme == "log" or scheme == "test"
+    return result.Ok({Scheme: scheme})
+  end
+  if value.Len(cut) != 2
+    return result.Err({Kind: "mail", Message: "APP_MAIL_URL: a transport, as smtps://user:password@host:465."})
+  end
+  rest = cut[2]
+  if scheme == "file"
+    return result.Ok({Scheme: "file", Path: rest})
+  end
+  if not (scheme in ["smtps", "smtp", "postmark"])
+    return result.Err({Kind: "mail", Message: "APP_MAIL_URL: $scheme is no transport of mail: smtps, smtp, postmark, file, log or test."})
+  end
+  at = text.Split("@", rest)
+  who = if value.Len(at) >= 2 text.Join("@", list.DropLast(1, at)) else "" end
+  where = text.Split("/", at[value.Len(at)])[1]
+  pair = text.Split(":", who)
+  user = encode.UrlDecode(pair[1])
+  password = if value.Len(pair) >= 2 encode.UrlDecode(text.Join(":", list.Skip(1, pair))) else "" end
+  hp = text.Split(":", where)
+  host = hp[1]
+  port = if value.Len(hp) == 2 text.Number(hp[2]) else (if scheme == "smtps" 465 else if scheme == "smtp" 587 else 443 end) end
+  if scheme == "postmark"
+    password = user
+    user = ""
+    host = if value.Len(at) >= 2 and host != "" host else "api.postmarkapp.com" end
+    if value.Len(at) < 2
+      password = encode.UrlDecode(where)
+      host = "api.postmarkapp.com"
+    end
+  end
+  if host == "" or not value.IsInt(port)
+    return result.Err({Kind: "mail", Message: "APP_MAIL_URL: a host and a port, as smtps://user:password@host:465."})
+  end
+  result.Ok({Scheme: scheme, Host: host, Port: port, User: user, Password: password})
+end
+
+defn Verify(env)
+  (** The settings of mail at the start: an Ok, or an Err of lines that stop it, the transport named wrong or missing
+      in prod. *)
+  url = dict.Get("MailUrl", env.Settings)
+  if value.IsMissing(url)
+    return if env.Settings.Profile == "prod" result.Err(["APP_MAIL_URL: the transport of the mails is needed in prod, as smtps://user:password@host:465 or postmark://TOKEN."]) else result.Ok(missing) end
+  end
+  t = Target(url)
+  if result.IsErr(t)
+    return result.Err([t.Error.Message])
+  end
+  if env.Settings.Profile == "prod" and t.Value.Scheme in ["log", "test", "file"]
+    return result.Err(["APP_MAIL_URL: $(t.Value.Scheme) keeps the mails here, which prod can't: smtps, smtp or postmark."])
+  end
+  s = Sender(fromOf(env))
+  if result.IsErr(s) result.Err(["APP_MAIL_FROM: $(s.Error.Message)"]) else result.Ok(missing) end
+end
+
+defn Send(env, m)
+  (** Sends a mail now, by the transport of MailUrl: an Ok of {Id}, its Message-ID, or an Err, of Code "later" when
+      the server of mail asks to try again (a busy server, a 4xx of SMTP, a 429 or a 5xx of HTTP) and "refused" when
+      it never will take it (a 5xx of SMTP, an address it refuses). A job sends it with Later, which tries again what
+      can be. *)
+  t = Target(urlOf(env))?
+  id = encode.Hex(crypto.Random(12, env.Keys))
+  msg = Message(m, fromOf(env), env.Now(), id)
+  sent = if t.Scheme == "test" kept(msg, env)
+    else if t.Scheme == "log" logged(msg)
+    else if t.Scheme == "file" filed(msg, t)
+    else if t.Scheme == "postmark" postmark(msg, t, env)
+    else smtp(msg, t, env) end
+  if result.IsOk(sent)
+    metrics.Add("mails_total", labels = {transport: t.Scheme, state: "sent"})
+    return result.Ok({Id: msg.Id})
+  end
+  metrics.Add("mails_total", labels = {transport: t.Scheme, state: dict.GetOr("Code", "failed", sent.Error)})
+  sent
+end
+
+
+kept(msg, env) = result.Ok(app.KeepMail({From: msg.From, To: msg.To, Subject: msg.Subject, Text: msg.Text, Html: msg.Html, Id: msg.Id, Raw: msg.Raw}, env.State))   (* A mail of a test, in the box of the process. *)
+
+defn logged(msg)
+  (** A mail of dev, written in the log: its link of a sign-up is there to follow. *)
+  log.Info("mail", {To: text.Join(", ", msg.To), Subject: msg.Subject, Text: msg.Text})
+  result.Ok(missing)
+end
+
+defn filed(msg, t)
+  (** A mail written as a file .eml in the folder of file:///folder, named by its id. *)
+  sys.Mkdir(t.Path)?
+  sys.Write("$(t.Path)/$(text.Split("@", msg.Id)[1]).eml", msg.Raw)
+end
+
+failed(code, message) = result.Err({Kind: "mail", Code: code, Message: message})   (* An Err of mail: "later" or "refused". *)
+
+defn secure(env)
+  (** The client of TLS of the mails: the system's authorities, or MailCa's. *)
+  api = tls.Open()?
+  ca = dict.Get("MailCa", env.Settings)
+  result.Ok(if value.IsMissing(ca) tls.Client(api) else tls.Client(api, ca = ca) end)
+end
+
+defn postmark(msg, t, env)
+  (** A mail by the API of Postmark: POST /email, the token in X-Postmark-Server-Token. Its ErrorCode 406 (an inactive
+      address) and 300 (an address it can't take) are refused for good; a 429 or a 5xx is for later. *)
+  body = {From: msg.FromHeader, To: text.Join(", ", msg.To), Subject: msg.Subject, TextBody: msg.Text, MessageStream: "outbound",
+    Headers: [{Name: "Message-ID", Value: "<$(msg.Id)>"}]}
+  if not value.IsMissing(msg.Html)
+    body.HtmlBody = msg.Html
+  end
+  if not value.IsMissing(msg.ReplyTo)
+    body.ReplyTo = msg.ReplyTo
+  end
+  url = "https://$(t.Host)$(if t.Port == 443 "" else ":$(t.Port)" end)/email"
+  got = http.Fetch(url, method = "POST", body = json.Text(body), secure = secure(env)?, timeout = env.Settings.MailTimeout, maxBody = 65536,
+    headers = [{Name: "accept", Value: "application/json"}, {Name: "content-type", Value: "application/json"}, {Name: "x-postmark-server-token", Value: t.Password}])
+  if result.IsErr(got)
+    return failed("later", "Postmark can't be reached: $(dict.GetOr("Message", "", got.Error))")
+  end
+  r = got.Value
+  if r.Status == 200
+    return result.Ok(missing)
+  end
+  parsed = json.Parse(r.Body)
+  code = if result.IsOk(parsed) and value.IsDict(parsed.Value) dict.GetOr("ErrorCode", 0, parsed.Value) else 0 end
+  why = if result.IsOk(parsed) and value.IsDict(parsed.Value) value.Text(dict.GetOr("Message", "", parsed.Value)) else "" end
+  if r.Status == 429 or r.Status >= 500
+    return failed("later", "Postmark answered $(r.Status): $why")
+  end
+  failed("refused", "Postmark refused it ($(r.Status), $code): $why")
+end
+
+defn smtp(msg, t, env)
+  (** A mail by SMTP (RFC 5321) over TLS, within MailTimeout seconds: its socket closed past them. *)
+  socket = net.Connect(t.Host, t.Port)
+  if result.IsErr(socket)
+    return failed("later", "The server of mail can't be reached: $(dict.GetOr("Message", "", socket.Error))")
+  end
+  task = fiber.Spawn(() -> converse(socket.Value, msg, t, env))
+  done = fiber.Wait(task, timeout = env.Settings.MailTimeout)
+  if result.IsErr(done)
+    net.Close(socket.Value)
+    return failed("later", if done.Error.Kind == "timeout" "The server of mail took more than $(env.Settings.MailTimeout) seconds." else "The talk with the server of mail stopped." end)
+  end
+  done.Value
+end
+
+defn reply(read, buffer)
+  (** The next reply of an SMTP server: an Ok of {Code, Text, Rest}, its lines joined, Rest what came after it. *)
+  b = buffer
+  texts = []
+  while true
+    at = text.ByteFind("\r\n", 1, b)
+    while value.IsMissing(at)
+      if text.ByteLength(b) > 65536
+        return failed("later", "The server of mail sent a line too long.")
+      end
+      more = read()?
+      if more == ""
+        return failed("later", "The server of mail closed the connection.")
+      end
+      b = "$b$more"
+      at = text.ByteFind("\r\n", 1, b)
+    end
+    line = if at == 1 "" else text.ByteSlice(1, at - 1, b) end
+    b = if at + 2 > text.ByteLength(b) "" else text.ByteSlice(at + 2, text.ByteLength(b), b) end
+    code = text.Number(text.ByteSlice(1, list.Min([3, text.ByteLength(line)]), line))
+    if not value.IsInt(code)
+      return failed("later", "The server of mail sent no reply of SMTP.")
+    end
+    texts = list.Append(if text.ByteLength(line) > 4 text.ByteSlice(5, text.ByteLength(line), line) else "" end, texts)
+    if text.ByteLength(line) <= 3 or text.ByteSlice(4, 4, line) != "-"
+      return result.Ok({Code: code, Text: text.Join("\n", texts), Rest: b})
+    end
+  end
+end
+
+defn expect(got, codes, what)
+  (** The reply of a step when its code is one of codes, else the Err of that step: refused for a 5xx, later else. *)
+  r = got?
+  if r.Code in codes
+    return result.Ok(r)
+  end
+  failed(if r.Code >= 500 and r.Code < 600 "refused" else "later" end, "The server of mail answered $what with $(r.Code) $(text.ByteSlice(1, list.Min([200, text.ByteLength(r.Text)]), r.Text))")
+end
+
+defn stuffed(raw)
+  (** The message as DATA sends it: a line that starts with a dot gets one more (RFC 5321, 4.5.2), then the end. *)
+  "$(text.Replace("\r\n.", "\r\n..", raw))\r\n.\r\n"
+end
+
+defn converse(socket, msg, t, env)
+  (** The talk of SMTP: the greeting, EHLO, STARTTLS for smtp://, AUTH PLAIN once encrypted, MAIL, RCPT for each
+      address, DATA, QUIT. *)
+  conn = {Read: () -> net.Read(socket), Write: s -> net.Write(socket, s), Close: () -> net.Close(socket)}
+  if t.Scheme == "smtps"
+    conn = secure(env)?(socket, t.Host)?
+  end
+  name = text.Split(":", text.Split("/", text.Replace("https://", "", text.Replace("http://", "", env.Settings.Origin)))[1])[1]
+  r = expect(reply(conn.Read, ""), [220], "the connection")?
+  conn.Write("EHLO $name\r\n")?
+  r = expect(reply(conn.Read, r.Rest), [250], "EHLO")?
+  if t.Scheme == "smtp"
+    if not text.Contains("STARTTLS", text.Upper(r.Text))
+      conn.Close()
+      return failed("refused", "The server of mail doesn't offer STARTTLS, and a mail never goes in clear.")
+    end
+    conn.Write("STARTTLS\r\n")?
+    r = expect(reply(conn.Read, r.Rest), [220], "STARTTLS")?
+    conn = secure(env)?(socket, t.Host)?
+    conn.Write("EHLO $name\r\n")?
+    r = expect(reply(conn.Read, ""), [250], "EHLO")?
+  end
+  if t.User != ""
+    zero = text.FromBytes([0])
+    conn.Write("AUTH PLAIN $(encode.Base64("$zero$(t.User)$zero$(t.Password)"))\r\n")?
+    r = expect(reply(conn.Read, r.Rest), [235], "AUTH")?
+  end
+  conn.Write("MAIL FROM:<$(msg.From)>\r\n")?
+  r = expect(reply(conn.Read, r.Rest), [250], "MAIL FROM")?
+  for a in msg.To
+    conn.Write("RCPT TO:<$a>\r\n")?
+    r = expect(reply(conn.Read, r.Rest), [250, 251], "RCPT TO $a")?
+  end
+  conn.Write("DATA\r\n")?
+  r = expect(reply(conn.Read, r.Rest), [354], "DATA")?
+  conn.Write(stuffed(msg.Raw))?
+  r = expect(reply(conn.Read, r.Rest), [250], "the message")?
+  _ = conn.Write("QUIT\r\n")
+  conn.Close()
+  result.Ok(missing)
+end
+
+(** The job that sends a mail, tried again while the server of mail asks for later, dead at once when it refuses. *)
+Job = jobs.Kind("centauri.mail", Shape, (m, env) -> sending(m, env), tries = 10, lease = 120)
+
+defn sending(m, env)
+  (** A mail of the job: sent, or tried again, or given up. *)
+  sent = Send(env, m)
+  if result.IsErr(sent) and dict.Get("Code", sent.Error) == "refused"
+    return jobs.Stop(sent.Error.Message)
+  end
+  sent
+end
+
+(** The facts of a job that sends a mail, to write in the group of the write that asks for it: a sign-up and its mail
+    of welcome, both or neither. thing is the job's number among the new things of the group.
+
+      value.Len(Later({To: ["ana@example.com"], Subject: "Hello", Text: "Welcome."})) --> 5 *)
+Later(m, at = missing, thing = 1000001) = jobs.Later(Job, normal(m), at = at, thing = thing)
+
+(** The module of mail: its settings, checked at the start, and the job that sends. An app that sends mails lists it,
+    with jobs.Module(); auth's module has it already. *)
+Module() = app.Module("mail", settings = Settings, jobs = [Job], verify = Verify)

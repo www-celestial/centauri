@@ -1,0 +1,273 @@
+(** Mail against what goes wrong: headers that would add a header or a command of SMTP (line ends in an address, a
+    subject, a name), a server that offers no encryption, a certificate signed by nobody trusted, an address the
+    server refuses for good or for now; by SMTP over TLS from the start and by STARTTLS, by the API of Postmark, and
+    in a test's box. A server of SMTP and one of https, in this file, play the other side, with a certificate of an
+    authority made for the tests by openssl, in .cesia/tls. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/jobs
+use src/mail
+use std/bug
+use std/check
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+dir = ".cesia/tls"
+
+defn certs()
+  (** An authority and a certificate of localhost it signed, made once by openssl: an Ok of their paths. *)
+  if result.IsOk(sys.Read("$dir/server.pem")) and result.IsOk(sys.Read("$dir/ca.pem"))
+    return result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+  end
+  sys.Mkdir(dir)?
+  sys.Write("$dir/san.txt", "subjectAltName=DNS:localhost,IP:127.0.0.1\n")?
+  steps = [["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=centauri test authority", "-days", "3650", "-keyout", "$dir/ca.key", "-out", "$dir/ca.pem"],
+    ["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost", "-keyout", "$dir/server.key", "-out", "$dir/server.csr"],
+    ["x509", "-req", "-in", "$dir/server.csr", "-CA", "$dir/ca.pem", "-CAkey", "$dir/ca.key", "-CAcreateserial", "-days", "3650", "-out", "$dir/server.pem", "-extfile", "$dir/san.txt"]]
+  for args in steps
+    p = sys.Start("openssl", args = args)?
+    _ = sys.ReadOutput(p)
+    code = sys.WaitExit(p)
+    if code != 0
+      return result.Err({Kind: "test", Message: "openssl $(args[1]) failed: $code"})
+    end
+  end
+  result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+end
+
+defn lineOf(read, buffer)
+  (** The next line of a client, and the rest: an Ok of {Line, Rest}, or an Err when it is gone. *)
+  b = buffer
+  at = text.ByteFind("\r\n", 1, b)
+  while value.IsMissing(at)
+    more = read()?
+    if more == ""
+      return result.Err({Kind: "test", Message: "gone"})
+    end
+    b = "$b$more"
+    at = text.ByteFind("\r\n", 1, b)
+  end
+  result.Ok({Line: if at == 1 "" else text.ByteSlice(1, at - 1, b) end, Rest: if at + 2 > text.ByteLength(b) "" else text.ByteSlice(at + 2, text.ByteLength(b), b) end})
+end
+
+defn session(c, mode, wrap, box)
+  (** One client of the server of SMTP: what it said goes to box, {Auth, From, To, Data, Tls}. *)
+  conn = {Read: () -> net.Read(c), Write: s -> net.Write(c, s), Close: () -> net.Close(c)}
+  secured = false
+  if mode == "smtps"
+    conn = wrap(c)?
+    secured = true
+  end
+  got = {Auth: "", From: "", To: [], Data: "", Tls: secured}
+  conn.Write("220 test ESMTP\r\n")?
+  rest = ""
+  while true
+    l = lineOf(conn.Read, rest)
+    if result.IsErr(l)
+      fiber.Send(got, box)
+      return missing
+    end
+    rest = l.Value.Rest
+    line = l.Value.Line
+    word = text.Upper(text.Split(" ", line)[1])
+    if word == "EHLO"
+      tlsLine = if mode == "starttls" and not secured "250-STARTTLS\r\n" else "" end
+      conn.Write("250-test\r\n$(tlsLine)250 AUTH PLAIN\r\n")?
+    else if word == "STARTTLS"
+      conn.Write("220 go ahead\r\n")?
+      conn = wrap(c)?
+      secured = true
+      got.Tls = true
+      rest = ""
+    else if word == "AUTH"
+      got.Auth = encode.Unbase64(text.Split(" ", line)[3])!
+      conn.Write("235 ok\r\n")?
+    else if text.StartsWith("MAIL FROM:", line)
+      got.From = line
+      conn.Write("250 ok\r\n")?
+    else if text.StartsWith("RCPT TO:", line)
+      if text.Contains("refused", line)
+        conn.Write("550 no such user here\r\n")?
+      else if text.Contains("later", line)
+        conn.Write("451 try again later\r\n")?
+      else
+        got.To = list.Append(line, got.To)
+        conn.Write("250 ok\r\n")?
+      end
+    else if word == "DATA"
+      conn.Write("354 end with a dot\r\n")?
+      data = rest
+      while not text.Contains("\r\n.\r\n", data)
+        more = conn.Read()?
+        if more == ""
+          fiber.Send(got, box)
+          return missing
+        end
+        data = "$data$more"
+      end
+      at = text.ByteFind("\r\n.\r\n", 1, data)
+      got.Data = text.ByteSlice(1, at + 1, data)
+      rest = text.ByteSlice(at + 5, text.ByteLength(data), data)
+      conn.Write("250 queued as 42\r\n")?
+    else if word == "QUIT"
+      conn.Write("221 bye\r\n")?
+      conn.Close()
+      fiber.Send(got, box)
+      return missing
+    else
+      conn.Write("500 what\r\n")?
+    end
+  end
+end
+
+defn smtpd(mode)
+  (** A server of SMTP on a free port: mode "smtps" (TLS from the start), "starttls", or "plain" (no encryption
+      offered). An Ok of {Port, Box}, Box a channel of what each client said. *)
+  c = certs()?
+  wrap = tls.Server(c.Cert, c.Key, tls.Open()?)?
+  l = net.Listen(0)?
+  box = fiber.Channel()
+  fiber.Spawn(() -> serving(l, mode, wrap, box))
+  result.Ok({Port: net.Port(l), Box: box, Ca: c.Ca})
+end
+
+defn serving(l, mode, wrap, box)
+  while true
+    c = net.Accept(l)
+    if result.IsErr(c)
+      return missing
+    end
+    fiber.Spawn(() -> session(c.Value, mode, wrap, box))
+  end
+end
+
+App = app.Of([auth.Module(), jobs.Module(), mail.Module()], name = "Invoices")
+
+hello = {To: ["ana@example.com"], Subject: "Hello", Text: "Welcome.\n.\nA line of a dot, and the end."}
+
+defn isHeaderInjectionRefused()
+  (** A line end in an address, a subject or a name of the sender would add a header (Bcc:) or a command of SMTP
+      (RCPT TO): each is refused before anything is sent. A subject or a name not in ASCII is encoded. *)
+  bad = [{To: ["ana@example.com\r\nBcc: eve@evil.example"], Subject: "Hi", Text: ""},
+    {To: ["ana@example.com>\r\nRCPT TO:<eve@evil.example"], Subject: "Hi", Text: ""},
+    {To: ["ana@example.com"], Subject: "Hi\r\nBcc: eve@evil.example", Text: ""},
+    {To: ["ana@example.com"], Subject: "Hi\nX-Evil: 1", Text: ""},
+    {To: ["\"eve\"@example.com"], Subject: "Hi", Text: ""}]
+  refused = [result.IsErr(fiber.Wait(fiber.Spawn(() -> mail.Message(m, "Shop <no-reply@shop.example>", 1794528000, "a1")))) for m in bad]
+  bug.Assert(list.All(refused), "every header that adds a line is refused: $refused")
+  bug.Assert(result.IsErr(mail.Sender("Shop\r\nBcc: eve@evil.example <no-reply@shop.example>")), "a name with a line end")
+  m = mail.Message({To: ["zoe@example.com"], Subject: "Bienvenue, Zoé", Text: "Ça va ?"}, "Zoé Shop <no-reply@shop.example>", 1794528000, "a1")
+  bug.Assert(text.Contains("Subject: =?UTF-8?B?", m.Raw) and text.Contains("From: =?UTF-8?B?", m.Raw), "encoded words: $(m.Raw)")
+  bug.Assert(text.Contains("Date: Fri, 13 Nov 2026 00:00:00 +0000\r\n", m.Raw) and text.Contains("Message-ID: <a1@shop.example>", m.Raw), "date and id")
+  body = text.Split("\r\n\r\n", m.Raw)[2]
+  encode.Unbase64(text.Replace("\r\n", "", body))! == "Ça va ?"
+end
+
+defn isKeptInATestsBox()
+  t = apptest.Start(App)?
+  sent = mail.Send(t.Env, hello)?
+  box = t.Mails()
+  value.Len(box) == 1 and value.Equal(box[1].To, ["ana@example.com"]) and box[1].Subject == "Hello" and box[1].Id == sent.Id
+end
+
+defn isSentBySmtpsWithItsPassword()
+  s = smtpd("smtps")?
+  t = apptest.Start(App, settings = {MailUrl: "smtps://ana%40shop:pass%20word@localhost:$(s.Port)", MailCa: s.Ca, MailFrom: "Shop <no-reply@shop.example>"})?
+  mail.Send(t.Env, hello)?
+  got = fiber.Receive(s.Box, timeout = 5)?
+  bug.Assert(got.Tls and got.Auth == "$(text.FromBytes([0]))ana@shop$(text.FromBytes([0]))pass word", "TLS, then the password: $got")
+  bug.Assert(got.From == "MAIL FROM:<no-reply@shop.example>" and value.Equal(got.To, ["RCPT TO:<ana@example.com>"]), "one sender, one address: $got")
+  bug.Assert(text.Contains("\r\n.\r\n", "\r\n$(got.Data)") == false, "no line of a lone dot inside the message")
+  data = text.Split("\r\n\r\n", got.Data)
+  encode.Unbase64(text.Replace("\r\n", "", data[2]))! == hello.Text
+end
+
+defn isSentByStartTlsOnly()
+  (** smtp:// asks STARTTLS, and a server that offers none gets no mail: a mail never goes in clear. *)
+  s = smtpd("starttls")?
+  t = apptest.Start(App, settings = {MailUrl: "smtp://ana:pw@localhost:$(s.Port)", MailCa: s.Ca})?
+  mail.Send(t.Env, hello)?
+  got = fiber.Receive(s.Box, timeout = 5)?
+  bug.Assert(got.Tls and text.Contains("ana", got.Auth), "encrypted before the password: $got")
+  plain = smtpd("plain")?
+  u = apptest.Start(App, settings = {MailUrl: "smtp://ana:pw@localhost:$(plain.Port)", MailCa: plain.Ca})?
+  refused = mail.Send(u.Env, hello)
+  heard = fiber.Receive(plain.Box, timeout = 5)?
+  result.IsErr(refused) and refused.Error.Code == "refused" and heard.Auth == "" and heard.Data == ""
+end
+
+defn isUntrustedCertificateRefused()
+  (** The certificate of the test's authority, which the system doesn't trust: without MailCa, nothing is sent. *)
+  s = smtpd("smtps")?
+  t = apptest.Start(App, settings = {MailUrl: "smtps://ana:pw@localhost:$(s.Port)"})?
+  got = mail.Send(t.Env, hello)
+  heard = fiber.Receive(s.Box, timeout = 5)
+  result.IsErr(got) and (result.IsErr(heard) or heard.Value.Auth == "")
+end
+
+defn isRefusedForGoodOrForLater()
+  (** A 550 of RCPT is refused for good: its job is dead at once; a 451 is for later: its job runs again. *)
+  s = smtpd("smtps")?
+  t = apptest.Start(App, settings = {MailUrl: "smtps://ana:pw@localhost:$(s.Port)", MailCa: s.Ca})?
+  cepheus.Write(mail.Later({To: ["refused@example.com"], Subject: "a", Text: "a"}), t.Db)?
+  cepheus.Write(mail.Later({To: ["later@example.com"], Subject: "b", Text: "b"}), t.Db)?
+  t.RunJobs()?
+  dead = t.Jobs()?
+  ready = t.Jobs("ready")?
+  value.Len(dead) == 1 and text.Contains("550", dead[1].Error) and value.Len(ready) == 1 and text.Contains("451", ready[1].Error)
+end
+
+defn postmarkd(answer)
+  (** A server of https that answers as Postmark: an Ok of {Port, Box, Ca}, Box a channel of each request it took. *)
+  c = certs()?
+  wrap = tls.Server(c.Cert, c.Key, tls.Open()?)?
+  l = net.Listen(0)?
+  box = fiber.Channel()
+  fiber.Spawn(() -> http.Serve(http.App() then http.Post("/email", r -> took(r, answer, box)), listener = l, wrap = wrap))
+  result.Ok({Port: net.Port(l), Box: box, Ca: c.Ca})
+end
+
+defn took(r, answer, box)
+  fiber.Send(r, box)
+  answer
+end
+
+defn isSentByPostmark()
+  s = postmarkd(http.Json({ErrorCode: 0, MessageID: "b7bc2f4a"}))?
+  t = apptest.Start(App, settings = {MailUrl: "postmark://server-token@localhost:$(s.Port)", MailCa: s.Ca, MailFrom: "Shop <no-reply@shop.example>"})?
+  mail.Send(t.Env, dict.Put("Html", "<p>Welcome.</p>", hello))?
+  r = fiber.Receive(s.Box, timeout = 5)?
+  body = json.Parse(r.Body)!
+  bug.Assert(http.HeaderValue("x-postmark-server-token", r.Headers) == "server-token", "the token in its header")
+  bug.Assert(body.From == "Shop <no-reply@shop.example>" and body.To == "ana@example.com" and body.HtmlBody == "<p>Welcome.</p>", "the message: $body")
+  gone = postmarkd(http.Json({ErrorCode: 406, Message: "Inactive recipient"}, status = 422))?
+  u = apptest.Start(App, settings = {MailUrl: "postmark://t@localhost:$(gone.Port)", MailCa: gone.Ca})?
+  busy = postmarkd(http.Json({ErrorCode: 0, Message: "busy"}, status = 503))?
+  v = apptest.Start(App, settings = {MailUrl: "postmark://t@localhost:$(busy.Port)", MailCa: busy.Ca})?
+  mail.Send(u.Env, hello).Error.Code == "refused" and mail.Send(v.Env, hello).Error.Code == "later"
+end
+
+envOf(settings) = app.Start(App, app.Read(App.Fields, settings, defaults = App.Defaults)!, cepheus.Fork(cepheus.Empty, App.Kinds)!)!   (* What a start in these settings shares. *)
+
+defn isTransportChecked()
+  (** prod needs a transport that sends; a transport written wrong stops the start, its password never in the message. *)
+  prod = {Profile: "prod", Origin: "https://shop.example", Secret: text.Repeat(40, "k"), CepheusUrl: "cepheus://localhost:7400/x"}
+  none = mail.Verify(envOf(prod))
+  kept = mail.Verify(envOf(dict.Put("MailUrl", "log:", prod)))
+  wrong = mail.Verify(envOf(dict.Put("MailUrl", "smtx://ana:hunter2@x", prod)))
+  bug.Assert(result.IsErr(none) and result.IsErr(kept) and result.IsErr(wrong), "prod refuses: $none $kept $wrong")
+  not text.Contains("hunter2", json.Text(wrong.Error)) and result.IsOk(mail.Verify(envOf(dict.Put("MailUrl", "smtps://a:b@mail.example:465", prod))))
+end

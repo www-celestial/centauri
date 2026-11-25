@@ -60,6 +60,12 @@ Slot(state) = ask(state, {Op: "slot"})
 (** Gives back a slot of the password hashes. *)
 Free(state) = fiber.Send({Op: "free"}, state)
 
+(** Keeps a mail of a test, sent by the transport test: of mail (the box holds the last 1,000). *)
+KeepMail(m, state) = fiber.Send({Op: "mail", Mail: m}, state)
+
+(** The mails of a test, the oldest first. *)
+Mails(state) = ask(state, {Op: "mails"})
+
 (** Keeps a line of the log, a map. *)
 Keep(line, state) = fiber.Send({Op: "line", Line: line}, state)
 
@@ -99,6 +105,10 @@ kept(at, id, method, route, status, ms, ip, user, state) = fiber.Send({Op: "requ
     database at their next request. *)
 forget(state) = fiber.Send({Op: "forget"}, state)
 
+(** Forgets every session the state of this process keeps, as forget: what a handler calls when it ends sessions
+    without a signed-in user, as a new password set by the link of a mail. *)
+ForgetSessions(state) = forget(state)
+
 defn own(ch, slots, most, kept, keys, clock, rates)
   (** The fiber of the state: it answers its messages one after the other, so no two requests change it at once. *)
   due = dict.Dict()
@@ -112,6 +122,7 @@ defn own(ch, slots, most, kept, keys, clock, rates)
   minute = 0
   fails = [0, 0]
   served = 0
+  box = []
   while true
     got = fiber.Receive(ch)
     if result.IsErr(got)
@@ -315,6 +326,10 @@ defn own(ch, slots, most, kept, keys, clock, rates)
       else
         fiber.Send(fails[1] + fails[2], m.Reply)
       end
+    else if op == "mail"
+      box = list.Append(m.Mail, if value.Len(box) >= 1000 list.Skip(1, box) else box end)
+    else if op == "mails"
+      fiber.Send(box, m.Reply)
     else if op == "now"
       fiber.Send(now, m.Reply)
     else if op == "advance"

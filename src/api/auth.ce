@@ -10,7 +10,7 @@ Password = check.Secret(12, 128)
 (** Who is signed in, as the account endpoints give it: the user, the tenant of the session and the user's roles in it
     (each role with the roles it includes), and Super for an administrator of the whole platform. *)
 Account = check.Record({User: check.Id(), Email: check.Email(), Name: check.Text(0, 120), Tenant: check.Id(),
-  TenantName: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40), Super: check.Bool()})
+  TenantName: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40), Super: check.Bool(), Checked: check.Bool(optional = true)})
 
 (** The fields of signing up. Tenant is the name of a new tenant (multi-tenant apps; the user's name else); Invite the
     code of an invitation, to join its tenant; Proof the answer to a challenge of proof of work, when the server asks
@@ -92,6 +92,25 @@ MyTenants = Get("/auth/tenants", out = check.List(check.Record({Tenant: check.Id
 SwitchTenant = Post("/auth/tenant", body = check.Record({Tenant: check.Id()}), out = Account, role = Signed,
   about = "Enters another tenant of the user.")
 
+(** The check of an e-mail address: the code of the link of the mail sent at sign-up (the setting EmailCheck), which
+    marks the address checked and signs in. A page of the front at the link's address (CheckPage) reads the code in
+    the fragment, which no server and no log ever sees, and sends it here. *)
+CheckEmail = Post("/auth/check", body = check.Record({Code: check.Text(1, 200)}), out = Account, role = Public,
+  about = "Checks an e-mail address by the code of its mail, and signs in.")
+
+(** A new mail to check an address: always the same answer, 202, whether the address has an account or not. *)
+SendCheck = Post("/auth/check/send", body = check.Record({Email: check.Email()}), role = Public,
+  about = "Sends the mail that checks an address again.")
+
+(** A forgotten password: a mail with a link to set a new one goes to the address if it has an account; the answer
+    is always the same, 202, so that nobody learns which addresses have one. *)
+Forgot = Post("/auth/forgot", body = check.Record({Email: check.Email()}), role = Public,
+  about = "Sends a link to set a new password.")
+
+(** A new password by the code of the mail of Forgot: every session of the user ends, and a new one begins. *)
+Reset = Post("/auth/reset", body = check.Record({Code: check.Text(1, 200), Password: Password}), out = Account, role = Public,
+  about = "Sets a new password by the code of its mail, ends every session, and signs in.")
+
 (** The endpoints of the accounts, in their order. *)
 Accounts = [SignUp, SignIn, SignOut, SignOutAll, Me, Sessions, EndSession, ChangePassword, Challenge, Members, Invite,
-  Join, SetRoles, RemoveMember, MyTenants, SwitchTenant]
+  Join, SetRoles, RemoveMember, MyTenants, SwitchTenant, CheckEmail, SendCheck, Forgot, Reset]

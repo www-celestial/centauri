@@ -11,9 +11,12 @@
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use src/app
+use src/jobs
+use src/mail
 use std/check
 use std/crypto
 use std/dict
+use std/encode
 use std/io
 use std/json
 use std/list
@@ -46,19 +49,58 @@ Settings = {
   SessionCache: check.Int(0, 60, optional = true, default = 2),
   Honeypot: check.Text(0, 40, optional = true, default = "Website"),
   InviteTime: check.Int(60, 31536000, optional = true, default = 604800),
+  EmailCheck: check.OneOf(["off", "required", "later"], optional = true, default = "off"),
+  SignUpAnswer: check.OneOf(["tell", "neutral"], optional = true, default = "tell"),
+  CheckTime: check.Int(300, 31536000, optional = true, default = 172800),
+  ResetTime: check.Int(300, 86400, optional = true, default = 3600),
+  CheckPage: check.Text(1, 200, optional = true, default = "/check-email"),
+  ResetPage: check.Text(1, 200, optional = true, default = "/reset-password"),
+  MailsPerHour: check.Int(1, 1000, optional = true, default = 5),
 }
 
-defn Module(signUp = api.SignUp, facts = missing)
+(** The mails of the accounts, as an app may write them in its own words: each a function of {Link, Name, Email, App,
+    Hours} that gives {Subject, Text}, and Html if it has one. Check is the link that checks an address, Reset the
+    one that sets a new password, Taken the mail to the owner of an address that someone tried to sign up with again,
+    when the sign-up answers the same for every address (SignUpAnswer neutral). *)
+Mails = {
+  Check: x -> {Subject: "Check your e-mail address for $(x.App)", Text: "Hello $(x.Name),\n\nTo check that this address is yours, open this link within $(x.Hours) hours:\n\n$(x.Link)\n\nIf you didn't sign up for $(x.App), ignore this mail.\n"},
+  Reset: x -> {Subject: "A new password for $(x.App)", Text: "Hello $(x.Name),\n\nTo set a new password, open this link within $(x.Hours) hours:\n\n$(x.Link)\n\nIf you didn't ask for it, ignore this mail: your password stays as it is.\n"},
+  Taken: x -> {Subject: "Someone tried to sign up with your address at $(x.App)", Text: "Hello $(x.Name),\n\nSomeone tried to sign up for $(x.App) with this address, which has an account already. If it was you, sign in, or set a new password here:\n\n$(x.Link)\n\nIf it wasn't you, ignore this mail: nothing changed.\n"},
+}
+
+defn Module(signUp = api.SignUp, facts = missing, mails = Mails)
   (** The module of the accounts: its kinds, its endpoints (api.Accounts and api.AdminOfAccounts), the session of
       each request (Who, kept SessionCache seconds by the state of the process under SessionKey), its settings, and a
-      keeper that forgets ended sessions, challenges and invitations. signUp is
-      api.SignUp or one of api.SignUpOf. *)
-  serve = [app.Serve(signUp, (r, x) -> signingUp(r, x, facts)), app.Serve(api.SignIn, signingIn), app.Serve(api.SignOut, signingOut),
+      keeper that forgets ended sessions, challenges, invitations and codes. signUp is api.SignUp or one of
+      api.SignUpOf; mails the texts of its mails (Mails, or the app's own, as dict.Put("Check", f, auth.Mails)),
+      sent by the jobs of the module of jobs, which the app lists with this one. *)
+  m = dict.Merge(Mails, mails)
+  checking = jobs.Kind("centauri.check", check.Record({User: check.Id(optional = true), Email: check.Email(optional = true)}), (job, env) -> checkJob(job, env, m.Check), tries = 10, lease = 120)
+  resetting = jobs.Kind("centauri.reset", check.Record({Email: check.Email()}), (job, env) -> resetJob(job, env, m.Reset), tries = 10, lease = 120)
+  taken = jobs.Kind("centauri.taken", check.Record({Email: check.Email()}), (job, env) -> takenJob(job, env, m.Taken), tries = 10, lease = 120)
+  kinds = {Check: checking, Reset: resetting, Taken: taken}
+  serve = [app.Serve(signUp, (r, x) -> signingUp(r, x, facts, kinds)), app.Serve(api.SignIn, (r, x) -> signingIn(r, x, kinds)), app.Serve(api.SignOut, signingOut),
     app.Serve(api.SignOutAll, signingOutAll), app.Serve(api.Me, me), app.Serve(api.Sessions, sessions), app.Serve(api.EndSession, endSession),
     app.Serve(api.ChangePassword, changePassword), app.Serve(api.Challenge, challenge), app.Serve(api.Members, members),
     app.Serve(api.Invite, invite), app.Serve(api.Join, joining), app.Serve(api.SetRoles, setRoles), app.Serve(api.RemoveMember, removeMember),
-    app.Serve(api.MyTenants, myTenants), app.Serve(api.SwitchTenant, switchTenant)]
-  app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, key = SessionKey, settings = Settings, start = keep)
+    app.Serve(api.MyTenants, myTenants), app.Serve(api.SwitchTenant, switchTenant), app.Serve(api.CheckEmail, checkEmail),
+    app.Serve(api.SendCheck, (r, x) -> sendCheck(r, x, kinds)), app.Serve(api.Forgot, (r, x) -> forgot(r, x, kinds)), app.Serve(api.Reset, resetPassword)]
+  made = app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, key = SessionKey,
+    settings = dict.Merge(Settings, mail.Settings), start = keep, jobs = [checking, resetting, taken, mail.Job], verify = verified)
+  dict.Put("Runner", jobs.Module(), made)
+end
+
+defn verified(env)
+  (** The settings of the accounts at the start: a neutral sign-up needs addresses checked before a session (it can't
+      give one to an address it doesn't tell is new), and mails need their transport. *)
+  s = env.Settings
+  if s.SignUpAnswer == "neutral" and s.EmailCheck != "required"
+    return result.Err(["APP_SIGN_UP_ANSWER: neutral needs APP_EMAIL_CHECK=required: a sign-up that answers the same for a new address and a taken one gives a session to neither."])
+  end
+  if s.EmailCheck == "off"
+    return result.Ok(missing)
+  end
+  mail.Verify(env)
 end
 
 roleList(t) = [text.Trim(x) for x in text.Split(",", t) if text.Trim(x) != ""]   (* The roles of a setting, "owner, admin". *)
@@ -138,7 +180,7 @@ defn account(user, tenant, roles, db, table)
   (** The Account of a user in a tenant. *)
   u = cepheus.Get(User, user, db)?
   result.Ok({User: user, Email: u.Email, Name: dict.GetOr("Name", "", u), Tenant: tenant, TenantName: tenantName(tenant, db),
-    Roles: app.Expand(roles, table), Super: u.Super == true})
+    Roles: app.Expand(roles, table), Super: u.Super == true, Checked: not value.IsMissing(dict.Get("Checked", u))})
 end
 
 defn single(env)
@@ -175,7 +217,11 @@ defn invitation(code, email, env)
   result.Ok({Id: id, Tenant: inv.Tenant, Roles: inv.Roles, Gone: app.Gone(Invite, id, env.Db)?})
 end
 
-defn signingUp(r, x, facts)
+(* The answer of a sign-up whose address must be checked first: 202, no session, the same for a taken address when the
+   answer is neutral. *)
+waiting = app.Reply({}, status = 202)
+
+defn signingUp(r, x, facts, kinds)
   (** POST /auth/signup. *)
   env = r.Env
   s = r.Settings
@@ -196,6 +242,10 @@ defn signingUp(r, x, facts)
   end
   hash = hashed(x.Password, env)?
   now = env.Now()
+  neutral = s.SignUpAnswer == "neutral"
+  if neutral and value.Len(cepheus.Find(1, u -> {Where: [[u, User.Email, x.Email]], Give: {U: u}}, env.Db)?) > 0
+    return takenAnswer(x, r, kinds)
+  end
   ops = app.Facts(User, cepheus.New(1), {Email: x.Email, Name: x.Name, Hash: hash, Super: false, Disabled: false, Created: now})
   next = 2
   tenant = missing
@@ -226,13 +276,22 @@ defn signingUp(r, x, facts)
   end
   member = next
   ops = list.Concat(ops, app.Facts(Member, cepheus.New(member), {User: cepheus.New(1), Tenant: tenant, Roles: roles, Created: now}))
+  required = s.EmailCheck == "required"
   session = NewSession(cepheus.New(1), cepheus.New(member), tenant, r, env, thing = member + 1)
-  ops = list.Concat(ops, session.Ops)
+  if not required
+    ops = list.Concat(ops, session.Ops)
+  end
+  if s.EmailCheck != "off"
+    ops = list.Concat(ops, jobs.Later(kinds.Check, {User: cepheus.New(1)}, thing = member + 2))
+  end
   if not value.IsMissing(facts)
     ops = list.Concat(ops, facts(cepheus.New(1), tenant, x))
   end
   done = cepheus.Write(ops, env.Db, why = r.Why)
   if result.IsErr(done) and done.Error.Code == "unique"
+    if neutral
+      return takenAnswer(x, r, kinds)
+    end
     return app.Fail(409, "Check the fields.", fields = {Email: "This e-mail has an account already: sign in."})
   end
   if result.IsErr(done) and done.Error.Code == "conflict" and s.Tenancy == "single"
@@ -242,8 +301,19 @@ defn signingUp(r, x, facts)
   user = things[1]
   tenantId = if made things[2] else tenant end
   note(r, "signup", "Signed up.", user = user, tenant = tenantId, every = 0)
+  if required
+    return waiting
+  end
   out = account(user, tenantId, roles, env.Db, env.Roles)?
   app.Reply(out, headers = [Cookie(session.Value(things[member + 1]), env, s.SessionMax)])
+end
+
+defn takenAnswer(x, r, kinds)
+  (** The neutral answer to a sign-up with an address that has an account: the same 202 as for a new one, after one
+      write as a new one makes, the job of a mail to the owner of the address, which tells him, and not the sender. *)
+  _ = cepheus.Write(jobs.Later(kinds.Taken, {Email: x.Email}), r.Env.Db, why = r.Why)
+  note(r, "signup-taken", "A sign-up with an address that has an account.")
+  waiting
 end
 
 defn lockWait(f, s)
@@ -292,7 +362,7 @@ defn membershipOf(user, tenant, db)
   result.Ok({Member: rows[1].Member, Tenant: m.Tenant, Roles: m.Roles})
 end
 
-defn signingIn(r, x)
+defn signingIn(r, x, kinds)
   (** POST /auth/signin. *)
   env = r.Env
   s = r.Settings
@@ -318,6 +388,12 @@ defn signingIn(r, x)
   user = found[1].User
   if not value.IsMissing(f) and f.Count > 0
     _ = cepheus.Write([cepheus.Add(f.Id, Failure.Count, 0)], env.Db, why = "signed in")
+  end
+  if s.EmailCheck == "required" and value.IsMissing(dict.Get("Checked", u))
+    if app.Fresh("check $user", 600, env.State)
+      _ = cepheus.Write(jobs.Later(kinds.Check, {User: user}), env.Db, why = r.Why)
+    end
+    return app.Fail(403, "Check your e-mail address first: open the link of the mail we sent you.")
   end
   m = membershipOf(user, x.Tenant, env.Db)?
   if value.IsMissing(m) and not value.IsMissing(x.Tenant)
@@ -354,7 +430,8 @@ end
 defn me(r)
   (** GET /auth/me. *)
   u = r.User
-  result.Ok({User: u.Id, Email: u.Email, Name: u.Name, Tenant: u.Tenant, TenantName: tenantName(u.Tenant, r.Db), Roles: u.Roles, Super: u.Super})
+  result.Ok({User: u.Id, Email: u.Email, Name: u.Name, Tenant: u.Tenant, TenantName: tenantName(u.Tenant, r.Db), Roles: u.Roles, Super: u.Super,
+    Checked: dict.GetOr("Checked", false, u)})
 end
 
 defn sessions(r)
@@ -414,6 +491,166 @@ defn switchTenant(r, x)
   opened(r.User.Id, m, r, "switch")
 end
 
+(* The answer of a request that sends a mail, or seems to: 202, the same whatever the address. *)
+sent = app.Reply(missing, status = 202)
+
+defn newCode(user, kind, seconds, env)
+  (** A code of a mail for a user: {Ops, Code}, the operations that keep its hash until seconds from now, and the code,
+      32 random bytes of the kernel in hex, which only the mail holds. *)
+  code = encode.Hex(crypto.Random(32, env.Keys))
+  {Ops: app.Facts(Code, cepheus.New(1), {User: user, Kind: kind, Hash: hashOf(code, env.Keys), Ends: env.Now() + seconds}), Code: code}
+end
+
+defn codeOf(code, kind, env)
+  (** The code of a mail, of this kind and still open: an Ok of {Id, User, Gone}, Gone the operations that end it, or a
+      403 that says nothing of why. *)
+  bad = app.Fail(403, "This link is not valid, or it has ended: ask for a new one.")
+  if not value.IsText(code) or text.ByteLength(code) != 64
+    return bad
+  end
+  found = cepheus.Find(1, c -> {Where: [[c, Code.Hash, hashOf(code, env.Keys)]], Give: {Id: c}}, env.Db)?
+  if value.Len(found) == 0
+    return bad
+  end
+  c = cepheus.Get(Code, found[1].Id, env.Db)?
+  if value.IsMissing(c) or c.Kind != kind or c.Ends < env.Now()
+    return bad
+  end
+  result.Ok({Id: found[1].Id, User: c.User, Gone: list.Concat([cepheus.Expect(found[1].Id, Code.Ends, c.Ends)], app.Gone(Code, found[1].Id, env.Db)?)})
+end
+
+defn link(env, page, code)
+  (** The link of a mail: the page of the front at Origin, the code in its fragment, which the browser never sends to a
+      server, so that no log and no Referer holds it. *)
+  "$(env.Settings.Origin)$page#code=$code"
+end
+
+defn mailed(user, kind, page, seconds, texts, env)
+  (** The job of a mail with a code: the code made and kept, then the mail sent; an Err to try again. A user disabled,
+      or gone, gets nothing. *)
+  u = cepheus.Get(User, user, env.Db)?
+  if value.IsMissing(u) or u.Disabled == true
+    return result.Ok(missing)
+  end
+  c = newCode(user, kind, seconds, env)
+  cepheus.Write(c.Ops, env.Db, why = env.Why)?
+  words = texts({Link: link(env, page, c.Code), Name: dict.GetOr("Name", "", u), Email: u.Email, App: env.App.Name, Hours: math.Ceil(seconds / 3600)})
+  m = {To: [u.Email], Subject: words.Subject, Text: words.Text}
+  if dict.Has("Html", words)
+    m.Html = words.Html
+  end
+  sent = mail.Send(env, m)
+  if result.IsErr(sent) and dict.Get("Code", sent.Error) == "refused"
+    return jobs.Stop(sent.Error.Message)
+  end
+  sent
+end
+
+defn checkJob(job, env, texts)
+  (** The job of the mail that checks an address: of a user, or of the account of an address when its address is not
+      yet checked. *)
+  user = if value.IsMissing(dict.Get("User", job)) userOf(job.Email, env.Db)? else job.User end
+  if value.IsMissing(user)
+    return result.Ok(missing)
+  end
+  u = cepheus.Get(User, user, env.Db)?
+  if value.IsMissing(dict.Get("User", job)) and not value.IsMissing(u) and not value.IsMissing(dict.Get("Checked", u))
+    return result.Ok(missing)
+  end
+  mailed(user, "check", env.Settings.CheckPage, env.Settings.CheckTime, texts, env)
+end
+
+defn userOf(email, db)
+  (** The user of an address, or missing. *)
+  found = cepheus.Find(1, u -> {Where: [[u, User.Email, email]], Give: {U: u}}, db)?
+  result.Ok(if value.Len(found) == 0 missing else found[1].U end)
+end
+
+defn resetJob(job, env, texts)
+  (** The job of a forgotten password: the mail goes only to an address that has an account. *)
+  user = userOf(job.Email, env.Db)?
+  if value.IsMissing(user) result.Ok(missing) else mailed(user, "reset", env.Settings.ResetPage, env.Settings.ResetTime, texts, env) end
+end
+
+defn takenJob(job, env, texts)
+  (** The job of the mail to the owner of an address that someone tried to sign up with: a link to set a new password,
+      in case it was him and he forgot it. *)
+  user = userOf(job.Email, env.Db)?
+  if value.IsMissing(user) result.Ok(missing) else mailed(user, "reset", env.Settings.ResetPage, env.Settings.ResetTime, texts, env) end
+end
+
+defn mailGate(email, r)
+  (** The limits of the mails of an address: MailsPerHour for each address, and the sign-ups of the sender's, so that
+      nobody fills a stranger's box. *)
+  gate("signup:$(r.Ip)", r.Settings.SignUpPerIp, 3600, r)?
+  gate("mail:$email", r.Settings.MailsPerHour, 3600, r)
+end
+
+defn checkEmail(r, x)
+  (** POST /auth/check: the address checked, the code ended, and a new session. *)
+  env = r.Env
+  gate("signin:$(r.Ip)", r.Settings.SignInPerIp, 60, r)?
+  c = codeOf(x.Code, "check", env)?
+  u = cepheus.Get(User, c.User, env.Db)?
+  if value.IsMissing(u) or u.Disabled == true
+    return app.Fail(403, "This link is not valid, or it has ended: ask for a new one.")
+  end
+  ops = c.Gone
+  if value.IsMissing(dict.Get("Checked", u))
+    ops = list.Append(cepheus.Add(c.User, User.Checked, env.Now()), ops)
+  end
+  done = cepheus.Write(ops, env.Db, by = c.User, why = r.Why)
+  if result.IsErr(done)
+    return app.Fail(403, "This link is not valid, or it has ended: ask for a new one.")
+  end
+  note(r, "checked", "The address was checked.", user = c.User, every = 0)
+  opened(c.User, membershipOf(c.User, missing, env.Db)?, r, "checked")
+end
+
+defn sendCheck(r, x, kinds)
+  (** POST /auth/check/send: one write, the job of the mail, whatever the address; the job sends it only to an
+      account whose address is not yet checked. 202 always. *)
+  mailGate(x.Email, r)?
+  _ = cepheus.Write(jobs.Later(kinds.Check, {Email: x.Email}), r.Env.Db, why = r.Why)
+  sent
+end
+
+defn forgot(r, x, kinds)
+  (** POST /auth/forgot: one write, the job of the mail, whatever the address; the job sends it only to an account. *)
+  mailGate(x.Email, r)?
+  _ = cepheus.Write(jobs.Later(kinds.Reset, {Email: x.Email}), r.Env.Db, why = r.Why)
+  sent
+end
+
+defn resetPassword(r, x)
+  (** POST /auth/reset: the new password, the code ended, the address checked (the mail reached it), every session of
+      the user ended, and a new one. *)
+  env = r.Env
+  s = r.Settings
+  gate("signin:$(r.Ip)", s.SignInPerIp, 60, r)?
+  if text.ByteLength(x.Password) < s.PasswordMin
+    return app.Fail(422, "Check the fields.", fields = {Password: "A password of $(s.PasswordMin) to 128 bytes."})
+  end
+  c = codeOf(x.Code, "reset", env)?
+  u = cepheus.Get(User, c.User, env.Db)?
+  if value.IsMissing(u) or u.Disabled == true
+    return app.Fail(403, "This link is not valid, or it has ended: ask for a new one.")
+  end
+  hash = hashed(x.Password, env)?
+  ops = list.Concat(c.Gone, [cepheus.Expect(c.User, User.Hash, u.Hash), cepheus.Add(c.User, User.Hash, hash)])
+  if value.IsMissing(dict.Get("Checked", u))
+    ops = list.Append(cepheus.Add(c.User, User.Checked, env.Now()), ops)
+  end
+  done = cepheus.Write(ops, env.Db, by = c.User, why = r.Why)
+  if result.IsErr(done)
+    return app.Fail(403, "This link is not valid, or it has ended: ask for a new one.")
+  end
+  EndSessions([one.Id for one in SessionsOf(c.User, env.Db)?], c.User, r.Why, env.Db)?
+  app.ForgetSessions(env.State)
+  note(r, "password", "A new password by the link of a mail.", user = c.User, every = 0)
+  opened(c.User, membershipOf(c.User, missing, env.Db)?, r, "reset")
+end
+
 defn keep(env)
   (** The keeper of the accounts, every minute: forgets the sessions that ended or stayed idle too long, the challenges
       answered that ended, the invitations that ended, 500 of each at most a round. *)
@@ -437,6 +674,9 @@ defn Sweep(env)
   end
   for i in cepheus.Find(2, (i, e) -> {Where: [[i, Invite.Ends, e], cepheus.Below(e, now)], Give: {Id: i}, Limit: 500}, env.Db)?
     ops = list.Concat(ops, app.Gone(Invite, i.Id, env.Db)?)
+  end
+  for c in cepheus.Find(2, (c, e) -> {Where: [[c, Code.Ends, e], cepheus.Below(e, now)], Give: {Id: c}, Limit: 500}, env.Db)?
+    ops = list.Concat(ops, app.Gone(Code, c.Id, env.Db)?)
   end
   if value.Len(ops) > 0
     cepheus.Write(ops, env.Db, why = "challenges and invitations ended")?
@@ -475,9 +715,10 @@ defn MakeSuper(email, password, keys, db, now = missing)
   found = cepheus.Find(1, u -> {Where: [[u, User.Email, email]], Give: {User: u}}, db)?
   hash = crypto.HashPassword(password, keys)
   if value.Len(found) == 0
-    return cepheus.Insert(User, {Email: email, Name: "", Hash: hash, Super: true, Disabled: false, Created: if value.IsMissing(now) sys.Now() else now end}, db, why = "super-admin made")
+    at = if value.IsMissing(now) sys.Now() else now end
+    return cepheus.Insert(User, {Email: email, Name: "", Hash: hash, Super: true, Disabled: false, Created: at, Checked: at}, db, why = "super-admin made")
   end
   id = found[1].User
-  cepheus.Update(User, id, {Hash: hash, Super: true, Disabled: false}, db, why = "super-admin made")?
+  cepheus.Update(User, id, {Hash: hash, Super: true, Disabled: false, Checked: if value.IsMissing(now) sys.Now() else now end}, db, why = "super-admin made")?
   result.Ok(id)
 end

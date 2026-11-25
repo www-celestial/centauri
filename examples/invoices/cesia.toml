@@ -6,7 +6,7 @@ cesia = "1.3"
 [deps.centauri]
 from = "github.com/www-celestial/centauri"
 version = "v0.1.0"
-take = ["src/app", "src/api", "src/auth", "src/apptest"]
+take = ["src/app", "src/api", "src/auth", "src/apptest", "src/jobs", "src/mail"]
 
 [deps.cepheus]
 from = "github.com/www-celestial/cepheus"
