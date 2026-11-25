@@ -103,6 +103,13 @@ defn main()
       pictured(conn, n + 1, "$out/admin-$(s[3]).png")?
     end
   end
+  (* the browser closed by its own protocol, its processes with it, then stopped for sure *)
+  version = json.Parse(http.Fetch("http://127.0.0.1:$debug/json/version")?.Body)?
+  whole = websocket.Dial(version["webSocketDebuggerUrl"])
+  if result.IsOk(whole)
+    _ = websocket.Send(json.Text({id: 1, method: "Browser.close", params: {}}), whole.Value)
+    sys.Sleep(0.5)
+  end
   sys.Stop(proc)
   result.Ok(lines)
 end
