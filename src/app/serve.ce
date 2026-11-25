@@ -72,6 +72,10 @@ defn front(base, req, env)
       metrics.Add("centauri_refused_total", labels = {reason: "origin"})
       noted(env, "origin", "ip:$ip", "A request that changes something came from another site.", missing, missing, ip, req.Method)
       out = refuse(403, "This request comes from another site than the app's.", rid, env)
+    else if value.Len(req) == 6
+      (* the request of std/http, {Method, Path, Query, Headers, Body, Peer}, made again with three fields more:
+         a record made at once costs a tenth of three fields added to a copy *)
+      out = base({Method: req.Method, Path: req.Path, Query: req.Query, Headers: req.Headers, Body: req.Body, Peer: req.Peer, Id: rid, Ip: ip, Site: site})
     else
       req.Id = rid
       req.Ip = ip
@@ -88,24 +92,27 @@ defn front(base, req, env)
       out = refuse(out.Status, if out.Status == 404 "There is no such address." else http.Reason(out.Status) end, rid, env)
     end
   end
-  out = Secure(out, env.Guards, names = env.GuardNames)
+  if not dict.Has("Secured", out)
+    out = Secure(out, env.Guards, names = env.GuardNames)
+  end
   if value.Len(env.Cors) > 0
     out = Shared(out, req, env.Cors)
   end
   ms = math.Round((sys.Now() - start) * 1000000) / 1000
-  line = {Id: rid, Method: req.Method, Route: dict.GetOr("Route", req.Path, out), Status: out.Status, Ms: ms, Ip: ip}
-  if dict.Has("User", out)
-    line.User = out.User
-  end
-  level = if out.Status >= 500 "error" else "info" end
+  route = dict.GetOr("Route", req.Path, out)
+  user = dict.Get("User", out)
   if s.LogRequests
-    if level == "error"
+    line = {Id: rid, Method: req.Method, Route: route, Status: out.Status, Ms: ms, Ip: ip}
+    if not value.IsMissing(user)
+      line.User = user
+    end
+    if out.Status >= 500
       log.Error("request", line)
     else
       log.Info("request", line)
     end
   end
-  Keep({At: start, Level: level, Message: "request", Fields: line}, env.State)
+  kept(start, rid, req.Method, route, out.Status, ms, ip, user, env.State)
   out
 end
 
@@ -235,8 +242,10 @@ defn answer(b, req, env)
   e = b.Endpoint
   rid = dict.GetOr("Id", "-", req)
   out = served(b, e, req, env, rid)
-  out.Route = e.Name
-  out.Done = true
+  if not dict.Has("Route", out)
+    out.Route = e.Name
+    out.Done = true
+  end
   out
 end
 
@@ -248,7 +257,7 @@ defn served(b, e, req, env, rid)
   same = req.Site == "same" and not value.IsMissing(env.Who)
   if same and not value.IsMissing(env.SessionKey)
     key = env.SessionKey(req, env)
-    d = door(req.Ip, env.State, session = key, endpoint = b.Rate)
+    d = door(req.Ip, env.State, key, missing, missing, b.Rate, 0)
     if not d.Hit
       who = env.Who(req, env)
       if result.IsErr(who)
@@ -258,7 +267,7 @@ defn served(b, e, req, env, rid)
       if not value.IsMissing(who.Value) and value.IsNumber(dict.Get("Until", who.Value)) and who.Value.Until < until
         until = who.Value.Until
       end
-      d = door(req.Ip, env.State, session = key, store = {User: who.Value, Until: until}, endpoint = b.Rate, gen = d.Gen)
+      d = door(req.Ip, env.State, key, {User: who.Value, Until: until}, missing, b.Rate, d.Gen)
     end
   else
     if same
@@ -268,7 +277,7 @@ defn served(b, e, req, env, rid)
       end
       user = who.Value
     end
-    d = door(req.Ip, env.State, user = user, endpoint = b.Rate)
+    d = door(req.Ip, env.State, missing, missing, user, b.Rate, 0)
   end
   user = d.User
   if not d.Ok
@@ -276,13 +285,13 @@ defn served(b, e, req, env, rid)
     noted(env, "limited", d.Key, "Too many requests.", if value.IsMissing(user) missing else user.Id end, tenantOf(user), req.Ip, e.Name)
     return refuse(429, "Too many requests: wait $(d.Retry) seconds.", rid, env, retry = d.Retry)
   end
-  status = allowedRole(e.Role, user, env.Roles)
+  status = if e.Role == api.Public 0 else allowedRole(e.Role, user, env.Roles) end
   if status != 0
     metrics.Add("centauri_refused_total", labels = {reason: if status == 401 "signin" else "role" end})
     return refuse(status, if status == 401 "Sign in first." else "This is for the role $(e.Role)." end, rid, env)
   end
   s = env.Settings
-  x = input(e, req)
+  x = if b.Takes input(e, req) else nothing end
   if result.IsErr(x)
     return failed(x.Error, rid, env, e)
   end
@@ -336,6 +345,13 @@ defn served(b, e, req, env, rid)
     rows = if value.IsArray(v) v else [] end
     v = {Rows: list.Take(pageSize, rows), After: if value.Len(rows) > pageSize seal(rows[pageSize], e, user, env) else missing end}
   end
+  if value.Len(extra) == 0 and not value.IsMissing(b.Out)
+    (* the common answer: its JSON, its headers with those of security made once, its route *)
+    out = {Status: status, Body: json.Text(b.Out(v)), Headers: env.JsonHeaders, Route: e.Name, Done: true, Secured: true,
+      User: if value.IsMissing(user) missing else user.Id end}
+    metrics.Add("centauri_requests_total", labels = if status == b.Status b.Labels else {route: e.Name, status: status} end)
+    return out
+  end
   out = if value.IsMissing(e.Out) {Status: if status == 200 204 else status end, Body: "", Headers: []}
     else if e.Out.Kind == "file" {Status: status, Body: if value.IsText(v) v else "" end, Headers: [{Name: "content-type", Value: e.Out.Type}]}
     else http.Json(b.Out(v), status = status) end
@@ -345,9 +361,11 @@ defn served(b, e, req, env, rid)
   if not value.IsMissing(user)
     out.User = user.Id
   end
-  metrics.Add("centauri_requests_total", labels = {route: e.Name, status: out.Status})
+  metrics.Add("centauri_requests_total", labels = if out.Status == b.Status b.Labels else {route: e.Name, status: out.Status} end)
   out
 end
+
+nothing = result.Ok(missing)   (* The input of an endpoint that takes none. *)
 
 (* The kinds of std/check that check.Out gives as they are. *)
 plain = {text: true, int: true, float: true, money: true, bool: true, email: true, id: true, url: true, oneof: true}
@@ -377,7 +395,17 @@ defn outOf(shape)
 end
 
 defn taken(names, x)
-  (** The fields of x of these names that it has. *)
+  (** The fields of x of these names that it has: x itself when it has those and no other, as a row that cepheus.Find
+      gave in the shape of its endpoint. *)
+  if value.Len(x) == value.Len(names)
+    all = true
+    for k in names
+      all = all and dict.Has(k, x)
+    end
+    if all
+      return x
+    end
+  end
   out = {}
   for k in names
     v = dict.Get(k, x)

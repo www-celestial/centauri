@@ -143,18 +143,22 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     Now: if value.IsMissing(clock) (() -> sys.Now()) else (() -> Now(state)) end,
     OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version)),
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s),
-    WhoModule: whoModule, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards])}
+    WhoModule: whoModule, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
+    JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards)}
   result.Ok(env)
 end
 
 defn rated(b)
   (** A route with what each of its requests needs of its endpoint, made once: the rate of its own limit as door counts
-      it (or missing), the size of its page (or missing), its status, and its output as a function (outOf). *)
+      it (or missing), the size of its page (or missing), its status and the labels of its metric, whether it takes an
+      input, and its output as a function (outOf). *)
   e = b.Endpoint
   out = b
   out.Rate = if value.IsMissing(e.Limit) missing else dict.Put("Name", e.Name, rateOf(e.Limit, 60, e.Limit)) end
   out.Size = if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end
   out.Status = api.Done(e)
+  out.Labels = {route: e.Name, status: out.Status}
+  out.Takes = not value.IsMissing(e.In) or not value.IsMissing(e.Query)
   out.Out = if value.IsDict(e.Out) and dict.Get("Kind", e.Out) != "file" outOf(e.Out) else missing end
   out
 end

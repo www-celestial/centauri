@@ -76,18 +76,24 @@ Failed(state) = fiber.Send({Op: "failed"}, state)
 (** The failed sign-ins of the last minute (between 60 and 120 seconds of them, by whole minutes). *)
 Failures(state) = ask(state, {Op: "failures"})
 
-defn door(ip, state, session = missing, store = missing, user = missing, endpoint = missing, gen = 0)
+defn door(ip, state, session, store, user, endpoint, gen)
   (** The one round trip of a request at its route: {Ok, Retry, Key, User, Hit, Gen, Now}. session, the key of its
       session (a hash of its cookie), is looked up among those the state keeps: when it is there and fresh, Hit is
       true and User the user it names (missing for a cookie that names nobody); when it is not, Hit is false, Gen the
       generation of the kept sessions, and nothing is counted: the request reads its session, and comes back with it,
       store = {User, Until}, kept until Until if no session was forgotten since Gen. Then the limits of its address,
       of its user and his tenant (user, without a session to look up), and of its endpoint ({Name, Gap, Tol}), all of
-      them or none, as Allow counts them. Now is the time of the state, a test's clock too. *)
+      them or none, as Allow counts them. Now is the time of the state, a test's clock too. The arguments that don't
+      apply are missing, gen 0. *)
   reply = fiber.Channel(size = 1)
   fiber.Send({Op: "door", Ip: ip, Session: session, Store: store, User: user, Endpoint: endpoint, Gen: gen, Reply: reply}, state)
   fiber.Receive(reply).Value
 end
+
+(** Keeps the line of a request, as Keep, its fields given one by one: its time, number, method, route, status, ms,
+    address and user (or missing). *)
+kept(at, id, method, route, status, ms, ip, user, state) = fiber.Send({Op: "request", At: at, Id: id, Method: method, Route: route, Status: status,
+  Ms: ms, Ip: ip, User: user}, state)
 
 (** Forgets every session the state keeps: a sign-out, a role changed, a user disabled are then read again from the
     database at their next request. *)
@@ -140,15 +146,69 @@ defn own(ch, slots, most, kept, keys, clock, rates)
       end
       if not hit
         fiber.Send({Ok: true, Hit: false, Gen: gen, Now: now}, m.Reply)
+      else if value.IsMissing(user) and value.IsMissing(m.Endpoint)
+        (* the request of nobody: the limit of its address alone *)
+        k = "ip:$(m.Ip)"
+        t = dict.GetOr(k, now, due)
+        if t < now
+          t = now
+        end
+        if t - now > rates.Ip.Tol
+          fiber.Send({Ok: false, Retry: math.Ceil(t - now - rates.Ip.Tol), Key: k, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
+        else
+          due[k] = t + rates.Ip.Gap
+          served += 1
+          if math.Mod(served, 10000) == 0 or value.Len(due) > keys
+            due = pruned(due, now, keys)
+          end
+          fiber.Send({Ok: true, Retry: 0, Key: missing, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
+        end
+      else if value.IsMissing(m.Endpoint)
+        (* the request of a user: the limits of his address, of himself and of his tenant, all or none *)
+        k1 = "ip:$(m.Ip)"
+        k2 = "u:$(user.Id)"
+        tenant = dict.Get("Tenant", user)
+        k3 = if value.IsMissing(tenant) missing else "t:$tenant" end
+        t1 = dict.GetOr(k1, now, due)
+        t1 = if t1 < now now else t1 end
+        t2 = dict.GetOr(k2, now, due)
+        t2 = if t2 < now now else t2 end
+        t3 = if value.IsMissing(k3) now else dict.GetOr(k3, now, due) end
+        t3 = if t3 < now now else t3 end
+        late = t1 - now - rates.Ip.Tol
+        refused = if late > 0 k1 else missing end
+        if value.IsMissing(refused) and t2 - now - rates.User.Tol > 0
+          late = t2 - now - rates.User.Tol
+          refused = k2
+        end
+        if value.IsMissing(refused) and not value.IsMissing(k3) and t3 - now - rates.Tenant.Tol > 0
+          late = t3 - now - rates.Tenant.Tol
+          refused = k3
+        end
+        if value.IsMissing(refused)
+          due[k1] = t1 + rates.Ip.Gap
+          due[k2] = t2 + rates.User.Gap
+          if not value.IsMissing(k3)
+            due[k3] = t3 + rates.Tenant.Gap
+          end
+          served += 1
+          if math.Mod(served, 10000) == 0 or value.Len(due) > keys
+            due = pruned(due, now, keys)
+          end
+          fiber.Send({Ok: true, Retry: 0, Key: missing, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
+        else
+          fiber.Send({Ok: false, Retry: math.Ceil(late), Key: refused, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
+        end
       else
         ks = ["ip:$(m.Ip)"]
         rs = [rates.Ip]
         if not value.IsMissing(user)
-          ks = list.Append("u:$(user.Id)", ks)
-          rs = list.Append(rates.User, rs)
-          if not value.IsMissing(dict.Get("Tenant", user))
-            ks = list.Append("t:$(user.Tenant)", ks)
-            rs = list.Append(rates.Tenant, rs)
+          if value.IsMissing(dict.Get("Tenant", user))
+            ks = ["ip:$(m.Ip)", "u:$(user.Id)"]
+            rs = [rates.Ip, rates.User]
+          else
+            ks = ["ip:$(m.Ip)", "u:$(user.Id)", "t:$(user.Tenant)"]
+            rs = [rates.Ip, rates.User, rates.Tenant]
           end
         end
         e = m.Endpoint
@@ -159,8 +219,9 @@ defn own(ch, slots, most, kept, keys, clock, rates)
         ok = true
         retry = 0
         refused = missing
-        times = []
-        for k in 1..value.Len(ks)
+        n = value.Len(ks)
+        times = list.Fill(0, n)
+        for k in 1..n
           t = dict.GetOr(ks[k], now, due)
           if t < now
             t = now
@@ -170,10 +231,10 @@ defn own(ch, slots, most, kept, keys, clock, rates)
             retry = math.Ceil(t - now - rs[k].Tol)
             refused = ks[k]
           end
-          times = list.Append(t + rs[k].Gap, times)
+          times[k] = t + rs[k].Gap
         end
         if ok
-          for k in 1..value.Len(ks)
+          for k in 1..n
             due[ks[k]] = times[k]
           end
           served += 1
@@ -183,6 +244,9 @@ defn own(ch, slots, most, kept, keys, clock, rates)
         end
         fiber.Send({Ok: ok, Retry: retry, Key: refused, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
       end
+    else if op == "request"
+      at = math.Mod(at, kept) + 1
+      lines[at] = m
     else if op == "line"
       at = math.Mod(at, kept) + 1
       lines[at] = m.Line
@@ -227,7 +291,7 @@ defn own(ch, slots, most, kept, keys, clock, rates)
         free += 1
       end
     else if op == "lines"
-      fiber.Send([x for x in list.Concat(list.Skip(at, lines), list.Take(at, lines)) if not value.IsMissing(x)], m.Reply)
+      fiber.Send([shown(x) for x in list.Concat(list.Skip(at, lines), list.Take(at, lines)) if not value.IsMissing(x)], m.Reply)
     else if op == "fresh"
       last = dict.Get(m.Key, seen)
       ok = value.IsMissing(last) or now - last >= m.Every
@@ -256,6 +320,18 @@ defn own(ch, slots, most, kept, keys, clock, rates)
       fiber.Send(clock, m.Reply)
     end
   end
+end
+
+defn shown(x)
+  (** A line as Lines gives it: a request's kept field by field becomes the line of its log. *)
+  if dict.Get("Op", x) != "request"
+    return x
+  end
+  fields = {Id: x.Id, Method: x.Method, Route: x.Route, Status: x.Status, Ms: x.Ms, Ip: x.Ip}
+  if not value.IsMissing(x.User)
+    fields.User = x.User
+  end
+  {At: x.At, Level: if x.Status >= 500 "error" else "info" end, Message: "request", Fields: fields}
 end
 
 defn pruned(due, now, keys)
