@@ -1,0 +1,262 @@
+(** Background jobs: written in the group of the write that asks for them, or not at all; taken once even by two at
+    the same moment; tried again after a backoff, dead after their tries, retried by hand; taken back from a process
+    that died; and the jobs that would poison the queue (an unknown kind, arguments that don't fit, a panic, a run
+    that never ends) dead or stopped without holding the others. Schedules of cron on the clocks of real zones, summer
+    time included, one run a slot whatever the processes. Each test is an app in memory (apptest), but the one of the
+    workers, which runs them as a server does. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/jobs
+use std/bug
+use std/check
+use std/dict
+use std/fiber
+use std/list
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text(unique = true), Runs: cepheus.Int()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100), Job: check.Text(1, 20, optional = true, default = "count")}), out = NoteOut, role = "member")
+
+defn counted(job, env)
+  (** Counts a run on the note of the job. *)
+  cepheus.Write([cepheus.Incr(job.Note, Note.Runs)], env.Db, why = env.Why)?
+  result.Ok(missing)
+end
+
+defn flaky(job, env)
+  (** Fails at its first two runs. *)
+  counted(job, env)?
+  if env.Job.Try < 3 result.Err({Kind: "test", Message: "Not yet: try $(env.Job.Try)."}) else result.Ok(missing) end
+end
+
+Count = jobs.Kind("count", check.Record({Note: check.Id()}), counted)
+Flaky = jobs.Kind("flaky", check.Record({Note: check.Id()}), flaky, tries = 5)
+Broken = jobs.Kind("broken", check.Record({Note: check.Id()}), (job, env) -> result.Err({Kind: "test", Message: "Broken\nfor ever."}), tries = 3)
+Boom = jobs.Kind("boom", check.Record({Note: check.Id()}), (job, env) -> bug.Panic("boom"), tries = 2)
+Stopped = jobs.Kind("stopped", check.Record({Note: check.Id()}), (job, env) -> jobs.Stop("This can't be done."))
+Slow = jobs.Kind("slow", check.Record({Note: check.Id()}), (job, env) -> sys.Sleep(30), lease = 1, most = 1, tries = 1)
+Kinds = {count: Count, flaky: Flaky, broken: Broken, boom: Boom, stopped: Stopped, slow: Slow}
+
+defn add(r, x)
+  (** POST /notes: the note and its job, in one group. *)
+  ops = list.Concat(app.Facts(Note, cepheus.New(1), {Tenant: r.User.Tenant, Text: x.Text, Runs: 0}), jobs.Later(Kinds[x.Job], {Note: cepheus.New(1)}))
+  made = cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)
+  if result.IsErr(made) and made.Error.Code == "unique"
+    return app.Fail(409, "This note exists.")
+  end
+  app.Own(Note, made?.Things[1], r)
+end
+
+Notes = app.Module("notes", kinds = [Note], serve = [app.Serve(AddNote, add)], jobs = [Count, Flaky, Broken, Boom, Stopped, Slow])
+App = app.Of([auth.Module(), jobs.Module(), Notes], name = "notes")
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+runs(t, id) = cepheus.Get(Note, id, t.Db)!.Runs   (* How many times the jobs of a note ran. *)
+
+defn jobOf(t, note)
+  (** The job of a note: its link to the note, new in the group that wrote both, is the note's id. *)
+  rows = cepheus.Find(1, j -> {Where: [[j, jobs.Job.Ref1, note]], Give: {Id: j}}, t.Db)!
+  if value.Len(rows) == 0 missing else cepheus.Get(jobs.Job, rows[1].Id, t.Db)! then dict.Put("Id", rows[1].Id) end
+end
+
+defn isWrittenWithItsWriteOnly()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  n = a.Call(AddNote, {Text: "milk"})?
+  again = a.Call(AddNote, {Text: "milk"})
+  bug.Assert(result.IsErr(again) and again.Error.Status == 409, "the second note is refused: $again")
+  bug.Assert(value.Len(cepheus.Find(1, j -> {Where: [[j, jobs.Job.State, "ready"]], Give: {J: j}}, t.Db)!) == 1, "one job, that of the note written")
+  bug.Assert(t.RunJobs()! == 1, "the job ran")
+  bug.Assert(t.RunJobs()! == 0, "and only once")
+  runs(t, n.Id) == 1 and jobOf(t, n.Id).State == "done"
+end
+
+defn isTriedAgainAfterABackoff()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  n = a.Call(AddNote, {Text: "flaky", Job: "flaky"})?
+  t.RunJobs()?
+  j = jobOf(t, n.Id)
+  bug.Assert(j.State == "ready" and j.Tries == 1 and j.RunAt > t.Env.Now() and j.RunAt <= t.Env.Now() + 3 and text.Contains("try 1", j.Error), "first failure: $j")
+  bug.Assert(t.RunJobs()! == 0, "not before its time")
+  t.Advance(3)
+  t.RunJobs()?
+  bug.Assert(jobOf(t, n.Id).Tries == 2, "second try")
+  t.Advance(5)
+  t.RunJobs()?
+  runs(t, n.Id) == 3 and jobOf(t, n.Id).State == "done"
+end
+
+defn isDeadAfterItsTriesAndRetried()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  n = a.Call(AddNote, {Text: "broken", Job: "broken"})?
+  for k in 1..3
+    t.RunJobs()?
+    t.Advance(10)
+  end
+  j = jobOf(t, n.Id)
+  bug.Assert(j.State == "dead" and j.Tries == 3 and j.Error == "Broken for ever.", "dead after 3: $j")
+  dead = t.Jobs()?
+  bug.Assert(value.Len(dead) == 1 and dead[1].Kind == "broken", "the dead list: $dead")
+  boss = t.Super()?
+  boss.Call(api.AdminJobRetry, {id: j.Id})?
+  again = jobOf(t, n.Id)
+  again.State == "ready" and again.Tries == 0 and value.Len(boss.Call(api.AdminJobs, {State: "dead"})?) == 0
+end
+
+defn isTakenOnceByTwoAtOnce()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  n = a.Call(AddNote, {Text: "once"})?
+  id = jobOf(t, n.Id).Id
+  kinds = dict.Dict([{Key: k.Name, Value: k} for k in App.Jobs])
+  tasks = [fiber.Spawn(() -> jobs.RunOne(id, kinds, t.Env, beat = false)) for k in 1..8]
+  states = [fiber.Wait(task).Value.Value for task in tasks]
+  value.Len([s for s in states if s == "done"]) == 1 and runs(t, n.Id) == 1
+end
+
+defn isTakenBackFromADeadProcess()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  n = a.Call(AddNote, {Text: "orphan"})?
+  id = jobOf(t, n.Id).Id
+  now = t.Env.Now()
+  cepheus.Write([cepheus.Expect(id, jobs.Job.State, "ready"), cepheus.Add(id, jobs.Job.State, "running"), cepheus.Add(id, jobs.Job.Lease, now + 60),
+    cepheus.Incr(id, jobs.Job.Tries)], t.Db)?
+  kinds = dict.Dict([{Key: k.Name, Value: k} for k in App.Jobs])
+  bug.Assert(jobs.TakeBack(kinds, t.Env)! == 0, "not while its lease holds")
+  t.Advance(61)
+  bug.Assert(jobs.TakeBack(kinds, t.Env)! == 1, "taken back once its lease passed")
+  bug.Assert(jobOf(t, n.Id).State == "ready", "ready again")
+  t.RunJobs()?
+  runs(t, n.Id) == 1 and jobOf(t, n.Id).State == "done"
+end
+
+defn isPoisonDeadOrStopped()
+  (** An unknown kind and arguments that don't fit are dead at once; a panic is a failure, tried again; Stop gives up;
+      a run past its most is stopped; and none of them holds the next job back. *)
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  stranger = cepheus.Write(app.Facts(jobs.Job, cepheus.New(1), {Kind: "nobody", Args: "{}", State: "ready", RunAt: 0, Tries: 0}), t.Db)!.Things[1]
+  twisted = cepheus.Write(app.Facts(jobs.Job, cepheus.New(1), {Kind: "count", Args: "{\"Note\": \"'; drop\"}", State: "ready", RunAt: 0, Tries: 0}), t.Db)!.Things[1]
+  boom = a.Call(AddNote, {Text: "boom", Job: "boom"})?
+  stop = a.Call(AddNote, {Text: "stop", Job: "stopped"})?
+  fine = a.Call(AddNote, {Text: "fine"})?
+  t.RunJobs()?
+  get(id) = cepheus.Get(jobs.Job, id, t.Db)!
+  bug.Assert(get(stranger).State == "dead" and text.Contains("no job of the kind nobody", get(stranger).Error), "unknown: $(get(stranger))")
+  bug.Assert(get(twisted).State == "dead" and text.Contains("don't fit", get(twisted).Error), "twisted: $(get(twisted))")
+  bug.Assert(jobOf(t, boom.Id).State == "ready" and text.Contains("boom", jobOf(t, boom.Id).Error), "a panic fails: $(jobOf(t, boom.Id))")
+  bug.Assert(jobOf(t, stop.Id).State == "dead" and jobOf(t, stop.Id).Tries == 1, "Stop gives up: $(jobOf(t, stop.Id))")
+  bug.Assert(runs(t, fine.Id) == 1, "the next job ran")
+  t.Advance(10)
+  t.RunJobs()?
+  bug.Assert(jobOf(t, boom.Id).State == "dead", "the panic, dead after its 2 tries")
+  slow = a.Call(AddNote, {Text: "slow", Job: "slow"})?
+  kinds = dict.Dict([{Key: k.Name, Value: k} for k in App.Jobs])
+  started = sys.Now()
+  ended = jobs.RunOne(jobOf(t, slow.Id).Id, kinds, t.Env)!
+  ended == "dead" and sys.Now() - started < 5 and text.Contains("ran past its most", jobOf(t, slow.Id).Error)
+end
+
+defn isRunByWorkersAsTheyComeDue()
+  (** The workers of a process, as app.Run starts them: a job written is run within moments, without polling. *)
+  a = app.Of([auth.Module(), jobs.Module(), Notes], name = "notes")
+  db = cepheus.Fork(cepheus.Empty, a.Kinds)?
+  s = app.Read(a.Fields, {Profile: "test", Origin: "http://app.test", Pow: "off"}, defaults = a.Defaults)?
+  env = app.Start(a, s, db)?
+  until = fiber.Channel()
+  fiber.Spawn(() -> jobs.Work(env, [], until = until))
+  note = cepheus.Write(list.Concat(app.Facts(Note, cepheus.New(1), {Text: "live", Runs: 0}), jobs.Later(Count, {Note: cepheus.New(1)})), db)?.Things[1]
+  waited = 0
+  while cepheus.Get(Note, note, db)!.Runs == 0 and waited < 500
+    sys.Sleep(0.01)
+    waited += 1
+  end
+  fiber.Close(until)
+  cepheus.Get(Note, note, db)!.Runs == 1 and waited < 200
+end
+
+(* Schedules and zones *)
+
+defn isCronRead()
+  c = jobs.Cron("0,30 9-17/4 * jan,jul mon-fri")?
+  bug.Assert(value.Equal(c.Minutes, [0, 30]) and value.Equal(c.Hours, [9, 13, 17]) and value.Equal(c.Months, [1, 7]) and value.Equal(c.Weekdays, [1, 2, 3, 4, 5]), "fields: $c")
+  bug.Assert(value.Equal(jobs.Cron("0 0 * * 7")?.Weekdays, [0]), "7 is Sunday")
+  wrong = ["", "* * * *", "60 * * * *", "* 24 * * *", "* * 0 * *", "* * * 13 *", "*/0 * * * *", "5-1 * * * *", "a * * * *", "@reboot"]
+  list.All([result.IsErr(jobs.Cron(w)) for w in wrong])
+end
+
+paris = jobs.Zone("Europe/Paris")!
+york = jobs.Zone("America/New_York")!
+
+defn isOffsetOfRealZones()
+  (** Paris is UTC+1 in winter, +2 in summer, from the last Sunday of March at 01:00 UTC to the last of October;
+      New York UTC-5 and -4; Tokyo +9 always; Kolkata +5:30; Sydney's summer is in January. *)
+  winter = 1794528000          (* 2026-11-13T00:00Z *)
+  summer = 1782864000          (* 2026-07-01T00:00Z *)
+  change = 1774746000          (* 2026-03-29T01:00Z, summer time starts in Paris *)
+  sydney = jobs.Zone("Australia/Sydney")!
+  jobs.Offset(winter, paris) == 3600 and jobs.Offset(summer, paris) == 7200 and jobs.Offset(change - 1, paris) == 3600 and jobs.Offset(change, paris) == 7200 and
+    jobs.Offset(winter, york) == -18000 and jobs.Offset(summer, york) == -14400 and jobs.Offset(winter, jobs.Zone("Asia/Tokyo")!) == 32400 and
+    jobs.Offset(winter, jobs.Zone("Asia/Kolkata")!) == 19800 and jobs.Offset(1767225600, sydney) == 39600 and jobs.Offset(summer, sydney) == 36000 and
+    jobs.Offset(4102444800 + 200 * 86400, paris) == 7200
+end
+
+defn isZoneNameChecked()
+  bad = ["../../etc/passwd", "/etc/passwd", "Europe/../../etc", "Europe//Paris", "Mars/Olympus", ""]
+  list.All([result.IsErr(jobs.Zone(n)) for n in bad]) and jobs.Zone("UTC")?.Name == "UTC"
+end
+
+defn isSlotOfSummerTimeOnce()
+  (** In Paris, 02:30 doesn't exist on 2026-03-29: the slot runs at 03:00 (01:00 UTC); on 2026-10-25, 02:30 comes twice:
+      the slot runs at the first (00:30 UTC), not again an hour later. *)
+  c = jobs.Cron("30 2 * * *")?
+  spring = jobs.Next(c, 1774735200, paris)?            (* after 2026-03-28T22:00Z *)
+  autumn = jobs.Next(c, 1792879200, paris)?            (* after 2026-10-24T22:00Z *)
+  after = jobs.Next(c, autumn.At, paris)?
+  bug.Assert(spring.At == 1774746000 and jobs.Stamp(spring.At, paris) == "2026-03-29T03:00+02:00", "spring: $spring")
+  bug.Assert(autumn.At == 1792888200 and jobs.Stamp(autumn.At, paris) == "2026-10-25T02:30+02:00", "autumn: $autumn")
+  after.At == 1792978200
+end
+
+defn isWeekdayOrDay()
+  (** Both the day of the month and of the week restricted: either matches, as Vixie cron. *)
+  c = jobs.Cron("0 12 13 * 5")?
+  first = jobs.Next(c, 1794528000, jobs.Utc)?          (* from 2026-11-13, a Friday the 13th, 00:00Z *)
+  second = jobs.Next(c, first.At, jobs.Utc)?
+  first.At == 1794528000 + 12 * 3600 and second.At == 1794528000 + 7 * 86400 + 12 * 3600
+end
+
+Report = jobs.Every("report", "0 6 * * *", (job, env) -> cepheus.Write([cepheus.Add(cepheus.New(1), Note.Text, job.Slot)], env.Db, why = env.Why), zone = "Europe/Paris")
+Daily = app.Of([auth.Module(), jobs.Module(every = [Report]), Notes], name = "notes")
+
+slotsOf(db) = [row.X for row in cepheus.Find(2, (n, x) -> {Where: [[n, Note.Text, x]], Give: {X: x}, Sort: [x]}, db)!]   (* The slots that ran. *)
+
+defn isOneRunASlotWhateverTheProcesses()
+  (** Two processes (two ticks) write the job of a slot: one gets it. A slot missed by more than late seconds is left. *)
+  t = apptest.Start(Daily, now = 1794546000 + 60)?     (* 2026-11-13T05:01Z, 06:01 in Paris *)
+  bug.Assert(jobs.Tick(Report, t.Env)! and not jobs.Tick(Report, t.Env)!, "one tick wins")
+  t.RunJobs()?
+  bug.Assert(value.Equal(slotsOf(t.Db), ["2026-11-13T06:00+01:00"]), "one run of the slot: $(slotsOf(t.Db))")
+  t.Advance(86400 * 2)
+  t.RunJobs()?
+  bug.Assert(value.Equal(slotsOf(t.Db), ["2026-11-13T06:00+01:00", "2026-11-15T06:00+01:00"]), "the slot of the 14th, missed by a day, is left: $(slotsOf(t.Db))")
+  late = apptest.Start(Daily, now = 1794546000 + 9000)?   (* 08:30 Paris: the slot of 06:00 is 2.5 hours old *)
+  late.RunJobs()?
+  value.Len(slotsOf(late.Db)) == 0
+end
+
+defn isJobsWithoutTheirModuleRefused()
+  (** An app whose modules have jobs and no module to run them is a bug, said at once. *)
+  got = fiber.Wait(fiber.Spawn(() -> app.Of([auth.Module(), Notes], name = "notes")))
+  result.IsErr(got) and text.Contains("jobs.Module()", got.Error.Message)
+end

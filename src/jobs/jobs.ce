@@ -1,0 +1,520 @@
+(** Durable background jobs, on Cepheus. A job is a thing of the kind centauri_job: its kind, its arguments (checked
+    by the shape of its kind), its state (ready, running, done, dead), when it may run, its tries, its lease. Later
+    gives the facts of a job, to write in the group of the write that asks for it: the job exists if and only if that
+    write took place (the transactional outbox, with no table nor loop to write, and no double write that loses
+    messages). Each process of the app runs JobWorkers fibers that take the jobs as they come due, each by a group
+    that expects it ready and leases it: two that take one at once, Cepheus refuses one. A job that fails runs again
+    after min(1 h, 2^n) seconds drawn at random (full jitter), and is dead after its tries, kept and retried by hand.
+    A process that dies leaves its jobs to the others once their lease passes: a job runs at least once, and must
+    bear being run twice (its id, env.Job.Id, is a key of idempotency for a provider). Every gives schedules of cron,
+    one run a slot across all the processes and servers, without a leader: each writes the job of a slot under a key
+    of its own, unique.
+
+      Welcome = Kind("welcome", check.Record({Email: check.Email()}), (job, env) -> result.Ok(job.Email))
+      Welcome.Tries --> 8
+      value.Len(Later(Welcome, {Email: "ana@example.com"})) --> 5
+      value.Len(Later(Kind("seen", check.Record({User: check.Id()}), (job, env) -> missing), {User: cepheus.New(1)}, thing = 2)) --> 7 *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use std/bug
+use std/check
+use std/dict
+use std/fiber
+use std/json
+use std/list
+use std/log
+use std/math
+use std/metrics
+use std/random
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(** A job: its kind's name, its arguments as JSON, its state, when it may run (0: at once), its tries so far, the end
+    of the lease of the process that runs it, its last error, its key (unique: a second job of the same key is never
+    written), when it ended. *)
+Job = app.Kind("centauri_job", {Kind: cepheus.Text(), Args: cepheus.Text(), State: cepheus.Text(), RunAt: cepheus.Date(),
+  Tries: cepheus.Int(), Lease: cepheus.Date(), Error: cepheus.Text(), Key: cepheus.Text(unique = true), Done: cepheus.Date(),
+  Refs: cepheus.Text(), Ref1: cepheus.Link(), Ref2: cepheus.Link(), Ref3: cepheus.Link(), Ref4: cepheus.Link()})
+
+(* The links of a job to things new in its group: a field of its arguments whose value is cepheus.New(k) is kept as a
+   link, which Cepheus writes with the thing's id; Refs names those fields, in the order of Ref1 to Ref4. *)
+refProps = [Job.Ref1, Job.Ref2, Job.Ref3, Job.Ref4]
+
+(** The states of a job. *)
+States = ["ready", "running", "done", "dead"]
+
+(** The settings of the jobs: the fibers of each process that run them (0: this process runs none), and the seconds a
+    job done is kept before it is forgotten. *)
+Settings = {
+  JobWorkers: check.Int(0, 256, optional = true, default = 4),
+  JobKeep: check.Int(0, 315360000, optional = true, default = 604800),
+}
+
+(* The names of kinds of jobs: small letters, digits, ., - and _. *)
+nameBytes = "abcdefghijklmnopqrstuvwxyz0123456789.-_"
+
+defn Kind(name, args, run, tries = 8, lease = 60, most = 600)
+  (** A kind of job: its name, the shape of its arguments (a check.Record), and run(job, env), job its arguments as the
+      shape reads them, env what the requests share, with env.Job ({Id, Kind, Try, Key}) and env.Why (for the
+      history). run gives an Ok (or any value) when it is done, or an Err to be tried again; Stop(message) gives up at
+      once. tries: the runs before it is dead; lease: the seconds a run holds it (renewed every third of it while it
+      runs); most: the seconds a run may take, past which it is stopped and counts as failed.
+
+        Kind("report", check.Record({}), (job, env) -> result.Ok(missing), tries = 3).Tries --> 3 *)
+  bug.Assert(value.IsText(name) and text.ByteLength(name) > 0 and text.ByteLength(name) <= 100 and value.IsMissing(text.ByteFindAny(nameBytes, 1, name, not = true)),
+    "A kind of job has a name of small letters, digits, ., - and _: $name.")
+  bug.Assert(value.IsDict(args) and dict.Get("Kind", args) == "record", "The arguments of the job $name are a check.Record.")
+  bug.Assert(tries >= 1 and lease >= 1 and most >= 1, "The job $name has tries, lease and most of 1 at least.")
+  {Name: name, Args: args, Run: run, Tries: tries, Lease: lease, Most: most, IsJob: true}
+end
+
+(** The Err of a job that gives up at once, dead after this run whatever its tries: what no retry can mend, as an
+    address that refuses its mail for ever.
+
+      Stop("This address is refused.").Error.Stop --> true *)
+Stop(message) = result.Err({Kind: "job", Stop: true, Message: message})
+
+defn Later(kind, args, at = missing, key = missing, thing = 1000000)
+  (** The facts of a new job of a kind with these arguments, to write in the group of the write that asks for it:
+      cepheus.Write(list.Concat(myOps, jobs.Later(Welcome, {...})), r.Db). A field may name a thing new in the group,
+      cepheus.New(1) (four of them at most): the job gets its id. It runs at once, or at the instant at; key,
+      unique, makes a second job of the same key refused with the group (a slot of a schedule, a mail sent once). thing
+      is its number among the new things of the group, cepheus.New(thing): a second job of the same group names
+      another. Arguments that don't fit the shape are a bug of the program, and stop it here. *)
+  given = if value.IsDict(args) args else {} end
+  refs = [p.Key for p in dict.Pairs(given) if value.IsInt(p.Value) and p.Value < 0]
+  bug.Assert(value.Len(refs) <= 4, "The job $(kind.Name) names more than 4 new things of its group: $(text.Join(", ", refs)).")
+  placed = given
+  for name in refs
+    placed[name] = 1
+  end
+  got = check.Read(kind.Args, placed)
+  bug.Assert(result.IsOk(got), "The arguments of the job $(kind.Name) don't fit its shape: $(if result.IsErr(got) json.Text(got.Error) else "" end).")
+  data = json.Text(got.Value)
+  bug.Assert(text.ByteLength(data) <= 65536, "The arguments of the job $(kind.Name) take more than 64 KiB: keep the data in things of its own.")
+  job = cepheus.New(thing)
+  ops = app.Facts(Job, job, {Kind: kind.Name, Args: data, State: "ready", RunAt: if value.IsMissing(at) 0 else at end, Tries: 0, Key: key,
+    Refs: if value.Len(refs) == 0 missing else text.Join(",", refs) end})
+  list.Concat(ops, [cepheus.Add(job, refProps[k], given[refs[k]]) for k in 1..value.Len(refs)])
+end
+
+defn argsOf(j)
+  (** The arguments of a job as it was written, its links to the things new in its group given their ids: an Ok of
+      them, or an Err. *)
+  parsed = json.Parse(dict.GetOr("Args", "", j))?
+  if not value.IsDict(parsed)
+    return result.Err({Kind: "job", Message: "Its arguments are no record."})
+  end
+  refs = dict.Get("Refs", j)
+  if value.IsText(refs)
+    names = text.Split(",", refs)
+    for k in 1..list.Min([4, value.Len(names)])
+      parsed[names[k]] = dict.Get("Ref$k", j)
+    end
+  end
+  result.Ok(parsed)
+end
+
+defn Every(name, cron, run, zone = "UTC", late = 3600, tries = 3, lease = 600, most = 3600)
+  (** A schedule: run(job, env) at each slot of a schedule of cron ("0 6 * * *": at 06:00 every day), on the clock of a
+      zone (Europe/Paris), job.Slot the slot as ISO 8601 with its offset and job.At its instant. One run a slot, across
+      every process and server: each writes the job of a slot under the key name@slot, which only one of them gets. A
+      slot that the clock skips runs at the first minute after; a slot shown twice runs once. A slot missed while no
+      process ran still runs when one starts, if it is no older than late seconds. A schedule that never comes, or a
+      cron written wrong, is a bug of the program.
+
+        Every("report", "0 6 * * *", (job, env) -> result.Ok(missing), zone = "Europe/Paris").Kind.Name --> "report" *)
+  c = Cron(cron)
+  bug.Assert(result.IsOk(c), if result.IsErr(c) c.Error.Message else "" end)
+  {Name: name, Cron: c.Value, Zone: zone, Late: late,
+    Kind: Kind(name, check.Record({Slot: check.Text(1, 40), At: check.Float()}), run, tries = tries, lease = lease, most = most)}
+end
+
+defn Module(every = [], jobs = [])
+  (** The module that runs the jobs of the app: those of every module's jobs, these kinds, and the schedules every.
+      An app with jobs lists it: app.Of([auth.Module(), jobs.Module(every = [Report]), invoices.Module]). Its
+      endpoints are the administration of the jobs (api.AdminJobs, api.AdminJobRetry). *)
+  kinds = list.Concat(jobs, [s.Kind for s in every])
+  m = app.Module("jobs", kinds = [Job], settings = Settings, jobs = kinds, start = env -> Work(env, every),
+    verify = env -> zonesRead(every), serve = [app.Serve(api.AdminJobs, adminJobs), app.Serve(api.AdminJobRetry, adminRetry)])
+  dict.Put("Every", every, m)
+end
+
+defn zonesRead(every)
+  (** An Ok when the zone of every schedule can be read, else an Err of what is missing: the start stops then. *)
+  wrong = []
+  for s in every
+    z = Zone(s.Zone)
+    if result.IsErr(z)
+      wrong = list.Append("the schedule $(s.Name): $(z.Error.Message)", wrong)
+    end
+  end
+  if value.Len(wrong) == 0 result.Ok(missing) else result.Err(wrong) end
+end
+
+defn kindsOf(env)
+  (** The kinds of jobs of the app, by name. *)
+  dict.Dict([{Key: k.Name, Value: k} for k in env.App.Jobs])
+end
+
+defn schedulesOf(env)
+  (** The schedules of the app's module of jobs. *)
+  for m in env.App.Modules
+    if m.Name == "jobs"
+      return dict.GetOr("Every", [], m)
+    end
+  end
+  []
+end
+
+defn Work(env, every, until = missing)
+  (** The jobs of this process, until it stops: JobWorkers fibers that run them as they come due, one that gives them
+      out (it wakes at each change of the ready jobs, a cepheus.Watch, and at the next one due: nothing polls in a
+      loop), takes back every 10 seconds the jobs whose process died, and forgets the jobs done JobKeep ago, and one
+      fiber for each schedule. until, a channel that a test closes, stops the fiber that gives them out. *)
+  n = env.Settings.JobWorkers
+  if n == 0
+    return missing
+  end
+  queue = fiber.Channel(size = n)
+  done = fiber.Channel()
+  kinds = kindsOf(env)
+  for k in 1..n
+    fiber.Spawn(() -> working(queue, done, kinds, env))
+  end
+  if not value.IsMissing(until)
+    fiber.Spawn(() -> closing(until, queue))
+  end
+  for s in every
+    fiber.Spawn(() -> scheduling(s, env))
+  end
+  dispatching(queue, done, n, kinds, env, until)
+end
+
+defn ended(until)
+  (** Has the channel until, when given, closed? *)
+  if value.IsMissing(until)
+    return false
+  end
+  got = fiber.Receive(until, timeout = 0)
+  result.IsErr(got) and got.Error.Kind == "closed"
+end
+
+defn closing(until, queue)
+  (** Closes the queue of the workers once until closes: they end then. *)
+  while result.IsOk(fiber.Receive(until))
+  end
+  fiber.Close(queue)
+end
+
+defn working(queue, done, kinds, env)
+  (** A fiber that runs the jobs given out to it, one after the other. A panic stops the job's fiber only. *)
+  while true
+    got = fiber.Receive(queue)
+    if result.IsErr(got)
+      return missing
+    end
+    _ = fiber.Wait(fiber.Spawn(() -> RunOne(got.Value, kinds, env)))
+    fiber.Send(got.Value, done)
+  end
+end
+
+defn due(now, limit, db)
+  (** The ready jobs due at an instant, the earliest first. *)
+  cepheus.Find(2, (j, t) -> {Where: [[j, Job.State, "ready"], [j, Job.RunAt, t], cepheus.Below(t, now + 0.001)], Give: {Id: j, At: t},
+    Sort: [t, j], Limit: limit}, db)
+end
+
+defn nextDue(now, db)
+  (** The instant of the next ready job not yet due, or missing. *)
+  rows = cepheus.Find(2, (j, t) -> {Where: [[j, Job.State, "ready"], [j, Job.RunAt, t], cepheus.Above(t, now)], Give: {At: t}, Sort: [t], Limit: 1}, db)
+  if result.IsOk(rows) and value.Len(rows.Value) > 0 rows.Value[1].At else missing end
+end
+
+defn dispatching(queue, done, n, kinds, env, until)
+  (** Gives out the jobs as they come due, never one twice while it runs here, until the process stops or until
+      closes. *)
+  w = cepheus.Watch(1, j -> {Where: [[j, Job.State, "ready"]], Give: {J: j}}, env.Db)
+  if result.IsErr(w)
+    log.Error("jobs: the ready jobs can't be watched; they are looked for every second", {Error: dict.GetOr("Message", "", w.Error)})
+  end
+  waits = if result.IsOk(w) [w.Value.Changes, done] else [done] end
+  if not value.IsMissing(until)
+    waits = list.Append(until, waits)
+  end
+  flying = dict.Dict()
+  swept = 0
+  while not sys.StopAsked() and not ended(until)
+    back = fiber.Receive(done, timeout = 0)
+    while result.IsOk(back)
+      flying = dict.Drop(back.Value, flying)
+      back = fiber.Receive(done, timeout = 0)
+    end
+    now = env.Now()
+    limit = 2 * n + value.Len(flying)
+    rows = due(now, limit, env.Db)
+    if result.IsErr(rows)
+      log.Warn("jobs: the due jobs can't be read", {Error: dict.GetOr("Message", "", rows.Error)})
+      sys.Sleep(1)
+    else
+      for row in rows.Value
+        if not dict.Has(row.Id, flying)
+          flying[row.Id] = true
+          fiber.Send(row.Id, queue)
+        end
+      end
+      if now - swept >= 10
+        _ = TakeBack(kinds, env)
+        _ = Forget(env)
+        swept = now
+      end
+      if value.Len(rows.Value) < limit or value.Len(flying) >= limit
+        next = nextDue(now, env.Db)
+        wait = if value.IsMissing(next) 10 else list.Max([0.001, list.Min([10, next - now])]) end
+        if result.IsErr(w)
+          wait = list.Min([wait, 1])
+        end
+        _ = fiber.Select(waits, timeout = wait)
+        if result.IsOk(w)
+          while result.IsOk(fiber.Receive(w.Value.Changes, timeout = 0))
+          end
+        end
+      end
+    end
+  end
+end
+
+defn backoff(tries)
+  (** The seconds before the next run of a job that failed tries times: drawn at random between 1 and min(1 h, 2^tries)
+      (full jitter, Brooker 2015), so that a thousand jobs that fail at once don't come back at once. *)
+  1 + random.Float() * list.Min([3600, math.BitShift(1, list.Min([tries, 12]))])
+end
+
+defn clean(message)
+  (** An error as a job keeps it: a text of 1,000 bytes at most, on one line. *)
+  t = text.Replace("\n", " ", text.Replace("\r", " ", if value.IsText(message) message else value.Text(message) end))
+  if text.ByteLength(t) > 1000 text.ByteSlice(1, 1000, t) else t end
+end
+
+defn messageOf(e)
+  (** The message of an Err of a job. *)
+  if value.IsDict(e) and value.IsText(dict.Get("Message", e)) e.Message else value.Text(e) end
+end
+
+defn RunOne(id, kinds, env, beat = true)
+  (** Takes a job that is due and runs it: an Ok of its new state ("done", "ready" to run again, "dead"), or of missing
+      when it wasn't due or another took it. With beat, its lease is renewed while it runs; a test runs it without. *)
+  now = env.Now()
+  j = cepheus.Get(Job, id, env.Db)?
+  if value.IsMissing(j) or j.State != "ready" or dict.GetOr("RunAt", 0, j) > now + 0.001
+    return result.Ok(missing)
+  end
+  kind = dict.Get(j.Kind, kinds)
+  lease = if value.IsMissing(kind) 60 else kind.Lease end
+  until = now + lease
+  took = cepheus.Write([cepheus.Expect(id, Job.State, "ready"), cepheus.Add(id, Job.State, "running"), cepheus.Add(id, Job.Lease, until),
+    cepheus.Incr(id, Job.Tries)], env.Db, why = "job taken")
+  if result.IsErr(took)
+    return result.Ok(missing)
+  end
+  tries = dict.GetOr("Tries", 0, j) + 1
+  if value.IsMissing(kind)
+    return finish(id, j.Kind, tries, 1, Stop("This app has no job of the kind $(j.Kind)."), until, env)
+  end
+  parsed = argsOf(j)
+  args = if result.IsOk(parsed) check.Read(kind.Args, parsed.Value) else parsed end
+  if result.IsErr(args)
+    return finish(id, kind.Name, tries, kind.Tries, Stop("Its arguments don't fit the shape of $(kind.Name)."), until, env)
+  end
+  jobEnv = dict.Put("Why", "job $(kind.Name) #$id", dict.Put("Job", {Id: id, Kind: kind.Name, Try: tries, Key: dict.Get("Key", j)}, env))
+  started = sys.Now()
+  task = fiber.Spawn(() -> kind.Run(args.Value, jobEnv))
+  outcome = missing
+  while value.IsMissing(outcome)
+    w = fiber.Wait(task, timeout = if beat lease / 3 else missing end)
+    if result.IsOk(w)
+      outcome = if result.IsErr(w.Value) w.Value else result.Ok(missing) end
+    else if w.Error.Kind == "timeout"
+      if sys.Now() - started > kind.Most
+        fiber.Cancel(task)
+        outcome = result.Err({Kind: "job", Message: "It ran past its most, $(kind.Most) seconds."})
+      else
+        longer = env.Now() + lease
+        renewed = cepheus.Write([cepheus.Expect(id, Job.Lease, until), cepheus.Add(id, Job.Lease, longer)], env.Db, why = "job lease")
+        if result.IsOk(renewed)
+          until = longer
+        end
+      end
+    else
+      outcome = result.Err({Kind: "job", Message: "It stopped: $(messageOf(w.Error))"})
+    end
+  end
+  metrics.Observe("job_seconds", sys.Now() - started)
+  finish(id, kind.Name, tries, kind.Tries, outcome, until, env)
+end
+
+defn finish(id, name, tries, most, outcome, until, env)
+  (** Writes how a run ended: done, ready again after its backoff, or dead; only if the job is still this run's (its
+      lease the same), else nothing: another took it back meanwhile. *)
+  now = env.Now()
+  ops = [cepheus.Expect(id, Job.State, "running"), cepheus.Expect(id, Job.Lease, until)]
+  state = "done"
+  if result.IsOk(outcome)
+    ops = list.Concat(ops, [cepheus.Add(id, Job.State, "done"), cepheus.Add(id, Job.Done, now)])
+  else
+    e = outcome.Error
+    message = clean(messageOf(e))
+    final = tries >= most or (value.IsDict(e) and dict.Get("Stop", e) == true)
+    state = if final "dead" else "ready" end
+    ops = list.Concat(ops, [cepheus.Add(id, Job.State, state), cepheus.Add(id, Job.Error, message)])
+    ops = list.Concat(ops, if final [cepheus.Add(id, Job.Done, now)] else [cepheus.Add(id, Job.RunAt, now + backoff(tries))] end)
+    if final
+      log.Error("a job is dead", {Job: id, Kind: name, Try: tries, Error: message})
+    else
+      log.Warn("a job failed, and runs again", {Job: id, Kind: name, Try: tries, Error: message})
+    end
+  end
+  wrote = cepheus.Write(ops, env.Db, why = "job $name #$id $state")
+  metrics.Add("jobs_total", labels = {kind: name, state: state})
+  if result.IsErr(wrote) result.Ok(missing) else result.Ok(state) end
+end
+
+defn TakeBack(kinds, env)
+  (** The jobs whose lease passed while they ran, as when their process died: ready again, or dead after their tries.
+      An Ok of how many. *)
+  now = env.Now()
+  rows = cepheus.Find(2, (j, l) -> {Where: [[j, Job.State, "running"], [j, Job.Lease, l], cepheus.Below(l, now)], Give: {Id: j, Lease: l}, Limit: 500}, env.Db)?
+  for row in rows
+    j = cepheus.Get(Job, row.Id, env.Db)?
+    kind = dict.Get(j.Kind, kinds)
+    final = value.IsMissing(kind) or dict.GetOr("Tries", 0, j) >= kind.Tries
+    state = if final "dead" else "ready" end
+    ops = [cepheus.Expect(row.Id, Job.State, "running"), cepheus.Expect(row.Id, Job.Lease, row.Lease), cepheus.Add(row.Id, Job.State, state),
+      cepheus.Add(row.Id, Job.Error, "Its run stopped before its end: its process stopped, or it ran past its lease.")]
+    _ = cepheus.Write(if final list.Append(cepheus.Add(row.Id, Job.Done, now), ops) else ops end, env.Db, why = "job taken back")
+  end
+  result.Ok(value.Len(rows))
+end
+
+defn Forget(env)
+  (** The jobs done more than JobKeep seconds ago, forgotten, 500 a round: an Ok of how many. The dead are kept. *)
+  old = env.Now() - env.Settings.JobKeep
+  rows = cepheus.Find(2, (j, d) -> {Where: [[j, Job.State, "done"], [j, Job.Done, d], cepheus.Below(d, old)], Give: {Id: j}, Limit: 500}, env.Db)?
+  ops = []
+  for row in rows
+    ops = list.Concat(ops, app.Gone(Job, row.Id, env.Db)?)
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, env.Db, why = "jobs done forgotten")?
+  end
+  result.Ok(value.Len(rows))
+end
+
+defn slotted(s, at, z, env)
+  (** Writes the job of a slot of a schedule, under its unique key: an Ok of true when this process wrote it, of false
+      when another had. *)
+  stamp = Stamp(at, z)
+  made = cepheus.Write(Later(s.Kind, {Slot: stamp, At: at}, at = at, key = "$(s.Name)@$stamp"), env.Db, why = "schedule $(s.Name) $stamp")
+  if result.IsOk(made)
+    return result.Ok(true)
+  end
+  if made.Error.Code == "unique" result.Ok(false) else made end
+end
+
+defn Tick(s, env)
+  (** The last slot of a schedule, written if it is due and no older than its late seconds: an Ok of true when this
+      call wrote it. A test calls it through RunDue; a process at its start. *)
+  z = Zone(s.Zone)?
+  now = env.Now()
+  last = Last(s.Cron, now, z)?
+  if value.IsMissing(last) or now - last.At > s.Late
+    return result.Ok(false)
+  end
+  slotted(s, last.At, z, env)
+end
+
+defn scheduling(s, env)
+  (** The fiber of a schedule: the slot missed while no process ran, then each slot as it comes. *)
+  z = Zone(s.Zone)
+  if result.IsErr(z)
+    log.Error("jobs: the schedule $(s.Name) can't run", {Error: z.Error.Message})
+    return missing
+  end
+  _ = Tick(s, env)
+  while not sys.StopAsked()
+    next = Next(s.Cron, env.Now(), z.Value)
+    if result.IsErr(next)
+      log.Error("jobs: the schedule $(s.Name) never comes", {Error: next.Error.Message})
+      return missing
+    end
+    while env.Now() < next.Value.At and not sys.StopAsked()
+      sys.Sleep(list.Min([60, list.Max([0.01, next.Value.At - env.Now()])]))
+    end
+    if not sys.StopAsked()
+      made = slotted(s, next.Value.At, z.Value, env)
+      if result.IsErr(made)
+        log.Warn("jobs: a slot of $(s.Name) was not written", {Error: dict.GetOr("Message", "", made.Error)})
+      end
+    end
+  end
+end
+
+defn RunDue(env, rounds = 1000)
+  (** Runs the jobs due now, one after the other, and the slots of the schedules due now, until none is due: an Ok of
+      how many ran. What a test calls (t.RunJobs()), with its clock: t.Advance first for what runs later. *)
+  for s in schedulesOf(env)
+    Tick(s, env)?
+  end
+  kinds = kindsOf(env)
+  ran = 0
+  for round in 1..rounds
+    rows = due(env.Now(), 100, env.Db)?
+    if value.Len(rows) == 0
+      return result.Ok(ran)
+    end
+    for row in rows
+      got = RunOne(row.Id, kinds, env, beat = false)?
+      if not value.IsMissing(got)
+        ran += 1
+      end
+    end
+  end
+  result.Ok(ran)
+end
+
+defn Retry(id, env, by = 0)
+  (** A dead job made ready again, its tries back to 0: an Ok, or a 404 for a job that is not dead. *)
+  j = cepheus.Get(Job, id, env.Db)?
+  if value.IsMissing(j) or j.State != "dead"
+    return app.Missing("There is no dead job $id.")
+  end
+  cepheus.Write([cepheus.Expect(id, Job.State, "dead"), cepheus.Add(id, Job.State, "ready"), cepheus.Add(id, Job.Tries, 0),
+    cepheus.Add(id, Job.RunAt, env.Now())], env.Db, by = by, why = "job retried")?
+  result.Ok(missing)
+end
+
+defn List(state, db, limit = 100)
+  (** The jobs of a state, the latest first: an Ok of {Id, Kind, State, RunAt, Tries, Error, Key}. *)
+  rows = cepheus.Find(2, (j, k) -> {Where: [[j, Job.State, state], [j, Job.Kind, k]], Give: {Id: j, Kind: k}, Sort: [cepheus.Desc(j)], Limit: limit}, db)?
+  out = []
+  for row in rows
+    j = cepheus.Get(Job, row.Id, db)?
+    out = list.Append({Id: row.Id, Kind: row.Kind, State: state, RunAt: dict.GetOr("RunAt", 0, j), Tries: dict.GetOr("Tries", 0, j),
+      Error: dict.GetOr("Error", "", j), Key: dict.GetOr("Key", "", j), Args: dict.GetOr("Args", "", j)}, out)
+  end
+  result.Ok(out)
+end
+
+adminJobs(r, q) = List(q.State, r.Db, limit = 200)   (* GET /admin/jobs. *)
+
+defn adminRetry(r)
+  (** POST /admin/jobs/:id/retry. *)
+  id = app.IdOf(r.Params.id)
+  if value.IsMissing(id)
+    return app.Missing()
+  end
+  Retry(id, r.Env, by = r.User.Id)
+end

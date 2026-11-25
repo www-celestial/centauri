@@ -47,11 +47,15 @@ Kind(name, fields) = cepheus.Kind(name, fields) then dict.Put("name", name) then
     gives a text naming its session, a hash of its cookie, or missing for none: the state of the process then keeps
     what who read for SessionCache seconds, and a write of a signed-in user through this module's routes forgets all
     of it), settings (the shapes of its own settings), start (a function of env that runs in its own fiber once the
-    app serves, as a keeper that ends old sessions).
+    app serves, as a keeper that ends old sessions), jobs (the kinds of background jobs it writes, jobs.Kind, which the
+    module of package jobs runs), verify (a function of env that gives an Ok, or an Err of lines that stop the start,
+    as a time zone that can't be read), and migrations (app.Migration, run once each, in order, before the app
+    serves).
 
       Module("notes", serve = []).Name --> "notes" *)
-Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing, key = missing) = {Name: name, Kinds: kinds,
-  Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key}
+Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing, key = missing, jobs = [], verify = missing,
+  migrations = []) = {Name: name, Kinds: kinds, Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key,
+  Jobs: jobs, Verify: verify, Migrations: migrations}
 
 (** The roles of an app unless it names its own: each role with the roles it includes. owner and admin manage the
     members of their tenant (the endpoints of auth need admin); member is the role of every user who signs up. *)
@@ -93,10 +97,20 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
   kinds = Kinds
   rules = []
   served = []
+  jobs = []
+  names = []
   for m in modules
     fields = dict.Merge(fields, m.Settings)
-    kinds = list.Concat(kinds, m.Kinds)
+    kinds = list.Concat(kinds, [k for k in m.Kinds if not (dict.Get("name", k) in names)])
+    names = list.Concat(names, [dict.Get("name", k) for k in m.Kinds if not value.IsMissing(dict.Get("name", k))])
     rules = list.Concat(rules, m.Rules)
+    for j in dict.GetOr("Jobs", [], m)
+      same = [k for k in jobs if k.Name == j.Name]
+      bug.Assert(value.Len(same) == 0 or same[1].Run == j.Run, "Two kinds of jobs are named $(j.Name).")
+      if value.Len(same) == 0
+        jobs = list.Append(j, jobs)
+      end
+    end
     for b in m.Serve
       if b.Endpoint.Method != "LIVE"
         served = list.Append({Endpoint: b.Endpoint, Handler: b.Handler, Module: m.Name}, served)
@@ -110,8 +124,9 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
   for b in served
     bug.Assert(b.Endpoint.Role in known, "$(b.Endpoint.Name): the role $(b.Endpoint.Role) is no role of the app ($(text.Join(", ", dict.Keys(roles)))).")
   end
+  bug.Assert(value.Len(jobs) == 0 or "jobs" in [m.Name for m in modules], "The modules of this app have jobs ($(text.Join(", ", [j.Name for j in jobs]))), and no module runs them: add jobs.Module() to app.Of.")
   {Name: name, Version: version, Modules: modules, Fields: fields, Defaults: defaults, Roles: roles, Kinds: kinds, Rules: rules,
-    Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served]}
+    Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served], Jobs: jobs}
 end
 
 defn Start(a, s, db, readDb = missing, clock = missing)
@@ -227,6 +242,18 @@ defn Run(a)
     ready("rules", cepheus.Define(a.Rules, db))
   end
   env = ready("start", Start(a, s, db, readDb = readDb))
+  wrong = []
+  for m in a.Modules
+    if not value.IsMissing(dict.Get("Verify", m))
+      checked = m.Verify(env)
+      if result.IsErr(checked)
+        wrong = list.Concat(wrong, if value.IsArray(checked.Error) checked.Error else [value.Text(checked.Error)] end)
+      end
+    end
+  end
+  if value.Len(wrong) > 0
+    stop(wrong)
+  end
   for m in a.Modules
     if not value.IsMissing(m.Start)
       fiber.Spawn(() -> m.Start(env))

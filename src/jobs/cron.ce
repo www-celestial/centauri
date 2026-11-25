@@ -1,0 +1,175 @@
+(* Schedules as cron writes them: five fields, the minute, the hour, the day of the month, the month and the day of
+   the week, each *, a number, a range a-b, a list a,b,c, a step */n or a-b/n, months and days by their English names
+   too; @yearly, @monthly, @weekly, @daily, @hourly. When both the day of the month and the day of the week are
+   restricted, a day matches either, as Vixie cron (and POSIX's crontab) does. The slots are read on a zone's clock:
+   a slot that the clock skips runs at the first minute that exists after it, and one the clock shows twice runs once. *)
+use std/dict
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+macros = {"@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *", "@monthly": "0 0 1 * *", "@weekly": "0 0 * * 0",
+  "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@hourly": "0 * * * *"}
+months = {jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12}
+days = {sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6}
+
+defn numberOf(word, names)
+  (** A number of a field, or the number of its name: missing when it is neither. *)
+  lower = text.Lower(word)
+  if dict.Has(lower, names)
+    return names[lower]
+  end
+  if text.ByteLength(word) == 0 or text.ByteLength(word) > 4 or not value.IsMissing(text.ByteFindAny("0123456789", 1, word, not = true))
+    return missing
+  end
+  text.Number(word)
+end
+
+defn field(spec, lo, hi, names)
+  (** The values of a field of cron between lo and hi: an Ok of {Values, Any}, Any for a field that starts with *, or
+      an Err. *)
+  out = []
+  for item in text.Split(",", spec)
+    step = 1
+    range = item
+    cut = text.Split("/", item)
+    if value.Len(cut) == 2
+      step = numberOf(cut[2], {})
+      range = cut[1]
+      if value.IsMissing(step) or step < 1
+        return result.Err("$item has a wrong step")
+      end
+    else if value.Len(cut) > 2
+      return result.Err("$item has two steps")
+    end
+    a = lo
+    b = hi
+    if range != "*"
+      ends = text.Split("-", range)
+      if value.Len(ends) > 2
+        return result.Err("$item is no range")
+      end
+      a = numberOf(ends[1], names)
+      b = if value.Len(ends) == 2 numberOf(ends[2], names) else (if value.Len(cut) == 2 hi else a end) end
+      if value.IsMissing(a) or value.IsMissing(b) or a < lo or b > hi or a > b
+        return result.Err("$item is not within $lo to $hi")
+      end
+    end
+    v = a
+    while v <= b
+      out = list.Append(v, out)
+      v += step
+    end
+  end
+  result.Ok({Values: list.Unique(list.Sort(out)), Any: text.StartsWith("*", spec)})
+end
+
+defn Cron(spec)
+  (** A schedule of cron: an Ok of its fields, each the sorted list of its values, or an Err that says what is wrong.
+      The day of the week 7 is Sunday, as 0.
+
+        Cron("30 6 * * 1-5").Value.Hours --> [6]
+        Cron("*/15 * * * *").Value.Minutes --> [0, 15, 30, 45]
+        Cron("@daily").Value.Minutes --> [0]
+        Cron("61 * * * *") then result.IsErr() --> true *)
+  s = dict.GetOr(text.Lower(text.Trim(spec)), text.Trim(spec), macros)
+  f = [w for w in text.Split(" ", text.Replace("\t", " ", s)) if w != ""]
+  if value.Len(f) != 5
+    return result.Err({Kind: "cron", Message: "$spec: a schedule of cron has 5 fields (minute, hour, day, month, weekday) or is one of @daily, @hourly..."})
+  end
+  parts = [field(f[1], 0, 59, {}), field(f[2], 0, 23, {}), field(f[3], 1, 31, {}), field(f[4], 1, 12, months), field(f[5], 0, 7, days)]
+  for p in parts
+    if result.IsErr(p)
+      return result.Err({Kind: "cron", Message: "$spec: $(p.Error)."})
+    end
+  end
+  dow = list.Unique(list.Sort([math.Mod(d, 7) for d in parts[5].Value.Values]))
+  result.Ok({Spec: spec, Minutes: parts[1].Value.Values, Hours: parts[2].Value.Values, Days: parts[3].Value.Values,
+    Months: parts[4].Value.Values, Weekdays: dow, AnyDay: parts[3].Value.Any, AnyWeekday: parts[5].Value.Any})
+end
+
+defn dayMatches(c, y, m, d, dayCount)
+  (** Does a date match the days of a schedule: its month, and its day of the month or of the week, both when one of
+      them is *, either when both are restricted. *)
+  if not (m in c.Months)
+    return false
+  end
+  byDay = d in c.Days
+  byWeek = weekday(dayCount) in c.Weekdays
+  if c.AnyDay and c.AnyWeekday
+    return true
+  end
+  if c.AnyDay
+    return byWeek
+  end
+  if c.AnyWeekday
+    return byDay
+  end
+  byDay or byWeek
+end
+
+defn Next(c, after, z)
+  (** The first slot of a schedule after an instant, read on a zone's clock: an Ok of {At, Wall}, At the instant in
+      seconds since 1970, Wall the time on the zone's clock, or an Err for a schedule that never comes in 5 years (as
+      the 30th of February). A slot the clock skips runs at the first minute after the change; one it shows twice, at
+      the first of the two.
+
+        Next(Cron("0 6 * * *").Value, 1794528000, Utc).Value.At --> 1794549600 *)
+  start = math.Floor((after + Offset(after, z)) / 60) * 60 + 60
+  first = math.Div(start, 86400)
+  for k in 0..(366 * 5)
+    dayCount = first + k
+    dt = civil(dayCount)
+    if dayMatches(c, dt.Year, dt.Month, dt.Day, dayCount)
+      for h in c.Hours
+        for mi in c.Minutes
+          wall = dayCount * 86400 + h * 3600 + mi * 60
+          if wall >= start
+            at = Instant(wall, z)
+            if at > after
+              return result.Ok({At: at, Wall: at + Offset(at, z)})
+            end
+          end
+        end
+      end
+    end
+  end
+  result.Err({Kind: "cron", Message: "$(c.Spec) never comes in the next 5 years."})
+end
+
+defn Last(c, before, z)
+  (** The last slot of a schedule at or before an instant, within a day and a half: an Ok of {At, Wall}, or of missing. *)
+  probe = Next(c, before - 129600, z)
+  if result.IsErr(probe)
+    return result.Ok(missing)
+  end
+  got = missing
+  slot = probe.Value
+  while slot.At <= before
+    got = slot
+    more = Next(c, slot.At, z)
+    if result.IsErr(more)
+      break
+    end
+    slot = more.Value
+  end
+  result.Ok(got)
+end
+
+defn Stamp(at, z)
+  (** An instant as ISO 8601 to the minute on a zone's clock, with its offset: what names a slot of a schedule.
+
+        Stamp(1794549600, Utc) --> "2026-11-13T06:00+00:00" *)
+  off = Offset(at, z)
+  wall = math.Floor(at) + off
+  dc = math.Div(wall, 86400)
+  dt = civil(dc)
+  rest = wall - dc * 86400
+  sign = if off < 0 "-" else "+" end
+  a = math.Div(math.Floor(if off < 0 0 - off else off end), 60)
+  "$(dt.Year)-$(two(dt.Month))-$(two(dt.Day))T$(two(math.Div(rest, 3600))):$(two(math.Div(math.Mod(rest, 3600), 60)))$sign$(two(math.Div(a, 60))):$(two(math.Mod(a, 60)))"
+end
+
+two(n) = if n < 10 "0$n" else "$n" end   (* A number of two digits. *)

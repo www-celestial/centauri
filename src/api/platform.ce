@@ -103,6 +103,18 @@ AdminTenant = Get("/admin/tenants/:id", out = check.Record({Tenant: TenantRow, M
 AdminRoles = Put("/admin/tenants/:id/members/:user", body = check.Record({Roles: check.List(check.Text(1, 40), 0, 20)}), role = Super,
   about = "Sets the roles of a user in a tenant.")
 
+(** A background job as the admin sees it: its kind, state, when it runs, its tries, its last error, its key and its
+    arguments as JSON. *)
+JobRow = check.Record({Id: check.Id(), Kind: check.Text(1, 100), State: check.OneOf(["ready", "running", "done", "dead"]), RunAt: check.Float(),
+  Tries: check.Int(0), Error: check.Text(0, 1000), Key: check.Text(0, 400), Args: check.Text(0, 65536)})
+
+(** The jobs of a state, the latest first: the dead ones to see what failed, the ready ones to see what waits. *)
+AdminJobs = Get("/admin/jobs", query = check.Record({State: check.OneOf(["ready", "running", "done", "dead"], optional = true, default = "dead")}),
+  out = check.List(JobRow, 0, 200), role = Super, about = "The background jobs of a state.")
+
+(** A dead job made ready again, its tries back to 0. *)
+AdminJobRetry = Post("/admin/jobs/:id/retry", role = Super, about = "Runs a dead job again.")
+
 (** The endpoints of the app's part of the administration, served by package app. *)
 AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData]
 

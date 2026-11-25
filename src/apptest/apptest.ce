@@ -9,6 +9,7 @@ use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use src/app
 use src/auth
+use src/jobs
 use std/dict
 use std/encode
 use std/http
@@ -26,7 +27,8 @@ Epoch = 1794528000
 defn Start(a, settings = {}, now = Epoch)
   (** An app in memory: an Ok of its test t, with t.Db its fork, t.Env what its requests share, and t.SignUp(x),
       t.SignIn(email, password), t.Anyone(), t.Super(), t.As(u, roles), t.Make(u, kind, fields), t.Advance(seconds),
-      t.Raw(method, path). settings are given as the environment would give them, over the profile test, proof of work
+      t.Raw(method, path), t.RunJobs() (the background jobs due on its clock, one after the other: an Ok of how many
+      ran) and t.Jobs(state) (the jobs of a state, "dead" unless given). settings are given as the environment would give them, over the profile test, proof of work
       off and generous limits, which a test of them sets back. *)
   db = cepheus.Fork(cepheus.Empty, a.Kinds)?
   if value.Len(a.Rules) > 0
@@ -54,6 +56,8 @@ defn made(t)
   out.As = (u, roles) -> as(t, u, roles)
   out.Make = (u, kind, fields) -> make(t, u, kind, fields)
   out.Advance = seconds -> app.Advance(seconds, t.Env.State)
+  out.RunJobs = () -> jobs.RunDue(t.Env)
+  out.Jobs = (state = "dead") -> jobs.List(state, t.Db)
   result.Ok(out)
 end
 
