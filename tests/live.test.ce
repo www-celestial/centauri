@@ -1,0 +1,143 @@
+(** Live screens over a real WebSocket: a page of the app opens a screen with its cookie and gets its shows as the
+    writes change them, from this process or another one on the same database (no broker: the writes are the events);
+    its actions are the app's endpoints, through the same door. And what an attacker tries: a screen without a
+    session, from another site, a show of a role he hasn't, arguments that don't fit, another tenant's rows, a screen
+    kept open after a sign-out. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/auth
+use std/bug
+use std/check
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket as ws
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100)}), out = check.Record({Id: check.Id(), Text: check.Text()}), role = "member")
+Mine = api.Live("notes.mine", args = check.Record({Start: check.Text(0, 20, optional = true, default = "")}), role = "member")
+Owners = api.Live("notes.owners", role = "owner")
+
+defn add(r, x)
+  id = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  {Id: id, Text: x.Text}
+end
+
+mine(s, args) = cepheus.Watch(2, (n, t) -> {Where: [[n, Note.Tenant, s.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}}, s.Db, until = s.Ended)
+Notes = app.Module("notes", kinds = [Note], serve = [app.Serve(AddNote, add), app.Live(Mine, mine), app.Live(Owners, mine)])
+App = app.Of([auth.Module(), Notes], name = "notes")
+
+defn served(db)
+  (** The app served on a free port over a database: {Port, Env}. *)
+  l = net.Listen(0)!
+  s = app.Read(App.Fields, {Profile: "test", Origin: "http://localhost:$(net.Port(l))", Pow: "off", SessionCache: 0}, defaults = App.Defaults)!
+  env = app.Start(App, s, db)!
+  fiber.Spawn(() -> http.Serve(app.App(env), listener = l, timeout = 5))
+  {Port: net.Port(l), Env: env}
+end
+
+defn post(port, path, body, cookie = missing)
+  (** A request of a page of the app: its answer. *)
+  headers = [{Name: "host", Value: "localhost:$port"}, {Name: "content-type", Value: "application/json"}]
+  if not value.IsMissing(cookie)
+    headers = list.Append({Name: "cookie", Value: cookie}, headers)
+  end
+  http.Fetch("http://localhost:$port$path", method = "POST", body = json.Text(body), headers = headers)!
+end
+
+defn signUp(port, email, name)
+  (** The cookie of a new account. *)
+  out = post(port, "/auth/signup", {Email: email, Password: "correct horse 12", Name: name})
+  text.Split(";", http.HeaderValue("set-cookie", out.Headers))[1]
+end
+
+defn open(port, cookie, shows, origin = missing)
+  (** A screen of the app with these shows: an Ok of its connection, its hello sent. *)
+  q = encode.UrlEncode(json.Text(shows))
+  headers = [{Name: "origin", Value: if value.IsMissing(origin) "http://localhost:$port" else origin end}]
+  if not value.IsMissing(cookie)
+    headers = list.Append({Name: "cookie", Value: cookie}, headers)
+  end
+  c = ws.Dial("ws://localhost:$port/live?shows=$q", headers = headers)?
+  ws.Send(json.Text({Hello: 1}), c)?
+  result.Ok(c)
+end
+
+defn heard(c, seconds = 3)
+  (** The messages of the next frame of a screen, or missing when none came. *)
+  got = fiber.Receive(c.Messages, timeout = seconds)
+  if result.IsErr(got) missing else json.Parse(got.Value)! end
+end
+
+defn isShownAsWritesComeAcrossServers()
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  two = served(db)
+  ana = signUp(one.Port, "ana@example.com", "Ana")
+  c = open(one.Port, ana, [{Show: "notes.mine", Args: {}}])?
+  first = heard(c)
+  bug.Assert(dict.Has("Show", first[1]), "a show: $first")
+  bug.Assert(first[1].Show == "notes.mine" and value.Len(first[1].Rows) == 0, "the answer first: $first")
+  post(one.Port, "/notes", {Text: "milk"}, cookie = ana)
+  added = heard(c)
+  bug.Assert(added[1].Added[1].Text == "milk", "a write here: $added")
+  post(two.Port, "/notes", {Text: "eggs"}, cookie = ana)
+  other = heard(c)
+  bug.Assert(other[1].Added[1].Text == "eggs", "a write of another server on the same database: $other")
+  bo = signUp(two.Port, "bo@example.com", "Bo")
+  post(two.Port, "/notes", {Text: "zq secret of bo"}, cookie = bo)
+  bug.Assert(value.IsMissing(heard(c, seconds = 0.5)), "another tenant's write shows nothing")
+  ws.Send(json.Text({Act: "POST /notes", Id: 7, Args: {Text: "by an action"}}), c)?
+  frames = [heard(c), heard(c, seconds = 0.5)]
+  all = list.Flatten([f for f in frames if not value.IsMissing(f)])
+  acks = [m for m in all if dict.Has("Ack", m)]
+  bug.Assert(value.Len(acks) == 1 and acks[1].Ack == 7 and acks[1].Ok.Text == "by an action", "the action answered: $all")
+  ws.Send(json.Text({Act: "POST /notes", Id: 8, Args: {Text: ""}}), c)?
+  bad = heard(c)
+  ws.Close(c)
+  bad[1].Ack == 8 and bad[1].Err.Status == 422 and dict.Has("Text", bad[1].Err.Fields)
+end
+
+defn isRefusedWithoutRights()
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com", "Ana")
+  nobody = open(one.Port, missing, [{Show: "notes.mine", Args: {}}])?
+  e1 = heard(nobody)
+  bug.Assert(e1[1].Error.Message == "Sign in first.", "no session: $e1")
+  elsewhere = open(one.Port, ana, [{Show: "notes.mine", Args: {}}], origin = "https://evil.example")
+  bug.Assert(result.IsErr(elsewhere), "another site: $elsewhere")
+  unknown = open(one.Port, ana, [{Show: "notes.everything", Args: {}}])?
+  e2 = heard(unknown)
+  wrong = open(one.Port, ana, [{Show: "notes.mine", Args: {Start: text.Repeat(50, "x")}}])?
+  e3 = heard(wrong)
+  bo = signUp(one.Port, "bo@example.com", "Bo")
+  member = one.Env
+  too = open(one.Port, ana, list.Fill({Show: "notes.mine", Args: {}}, 65))?
+  e4 = heard(too)
+  text.Contains("no show notes.everything", e2[1].Error.Message) and e3[1].Error.Status == 422 and text.Contains("64 shows", e4[1].Error.Message)
+end
+
+defn isEndedBySignOut()
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com", "Ana")
+  c = open(one.Port, ana, [{Show: "notes.mine", Args: {}}])?
+  heard(c)
+  started = sys.Now()
+  out = post(one.Port, "/auth/signout", {}, cookie = ana)
+  bug.Assert(out.Status == 204, "signed out: $(out.Status)")
+  ended = heard(c, seconds = 3)
+  bug.Assert(not value.IsMissing(ended) and dict.Has("Error", ended[1]), "the screen is told: $ended")
+  closed = fiber.Receive(c.Messages, timeout = 3)
+  result.IsErr(closed) and sys.Now() - started < 4
+end

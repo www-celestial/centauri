@@ -85,7 +85,7 @@ defn Module(signUp = api.SignUp, facts = missing, mails = Mails)
     app.Serve(api.Invite, invite), app.Serve(api.Join, joining), app.Serve(api.SetRoles, setRoles), app.Serve(api.RemoveMember, removeMember),
     app.Serve(api.MyTenants, myTenants), app.Serve(api.SwitchTenant, switchTenant), app.Serve(api.CheckEmail, checkEmail),
     app.Serve(api.SendCheck, (r, x) -> sendCheck(r, x, kinds)), app.Serve(api.Forgot, (r, x) -> forgot(r, x, kinds)), app.Serve(api.Reset, resetPassword)]
-  made = app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, key = SessionKey,
+  made = app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, key = SessionKey, ends = Ends,
     settings = dict.Merge(Settings, mail.Settings), start = keep, jobs = [checking, resetting, taken, mail.Job], verify = verified)
   dict.Put("Runner", jobs.Module(), made)
 end

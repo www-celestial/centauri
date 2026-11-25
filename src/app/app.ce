@@ -48,14 +48,15 @@ Kind(name, fields) = cepheus.Kind(name, fields) then dict.Put("name", name) then
     what who read for SessionCache seconds, and a write of a signed-in user through this module's routes forgets all
     of it), settings (the shapes of its own settings), start (a function of env that runs in its own fiber once the
     app serves, as a keeper that ends old sessions), jobs (the kinds of background jobs it writes, jobs.Kind, which the
-    module of package jobs runs), verify (a function of env that gives an Ok, or an Err of lines that stop the start,
+    module of package jobs runs), ends (for the who-module: ends(user, env, until), a channel that gets a value at each
+    change of a user's session, so that his live screens end with it), verify (a function of env that gives an Ok, or an Err of lines that stop the start,
     as a time zone that can't be read), and migrations (app.Migration, run once each, in order, before the app
     serves).
 
       Module("notes", serve = []).Name --> "notes" *)
 Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing, key = missing, jobs = [], verify = missing,
-  migrations = []) = {Name: name, Kinds: kinds, Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key,
-  Jobs: jobs, Verify: verify, Migrations: migrations}
+  migrations = [], ends = missing) = {Name: name, Kinds: kinds, Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key,
+  Jobs: jobs, Verify: verify, Migrations: migrations, Ends: ends}
 
 (** The roles of an app unless it names its own: each role with the roles it includes. owner and admin manage the
     members of their tenant (the endpoints of auth need admin); member is the role of every user who signs up. *)
@@ -100,6 +101,7 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
   served = []
   jobs = []
   names = []
+  lives = []
   for m in modules
     fields = dict.Merge(fields, m.Settings)
     kinds = list.Concat(kinds, [k for k in m.Kinds if not (dict.Get("name", k) in names)])
@@ -113,6 +115,8 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
     for b in m.Serve
       if b.Endpoint.Method != "LIVE"
         served = list.Append({Endpoint: b.Endpoint, Handler: b.Handler, Module: m.Name}, served)
+      else
+        lives = list.Append({Endpoint: b.Endpoint, Handler: b.Handler, Module: m.Name}, lives)
       end
     end
   end
@@ -120,12 +124,12 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
     fields = dict.Merge(fields, if dict.Has("Kind", settings) and settings.Kind == "record" settings.Fields else settings end)
   end
   known = list.Concat([api.Public, api.Signed, api.Super], dict.Keys(roles))
-  for b in served
+  for b in list.Concat(served, lives)
     bug.Assert(b.Endpoint.Role in known, "$(b.Endpoint.Name): the role $(b.Endpoint.Role) is no role of the app ($(text.Join(", ", dict.Keys(roles)))).")
   end
   bug.Assert(value.Len(jobs) == 0 or "jobs" in [m.Name for m in modules], "The modules of this app have jobs ($(text.Join(", ", [j.Name for j in jobs]))), and no module runs them: add jobs.Module() to app.Of.")
   {Name: name, Version: version, Modules: modules, Fields: fields, Defaults: defaults, Roles: roles, Kinds: kinds, Rules: rules,
-    Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served], Jobs: jobs}
+    Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served], Jobs: jobs, Lives: lives}
 end
 
 defn withRunner(modules)
@@ -156,11 +160,13 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   who = missing
   sessionKey = missing
   whoModule = missing
+  ends = missing
   for m in a.Modules
     if value.IsMissing(who) and not value.IsMissing(m.Who)
       who = m.Who
       sessionKey = dict.Get("Key", m)
       whoModule = m.Name
+      ends = dict.Get("Ends", m)
     end
   end
   served = [rated(b) for b in list.Concat(adminOfApp(), a.Served)]
@@ -173,7 +179,7 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     Now: if value.IsMissing(clock) (() -> sys.Now()) else (() -> Now(state)) end,
     OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version)),
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s),
-    WhoModule: whoModule, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
+    WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards)}
   result.Ok(env)
 end
@@ -190,13 +196,17 @@ defn rated(b)
 end
 
 defn App(env)
-  (** The app as std/http serves it: its routes behind Centauri's door. *)
+  (** The app as std/http serves it: its routes behind Centauri's door, its live screens at /live. *)
   routes = http.App()
   for b in env.Served
     routes = http.Route(b.Endpoint.Method, b.Endpoint.Path, req -> answer(b, req, env), routes, stream = dict.Get("Most", b.Endpoint))
   end
   if env.Profile.OpenApi
     routes = http.Get("/openapi.json", req -> openapi(env), routes)
+  end
+  if value.Len(env.App.Lives) > 0
+    handle = http.Handler(routes then http.Wrap((next, req) -> front(next, req, env)))
+    routes = mounted(routes, env, handle)
   end
   if not value.IsMissing(env.Pages)
     routes = http.Get("/*", req -> page(env.Pages, req.Params["*"]), routes)

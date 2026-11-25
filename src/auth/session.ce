@@ -97,6 +97,33 @@ defn Who(req, env)
     Name: dict.GetOr("Name", "", u), Until: list.Min([s.Ends, s.Seen + env.Settings.SessionIdle]), Checked: not value.IsMissing(dict.Get("Checked", u))})
 end
 
+defn Ends(user, env, until)
+  (** A channel that gets a value at each change of the facts of a user's session, his membership and his account
+      (a sign-out, a role taken or given, a user disabled), from any process of any server, until the channel until
+      closes: what ends the live screens of a session. *)
+  member = dict.Get("Member", user)
+  w = if value.IsMissing(member)
+    cepheus.Watch(2, (h, d) -> {Where: [[user.Session, Session.Hash, h], [user.Id, User.Disabled, d]], Give: {H: h, D: d}}, env.Db, until = until)
+  else
+    cepheus.Watch(3, (h, d, r) -> {Where: [[user.Session, Session.Hash, h], [user.Id, User.Disabled, d], [member, Member.Roles, r]], Give: {H: h, D: d, R: r}}, env.Db, until = until)
+  end
+  out = fiber.Channel(size = 1)
+  if result.IsOk(w)
+    fiber.Spawn(() -> relayed(w.Value.Changes, out))
+  end
+  out
+end
+
+defn relayed(changes, out)
+  (** Each change after the first answer of a watch, told on out, which holds one: a guard reads them all at once. *)
+  _ = fiber.Receive(changes)
+  for c in changes
+    _ = fiber.Receive(out, timeout = 0)   (* one pending value at most: the guard reads them all at once *)
+    fiber.Send(true, out)
+  end
+  fiber.Close(out)
+end
+
 defn EndSessions(ids, by, why, db)
   (** Ends sessions: their facts retracted, in one group. An Ok of how many. *)
   ops = []
