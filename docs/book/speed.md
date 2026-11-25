@@ -131,6 +131,45 @@ back through their shape. Neither is on the path of a request. What was not meas
 Boot's `@Scheduled` with ShedLock, its JavaMailSender, its multipart uploads to S3, its STOMP with a broker; the
 numbers above are Centauri's alone.
 
+## The admin pages in a browser
+
+The pages of [the admin](admin.md), compiled from Cesia to WebAssembly, measured in chrome-headless-shell 153 (WebGL
+by SwiftShader, on the processor) and Firefox 160, without a window, 1280 by 900, on this machine (an 8-thread
+laptop, other jobs running: load 3 to 9). The app is the invoices of `cesia do admin-serve` with 100,005 clients
+(`ROWS=100000`), on a database in memory, served on 127.0.0.1 with the brotli files. A frame's work is the time from the
+browser calling the page to its frame painted (`Stats()` of `ceres.js`), not the wait before it, which in headless
+Chrome is SwiftShader's.
+
+| | Chrome | Firefox |
+|---|---|---|
+| the files of the pages | `page.wasm` 521,406 B, 134,330 brotli; `page.js` 4,123, `ceres.js` 6,089, `admin.js` 162 brotli: 145 KB in all, once; then a `304` each | the same |
+| first paint of the sign-in (21 runs) | 131 ms [111, 169] | 118 ms [89, 1,025 cold] |
+| sign-in to the dashboard showing its counts: Argon2id, the page loaded again, its screen opened (21) | 361 ms [278, 439] | 360 ms [328, 426] |
+| first paint of the dashboard, once signed in (21) | 104 ms [91, 153] | 98 ms [91, 115] |
+| work of a frame while the wheel scrolls a table of 100,005 rows, p50 / p99 (3 and 2 runs of 120 notches) | 3.7 to 4.8 / 10.7 to 13 ms | 3 / 7 to 15 ms |
+| the 100,005 rows sorted by a click on a title | one frame, 11.3 ms | one frame, 10 to 14 ms |
+| the 100,005 rows read (All: 2,001 pages of 50 through the live screen) | 112 to 121 s | 104 to 121 s |
+
+The table draws only the rows in sight, so 100,005 rows scroll as 50 do. Reading them all is slow because of the
+server: `GET /admin/data/:kind` takes 35 to 46 ms a page on a kind of 100,000 things, where it takes 1.2 ms on a kind
+of 30 (Cepheus walks the kind's facts to find the page after a cursor; a range on a thing's id, which would seek, is
+refused: `Above` is for numbers, dates and money). The page waits for the next frame between two pages, about 16 ms.
+
+Beside, Django 6.1.3's admin over the same 100,005 clients (SQLite, `runserver`, 21 runs; Firefox's measured while
+another job ran a benchmark):
+
+| | Django, Chrome | Django, Firefox | the admin pages |
+|---|---|---|---|
+| the sign-in page | 56,121 B in 8 files (11,297 brotli), loaded in 114 ms [103, 458] | 49 ms [42, 92] | 145 KB once, first paint 131 / 118 ms |
+| sign-in to the first page (PBKDF2 of 1,500,000 rounds) | 1,043 ms [946, 2,215] | 1,013 ms [944, 1,285] | 361 / 360 ms |
+| the list of clients, 100 a page | 771,289 B in 21 files (151,170 brotli: jQuery, XRegExp), loaded in 195 ms [187, 1,567] | 187 ms [155, 240] | a page of 50 through the screen in 35 to 46 ms; no file loaded again |
+| all of them | refused past 200 (`list_max_show_all`) | | 100,005 in one table, 4 ms a frame |
+
+Django wins where a page is plain HTML: its sign-in page is 11 KB and paints without compiling a module, and it works
+without JavaScript. The admin pages win once loaded: 145 KB for every page (a page of Django's list costs more in its
+own HTML and statics than all of them), every page after the first without a file, a dashboard pushed each second
+without polling, a table of 100,000 rows that scrolls and sorts in a frame.
+
 ## What it says
 
 - Starting stays instant: 7 ms over std/http and Cepheus, against 3.4 s for Spring Boot 4 on this machine (the
