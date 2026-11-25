@@ -49,7 +49,7 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_CERT`, `APP_KEY` | | a certificate and its key in PEM: https |
 | `APP_CORS` | | the origins of partners, with commas |
 | `APP_TRUST_PROXY` | false | the client's address is the last of `X-Forwarded-For`, which the proxy in front writes |
-| `APP_LIMIT_IP`, `APP_LIMIT_USER`, `APP_LIMIT_TENANT` | 600, 1200, 6000 | requests a minute |
+| `APP_LIMIT_IP`, `APP_LIMIT_USER`, `APP_LIMIT_TENANT` | 600, 1200, 6000 | requests a minute, bursts of a quarter; every request counts, one refused by its role too |
 | `APP_MAX_BODY`, `APP_TIMEOUT` | 1 MiB, 60 s | the largest body; the time of a request, from its first byte to its answer |
 | `APP_LOG_REQUESTS`, `APP_LOG_LINES` | true (false in test), 1000 | one line of the log a request; the lines the administration keeps |
 | `APP_ADMIN_PORT` | 0 (none) | `/metrics` for Prometheus, on 127.0.0.1 only |

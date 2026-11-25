@@ -1,64 +1,104 @@
 # Speed
 
-What Centauri costs, measured on one machine (Intel Core i7-4720HQ, 4 cores and 8 threads, Linux 7.2), beside the same
-answers served by std/http alone, on 2026-11-25. Each figure is the median of n runs, alternated with the other case,
-with its 95 % interval between brackets (the 6th and 16th of 21 sorted runs, with no assumption on their law); other
-jobs ran on the machine, and the load average is given. Two Cesia binaries: the one of Cesia's main branch, and the
-branch `httpfix`, which finds a route in a tree of its parts and makes BLAKE2b, the comparison in constant time and hex
-natives of OCaml (not yet merged). The measures are in `bench/`.
+What Centauri costs, measured on one machine (Intel Core i7-4720HQ, 4 cores and 8 threads, Linux 7.2) on 2026-11-25,
+beside the same answers served by std/http alone, and beside Go and Spring Boot under load. Each figure is the median of
+21 runs, alternated with the others, with the smallest and the largest between brackets; other jobs ran on the machine,
+and the load average is given. "Before" is Centauri as its first batch wrote it, "now" after the work on the cost of a
+request, both on Cesia's main binary; "now" with a page also takes the faster `encode.Base64` of Cesia's branch
+`centauri-cost`. The measures are in `bench/`.
 
 ## Starting
 
-From the command to the first 200, then the resident memory 1 s later, idle (21 runs each, load 4.6 to 6.8):
+From the command to the first 200, then the resident memory 1 s later, idle (21 runs each, load 1.4 to 4.8):
 
 | server | first answer | memory at rest |
 |---|---:|---:|
-| std/http, the engine of Cepheus loaded, libsodium opened | 27.4 ms [26.3, 29.8] | 21.3 MB [21.3, 21.4] |
-| Centauri (its accounts and one route; settings read, state, keys, routes) | 34.7 ms [33.4, 37.7] | 30.5 MB [30.4, 30.6] |
+| std/http, the engine of Cepheus loaded, libsodium opened | 26.6 ms [25.6, 51.9] | 21 MB [19, 21] |
+| Centauri before (its accounts and one route; settings read, state, keys, routes) | 33.2 ms [31.7, 41.6] | 30 MB [28, 30] |
+| Centauri now | 33.9 ms [32.4, 72.5] | 32 MB [30, 32] |
 
-Centauri adds 7.3 ms and 9 MB to a start. With a real Cepheus server, connecting and declaring the kinds of the
-invoices and their two rules, the invoices answered after 62 ms (one start, its data on an SSD, its code on a disk).
+Centauri adds 7.3 ms to a start, within its budget of 10 ms; before and now differ by less than their spread. Memory
+at rest is 2 MB more after the first request, as the heap takes its next step one request sooner: after 1,000 requests
+both hold 35 MB.
 
 ## A request, in the program
 
-The mean of 2,000 calls of the app's handler, without the network (21 rounds, load 2.8 to 7.4), the profile prod:
+The mean of 2,000 calls of the app's handler, without the network, the profile prod (21 rounds, load 3.1 to 3.9):
 
-| answer | std/http, main | Centauri, main | std/http, httpfix | Centauri, httpfix |
-|---|---:|---:|---:|---:|
-| a JSON of one field, public | 3.0 µs [2.9, 3.2] | 55.0 µs [51.9, 56.9] | 3.0 [2.8, 3.2] | 39.0 [38.1, 44.6] |
-| a thing by its id, signed in (`app.Own`) | 5.9 [5.7, 6.2] | 127 [120, 133] | 5.6 [5.4, 6.1] | 76.7 [74.8, 79.2] |
-| a page of 20 things, signed in | 56.7 [54.3, 59.1] | 303 [280, 331] | 55.1 [54.2, 60.1] | 239 [228, 247] |
+| answer | std/http | Centauri before | Centauri now |
+|---|---:|---:|---:|
+| a JSON of one field, public | 3.5 µs [3.3, 6.4] | 41.6 µs [39.9, 48.6] | 21.5 µs [20.2, 49.8] |
+| a thing by its id, signed in (`app.Own`) | 6.0 [5.3, 11.1] | 77.0 [75.4, 97.9] | 40.2 [38.1, 82.4] |
+| a page of 20 things, signed in | 56.8 [53.4, 66.4] | 255 [246, 414] | 150 [143, 170] |
 
-Where the 36 µs of a public request go with httpfix (each step alone, the mean of 5,000 calls): the door (number of
-the request, address, site, headers of security, the line kept for the administration) about 7 µs; the route among
-Centauri's 45, 2.0 µs in the tree (4.6 µs in main's list); the limits, one round trip to the state of the process,
-2.1 µs; the output through its shape 1.2 µs; the metrics 0.9 µs; the rest the request's record, the database of a GET
-and std/http's own handling. A signed request adds the session, about 23 µs (three reads of 1.1 µs, the hash and the
-comparison, the user's record); with main's binary the hash and the comparison pass through Cesia's C layer and cost
-10 µs more. A page adds the sealing of its cursor (12 µs, through the same layer) and the shape of its 20 rows.
+std/http asks its page of all the notes; asked as Centauri's handler asks it, the notes of one tenant, it takes 58.0 µs
+[55.0, 91.6]. What Centauri adds to a request went from 38 to 18 µs (public), from 71 to 34 µs (signed in), from 198
+to 92 µs (a page). Each request allocates half as much: 1,557 words of memory where it took 3,172 (public; std/http
+alone 571), 1,975 where it took 5,213 (signed in), 16,618 where it took 25,502 (a page). What changed:
+
+- **One round trip to the state of the process.** The state is a fiber, since no function of Cesia changes a variable of
+  its module; a request asks it once, for its session and all its limits (address, user, tenant, endpoint), where it
+  asked for its limits and read its session apart. The state keeps the sessions it read for `APP_SESSION_CACHE`
+  seconds, 2 by default ([Signing up](sign-up.md#3-sessions) says what that changes, and its tests): a signed-in
+  request reads nothing from the database. Before, reading the session took about 27 µs of a request.
+- **What each endpoint needs, made once at the start**: the function of its output's shape, its page size, its status,
+  the labels of its metric, the headers of security of a JSON answer. A row that fits its shape goes out as it is.
+- **No field added to a copy.** Adding three fields to the request at the door took 171 words, a record made at once
+  takes 20: the door makes the routed request whole, with the two fields that std/http's routes give it.
+- **A cursor seals its row alone**, under a key of the app's for its endpoint and tenant, a third shorter; Cesia's
+  `encode.Base64` writes its digits as numbers and its text by one call: 24 µs for 125 bytes instead of 56.
+
+## Where the time goes now
+
+Each piece taken out of the request in turn, the whole request measured (public, 21.0 µs in that run), and the words of
+memory it allocated:
+
+| piece | µs | words |
+|---|---:|---:|
+| the round trip to the state (session and limits) | 6.3 | 462 |
+| the line of the log the administration keeps | 3.1 | 210 |
+| the metric `centauri_requests_total{route,status}` | 2.1 | 111 |
+| the site of the request (Origin, Sec-Fetch-Site) | 1.7 | 11 |
+| the output through its shape | 1.6 | 26 |
+| the rest: the number of the request, its address, its record for the handler, its role, the routes | about 3 | |
+
+A piece costs a request two or three times what it costs alone in a loop: in a request, the interpreter's code and data
+leave the processor's caches between pieces. A round trip to the state costs two switches of fiber, about 230 words,
+even when the state has nothing to do. A page adds its sealed cursor, about 47 µs: Base64 in Cesia, 24 µs, and the seal
+of libsodium through Cesia's layer of C, 10 µs.
 
 ## Under load
 
-/hello, a JSON of one field, public; 256 kept connections, 4 threads; the servers on 4 threads (two cores), the load
-on the 4 others; 2 s a measure after 1 s of warming (21 rounds main, 11 httpfix; load 4.9 to 6.8):
+/hello, a JSON of one field, public (Spring Boot's /json, the same); 256 kept connections, 4 threads; the servers on 4
+threads (two cores), the load on the 4 others; 2 s a measure after 1 s of warming, the five servers in turn (21 rounds,
+load 3.1 to 8.1); the processor each takes, measured apart over 5 s:
 
-| server | requests/s | p99 | memory |
-|---|---:|---:|---:|
-| std/http, main | 21,665 [14,911, 24,223] | 24.0 ms | 45.4 MB |
-| Centauri, main | 7,954 [6,767, 8,735] | 51.7 ms | 48.7 MB |
-| std/http, httpfix | 26,287 [19,858, 28,891] | 16.2 ms | 42.3 MB |
-| Centauri, httpfix | 10,276 [8,470, 10,800] | 37.1 ms | 47.0 MB |
+| server | requests/s | p99 | memory | processor |
+|---|---:|---:|---:|---:|
+| std/http | 27,928 [19,811, 30,559] | 16.0 ms | 40 MB | 0.9 cores |
+| Centauri before | 10,631 [8,690, 11,429] | 36.0 ms | 45 MB | |
+| Centauri now | 13,444 [11,115, 14,302] | 27.1 ms | 46 MB | 0.95 cores |
+| Go 1.26 net/http | 84,159 [61,723, 95,465] | 13.0 ms | 18 MB | 2.9 cores |
+| Spring Boot 4.0.5 (Tomcat, virtual threads, Java 21) | 60,252 [14,612, 65,816] | 7.3 ms | 509 MB | 3.2 cores |
 
-No request failed. The memory stays flat over a minute of load (43 to 48 MB).
+No request failed. A Cesia server runs on one domain, one core; Go and Spring Boot take three. By core, std/http serves
+as many as Go (32,000 requests a second), Spring Boot 17,000 and Centauri 15,000. Under load Centauri adds 35 µs of
+processor to a request, where it adds 18 in the program: with 256 requests in flight, each keeps its data while it
+waits for the state, and the collector, about an eighth of the server's time in a sampled profile, moves and marks more
+of it.
 
 ## What it says
 
 - Starting stays instant: 7 ms over std/http and Cepheus, against 3.4 s for Spring Boot 4 on this machine (the
-  measure of Centauri's design, the same machine).
-- A request costs Centauri 36 µs (public) to 71 µs (signed in) over std/http with httpfix: within a request that reads
-  a page of Cepheus (55 µs alone), it doubles or so; on a bare JSON it divides the throughput by 2.6. Centauri's own
-  budget was 5 µs: not met. The steps above say where the time goes; the next work is natives for the state of the
-  process (the limits and the log line without a round trip), the headers in one native, and the session's reads
-  folded into one.
-- Nothing else here is compared with the giants: the first app of Centauri will be measured whole, as the invoices of
-  Cepheus's book were, before a claim.
+  measure of Centauri's design).
+- A request costs Centauri 18 µs (public) to 34 µs (signed in) over std/http, half what it cost; Centauri's own budget
+  is 5 µs: not met. What loses, and why: the state is a fiber, and a round trip to it is two switches of fiber, most of
+  its 6 µs; each piece of Centauri's door is interpreted, Cesia's machine code making only the functions whose result
+  is a number; a metric with labels makes its key again at each call.
+- Under load, Centauri serves half of what std/http serves, a sixth of Go and a fifth of Spring Boot; by core, it is
+  near Spring Boot, which takes eleven times its memory. Go and std/http win by having nothing between the route and its
+  answer; Spring Boot by its JIT, which compiles every layer, and by using three cores where Cesia uses one
+  (`cesia run --workers 4` serves a port with four processes, not measured here).
+- What would take it further needs Cesia: a table of the process shared without a fiber, for the limits and the
+  sessions (the round trip, 6 µs of the 18), and `encode.Base64` as a native (a cursor's 24 µs), both in its core, which
+  is at its ceiling of lines.

@@ -18,3 +18,14 @@ The first batch, L1.
   `Isolated`, `Fuzz`, `Surface`.
 - The book: seven chapters, five of them tutorials with Spring Boot beside; `examples/invoices`, Cepheus's invoices
   rewritten on Centauri.
+
+The cost of a request, after L1 (the measures in the book's chapter Speed):
+
+- One round trip to the state of the process a request, for its session and all its limits; each process keeps the
+  sessions it read for `APP_SESSION_CACHE` seconds (2 by default, 0 for none), under the BLAKE2b of their cookie, and a
+  write of a signed-in user through the routes of the accounts forgets them at once; `r.User.Until`, the end of the
+  session unless it is seen again. A request refused by its role now counts in the limits too.
+- The output of each endpoint, its page size, its status and the labels of its metric made once at the start; the
+  headers of security of a JSON answer made once; the request at the door made at once, its log line sent as it is.
+- A cursor seals its row alone, under a key for its endpoint and tenant; a cursor of before still reads.
+- `bench/micro.ce` measures std/http with Centauri's question of a page too.

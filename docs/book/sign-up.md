@@ -57,9 +57,29 @@ which accounts exist (`isUnknownLoginAnsweredAsAWrongPassword`).
 ## 3. Sessions
 
 The cookie is `id.secret`: `id` the session's thing in Cepheus, `secret` 32 random bytes of the kernel. The database
-keeps the BLAKE2b hash of the secret only, so a stolen copy of the database opens no session (`isNoSecretKept`). Each
-request reads the session by its id (0.7 µs, in the program's memory), hashes the secret and compares in constant time:
-no search by the secret's value, which a measure of time could learn.
+keeps the BLAKE2b hash of the secret only, so a stolen copy of the database opens no session (`isNoSecretKept`). A
+request reads the session by its id (in the program's memory), hashes the secret and compares in constant time: no
+search by the secret's value, which a measure of time could learn.
+
+Each process then keeps what it read, for `APP_SESSION_CACHE` seconds (2 by default, up to 60; 0 keeps nothing), in
+the state that also counts its limits: the next requests of that session in those seconds read nothing from the
+database, and their session and all their limits take one round trip to that state ([Speed](speed.md)). What it is
+kept under is the BLAKE2b of the whole cookie: a lookup by it tells nothing of the secret by its time, and a cookie
+made by hand, or a stolen id with another secret, is a cookie never seen, read from the database as before and
+refused (`isForgedCookieNobodyBesideAKeptOne`). A cookie that names nobody is kept as nobody, so a browser that keeps
+sending an ended session costs no read either. How long a change takes to be seen:
+
+| a change | in the process that made it | in the other workers of `--workers`, or written straight to Cepheus |
+|---|---|---|
+| sign-out, sign-out everywhere, a session ended, a new password | at the next request | within `APP_SESSION_CACHE` seconds |
+| a role given or taken, a member out, a user disabled or made super, by the routes of the accounts | at the next request | within `APP_SESSION_CACHE` seconds |
+| the session's own end, idle or in all | exact: what is kept ends with it | exact |
+
+A write of a signed-in user through the routes of the accounts forgets every session its process keeps, so the next
+request of each reads its session again (`isRoleTakenSeenAtOnce`, `isSignedOutForGood`, `isRemovedMemberOut`,
+`isDisabledBySuper`); a write that no route of the accounts made is seen when what was kept ends
+(`isChangeOutsideSeenWithinSessionCache`). Spring Security keeps the roles of a session in the session from its
+sign-in: there, a role taken holds from the user's next sign-in, unless the app ends his sessions itself.
 
 ```text
 Set-Cookie: __Host-sid=65581.9f2c...e41a; Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict; Secure
@@ -73,8 +93,8 @@ Set-Cookie: __Host-sid=65581.9f2c...e41a; Path=/; Max-Age=2592000; HttpOnly; Sam
   nothing after (`isSignedOutForGood`); a user disabled, or taken out of his tenant, is out at his next request.
 - A native app keeps the same `id.secret` in the Keychain or Keystore and sends it in a `Cookie` header: one way.
 
-Every request then has `r.User`: `{Id, Tenant, Member, Session, Roles, Super, Email, Name}`, its roles with every role
-they include.
+Every request then has `r.User`: `{Id, Tenant, Member, Session, Roles, Super, Email, Name, Until}`, its roles with
+every role they include, `Until` the time its session ends unless it is seen again.
 
 ## 4. Tenants, sign-up, invitations
 
@@ -152,4 +172,6 @@ end
 (`isProofOfWorkUnderAttack`), bots (`isBotTrapped`), floods (`isSignUpLimitedByAddressAndTenantsByHour`), a stolen
 session (`isSignedOutForGood`, `isSessionIdleAndOld`, `isForgedCookieNobody`), secrets in the database or the logs
 (`isNoSecretKept`), roles raised (`isNoRaiseOfOwnRoles`), a member out (`isRemovedMemberOut`), a user disabled
-(`isDisabledBySuper`), and the settings of tenancy and sign-up (`isSingleTenant`, `isByInvitationOnly`).
+(`isDisabledBySuper`), what each process keeps of the sessions (`isRoleTakenSeenAtOnce`,
+`isChangeOutsideSeenWithinSessionCache`, `isForgedCookieNobodyBesideAKeptOne`), and the settings of tenancy and sign-up
+(`isSingleTenant`, `isByInvitationOnly`).
