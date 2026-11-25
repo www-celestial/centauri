@@ -258,7 +258,11 @@ defn Run(a)
     log.Warn("no APP_CEPHEUS_URL: the database is in memory, and nothing is kept")
     db = ready("database", cepheus.Fork(cepheus.Empty, a.Kinds))
   else
-    db = ready("connect", cepheus.Connect(s.CepheusUrl, a.Kinds, token = dict.Get("CepheusToken", s), ca = dict.Get("CepheusCa", s)))
+    connected = cepheus.Connect(s.CepheusUrl, a.Kinds, token = dict.Get("CepheusToken", s), ca = dict.Get("CepheusCa", s))
+    if result.IsErr(connected) and not value.IsMissing(Retyped(dict.GetOr("Message", "", connected.Error)))
+      stop([Retyped(connected.Error.Message)])
+    end
+    db = ready("connect", connected)
     if s.GetDb == "read"
       readDb = ready("connect with the token that reads", cepheus.Connect(s.CepheusUrl, a.Kinds, token = s.CepheusReadToken, ca = dict.Get("CepheusCa", s)))
     end
@@ -278,6 +282,10 @@ defn Run(a)
   end
   if value.Len(wrong) > 0
     stop(wrong)
+  end
+  ran = ready("migrations", Migrate(a, env))
+  if value.Len(ran) > 0
+    log.Info("migrations", {Ran: ran})
   end
   for m in a.Modules
     if not value.IsMissing(m.Start)

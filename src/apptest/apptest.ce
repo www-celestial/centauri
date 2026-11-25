@@ -55,6 +55,7 @@ defn Start(a, settings = {}, now = Epoch)
   if value.Len(wrong) > 0
     return result.Err({Kind: "apptest", Message: text.Join("; ", wrong)})
   end
+  app.Migrate(a, env)?
   t = {App: a, Db: db, Env: env, Handle: app.Handler(env)}
   made(t)
 end

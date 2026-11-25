@@ -1,0 +1,182 @@
+(* Migrations: the moves of data a change of the schema needs, named, in order, each run once whatever the processes
+   and servers that start: the first writes its fact, unique by name, and runs it, the others wait for its fact
+   "done"; one that dies leaves it to another once its lease passes. Adding a field or a kind needs none: Connect
+   declares what is missing. What Cepheus's proposal A2 would do (rename a field, change its type, drop it) is not
+   built: Rename, Retype and Drop say so and stop the start, with the way that works without it: add the new field,
+   fill it (Fill), move the readers to it, then stop writing the old one (expand, then contract). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/dict
+use std/fiber
+use std/list
+use std/log
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(** A migration: its name, unique in the app and never reused, and run(env), which gives an Ok, or an Err that stops the
+    start. It runs once, before the app serves, in the order of the modules and of their lists; it should bear being
+    run again (a process that dies in its middle leaves it to the next), as Fill does.
+
+      Migration("2026-11-26 clients get a country", env -> result.Ok(missing)).Name --> "2026-11-26 clients get a country" *)
+Migration(name, run) = {Name: name, Run: run}
+
+defn Fill(kind, field, f, over = "Tenant", batch = 500)
+  (** The run of a migration that gives a new field of a kind to each thing that lacks it, f(thing) its value (the
+      thing's fields as cepheus.Get gives them, and its Id), over a field every thing has; batch things a group, each
+      written only if it still lacks the field (Expect), so that a writer of the new version at the same moment is
+      never overwritten. Run again, it fills what is left.
+
+        Fill(Kind("client", {Tenant: cepheus.Link(), Country: cepheus.Text()}), "Country", c -> "FR") then value.IsFunction() --> true *)
+  env -> filled(kind, field, f, over, batch, env)
+end
+
+defn filled(kind, field, f, over, batch, env)
+  total = 0
+  while true
+    rows = cepheus.Find(3, (x, o, v) -> {Where: [[x, kind[over], o], cepheus.Not([x, kind[field], v])], Give: {Id: x}, Limit: batch}, env.Db)?
+    if value.Len(rows) == 0
+      log.Info("migration: filled", {Kind: dict.GetOr("name", "", kind), Field: field, Things: total})
+      return result.Ok(total)
+    end
+    ops = []
+    for row in rows
+      t = cepheus.Get(kind, row.Id, env.Db)?
+      if not value.IsMissing(t)
+        v = f(dict.Put("Id", row.Id, t))
+        if not value.IsMissing(v)
+          ops = list.Concat(ops, [cepheus.Expect(row.Id, kind[field]), cepheus.Add(row.Id, kind[field], v)])
+        end
+      end
+    end
+    if value.Len(ops) == 0
+      return result.Err({Kind: "migration", Message: "Fill gave no value of $field to the things that lack it."})
+    end
+    done = cepheus.Write(ops, env.Db, why = "migration: fill $(dict.GetOr("name", "", kind))/$field")
+    if result.IsErr(done) and done.Error.Code != "conflict"
+      return done
+    end
+    total += value.Len(rows)
+  end
+end
+
+defn a2(what, how)
+  (** The run of a migration that needs Cepheus's A2: an Err that says so, and the way without it. *)
+  env -> result.Err({Kind: "migration", Message: "$what needs Cepheus's proposal A2 ($how), which is not built. Without it: add the new field beside the old one, fill it (app.Fill), make the app read the new one, then stop writing the old one; the old facts stay in the history."})
+end
+
+(** A field renamed: not possible before Cepheus's A2; the start stops and says how to do without. *)
+Rename(kind, from, to) = Migration("rename $(dict.GetOr("name", "", kind))/$from to $to", a2("Renaming $(dict.GetOr("name", "", kind))/$from to $to", "Rename"))
+
+(** The type of a field changed: not possible before Cepheus's A2; the start stops and says how to do without. *)
+Retype(kind, field, type) = Migration("retype $(dict.GetOr("name", "", kind))/$field", a2("Changing the type of $(dict.GetOr("name", "", kind))/$field", "Migrate"))
+
+(** A field taken away: not possible before Cepheus's A2; the start stops and says how to do without. *)
+Drop(kind, field) = Migration("drop $(dict.GetOr("name", "", kind))/$field", a2("Taking away $(dict.GetOr("name", "", kind))/$field", "Drop"))
+
+(* The seconds a migration's lease lasts, renewed every third of it while it runs. *)
+leaseOf = 60
+
+defn runOf(name, db)
+  (** The run of a migration by its name: an Ok of {Id, State, Lease, Error}, or of missing. *)
+  rows = cepheus.Find(1, m -> {Where: [[m, MigrationRun.Name, name]], Give: {Id: m}}, db)?
+  if value.Len(rows) == 0
+    return result.Ok(missing)
+  end
+  m = cepheus.Get(MigrationRun, rows[1].Id, db)?
+  result.Ok(dict.Put("Id", rows[1].Id, m))
+end
+
+defn takenRun(mi, env)
+  (** Takes a migration to run it: an Ok of {Id, Lease} when this process runs it, of "done" when it is done, of
+      "wait" when another runs it. *)
+  now = env.Now()
+  r = runOf(mi.Name, env.Db)?
+  if value.IsMissing(r)
+    made = cepheus.Write(Facts(MigrationRun, cepheus.New(1), {Name: mi.Name, State: "running", Started: now, Lease: now + leaseOf}), env.Db, why = "migration $(mi.Name)")
+    if result.IsOk(made)
+      return result.Ok({Id: made.Value.Things[1], Lease: now + leaseOf})
+    end
+    return if made.Error.Code == "unique" result.Ok("wait") else made end
+  end
+  if r.State == "done"
+    return result.Ok("done")
+  end
+  if r.State == "running" and dict.GetOr("Lease", 0, r) > now
+    return result.Ok("wait")
+  end
+  took = cepheus.Write([cepheus.Expect(r.Id, MigrationRun.State, r.State), cepheus.Expect(r.Id, MigrationRun.Lease, dict.Get("Lease", r)),
+    cepheus.Add(r.Id, MigrationRun.State, "running"), cepheus.Add(r.Id, MigrationRun.Lease, now + leaseOf), cepheus.Add(r.Id, MigrationRun.Started, now)], env.Db,
+    why = "migration $(mi.Name) taken again")
+  if result.IsOk(took) result.Ok({Id: r.Id, Lease: now + leaseOf}) else result.Ok("wait") end
+end
+
+defn runOne(mi, t, env)
+  (** Runs a migration this process took, its lease renewed while it runs: an Ok, or the Err that stops the start. *)
+  task = fiber.Spawn(() -> mi.Run(env))
+  lease = t.Lease
+  outcome = missing
+  while value.IsMissing(outcome)
+    w = fiber.Wait(task, timeout = leaseOf / 3)
+    if result.IsOk(w)
+      outcome = if result.IsErr(w.Value) w.Value else result.Ok(missing) end
+    else if w.Error.Kind == "timeout"
+      longer = env.Now() + leaseOf
+      if result.IsOk(cepheus.Write([cepheus.Expect(t.Id, MigrationRun.Lease, lease), cepheus.Add(t.Id, MigrationRun.Lease, longer)], env.Db, why = "migration lease"))
+        lease = longer
+      end
+    else
+      outcome = result.Err({Kind: "migration", Message: "It stopped: $(dict.GetOr("Message", value.Text(w.Error), w.Error))"})
+    end
+  end
+  now = env.Now()
+  if result.IsOk(outcome)
+    cepheus.Write([cepheus.Expect(t.Id, MigrationRun.Lease, lease), cepheus.Add(t.Id, MigrationRun.State, "done"), cepheus.Add(t.Id, MigrationRun.Ended, now)], env.Db,
+      why = "migration $(mi.Name) done")?
+    log.Info("migration done", {Name: mi.Name})
+    return result.Ok(missing)
+  end
+  message = dict.GetOr("Message", value.Text(outcome.Error), if value.IsDict(outcome.Error) outcome.Error else {} end)
+  _ = cepheus.Write([cepheus.Add(t.Id, MigrationRun.State, "failed"), cepheus.Add(t.Id, MigrationRun.Error, text.ByteSlice(1, list.Min([2000, text.ByteLength(message)]), message)),
+    cepheus.Add(t.Id, MigrationRun.Ended, now)], env.Db, why = "migration $(mi.Name) failed")
+  result.Err({Kind: "migration", Message: "The migration $(mi.Name) failed: $message"})
+end
+
+defn Migrate(a, env, wait = 0.2, most = 3600)
+  (** Runs the migrations of the app's modules that are not done, in order, each once across the processes: an Ok of
+      the names this process ran, or the Err of the first that failed. A process that finds one running elsewhere waits
+      for it, at most most seconds. *)
+  ran = []
+  for m in a.Modules
+    for mi in dict.GetOr("Migrations", [], m)
+      started = sys.Now()
+      while true
+        t = takenRun(mi, env)?
+        if t == "done"
+          break
+        end
+        if t == "wait"
+          if sys.Now() - started > most
+            return result.Err({Kind: "migration", Message: "The migration $(mi.Name) runs elsewhere for more than $most seconds."})
+          end
+          sys.Sleep(wait)
+        else
+          runOne(mi, t, env)?
+          ran = list.Append(mi.Name, ran)
+          break
+        end
+      end
+    end
+  end
+  result.Ok(ran)
+end
+
+defn Retyped(message)
+  (** The words of a start whose kinds changed the type of a field that Cepheus has, or missing for any other error.
+
+        value.IsMissing(Retyped("unreachable")) --> true *)
+  if not value.IsText(message) or not text.Contains("declared already as another kind of property", message)
+    return missing
+  end
+  "$message: a field changed its type (or became unique or many). That needs Cepheus's proposal A2, which is not built. Without it: keep the field as it was, add a new one of the new type, fill it with a migration (app.Fill), make the app read the new one, then stop writing the old one."
+end

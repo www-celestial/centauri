@@ -1,0 +1,100 @@
+(** Migrations: each once, whatever the processes that start at the same moment; a fill that never overwrites a value
+    written meanwhile, and runs again over what is left; one that fails stops the start and runs again at the next;
+    one whose process died is taken again once its lease passed; and what needs Cepheus's A2 (a rename, a type
+    changed, a field taken away) refused with the way to do without it. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/dict
+use std/fiber
+use std/list
+use std/result
+use std/text
+use std/value
+
+Client = app.Kind("client", {Tenant: cepheus.Link(), Name: cepheus.Text(), Country: cepheus.Text(), Runs: cepheus.Int()})
+Counter = app.Kind("runs", {Key: cepheus.Text(unique = true), Count: cepheus.Int()})
+
+defn counted(env)
+  (** A migration that counts its runs, in a fact, and waits a little, as a long one. *)
+  rows = cepheus.Find(1, c -> {Where: [[c, Counter.Key, "runs"]], Give: {C: c}}, env.Db)?
+  if value.Len(rows) == 0
+    cepheus.Insert(Counter, {Key: "runs", Count: 1}, env.Db)?
+  else
+    cepheus.Write([cepheus.Incr(rows[1].C, Counter.Count)], env.Db)?
+  end
+  result.Ok(missing)
+end
+
+Once = app.Migration("2026-11-26 count", counted)
+Country = app.Migration("2026-11-26 clients get a country", app.Fill(Client, "Country", c -> if text.StartsWith("Ada", c.Name) "GB" else "FR" end, batch = 2))
+App = app.Of([auth.Module(), app.Module("clients", kinds = [Client, Counter], migrations = [Once, Country])], name = "clients")
+
+defn envOf(db)
+  s = app.Read(App.Fields, {Profile: "test", Origin: "http://app.test", Pow: "off"}, defaults = App.Defaults)!
+  app.Start(App, s, db)!
+end
+
+runs(db) = cepheus.Find(2, (c, n) -> {Where: [[c, Counter.Key, "runs"], [c, Counter.Count, n]], Give: {N: n}}, db)!   (* The runs counted. *)
+
+defn isOnceAcrossProcesses()
+  (** Four processes start at once on one database: the migration runs once, and all of them go on. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)?
+  tasks = [fiber.Spawn(() -> app.Migrate(App, envOf(db), wait = 0.01)) for k in 1..4]
+  outcomes = [fiber.Wait(t).Value for t in tasks]
+  bug.Assert(list.All([result.IsOk(o) for o in outcomes]), "every start goes on: $outcomes")
+  bug.Assert(value.Len(list.Flatten([o.Value for o in outcomes])) == 2, "two migrations, each run by one: $outcomes")
+  again = app.Migrate(App, envOf(db))?
+  value.Equal(runs(db), [{N: 1}]) and value.Len(again) == 0
+end
+
+defn isFilledWithoutOverwriting()
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)?
+  t = cepheus.Insert(auth.Tenant, {Name: "t", Search: "t", Created: 0}, db)?
+  for n in ["Ada", "Bo", "Cy", "Di", "Ed"]
+    cepheus.Insert(Client, {Tenant: t, Name: n}, db)?
+  end
+  given = cepheus.Insert(Client, {Tenant: t, Name: "Fay", Country: "IT"}, db)?
+  app.Migrate(App, envOf(db))?
+  rows = cepheus.Find(3, (c, n, k) -> {Where: [[c, Client.Name, n], [c, Client.Country, k]], Give: {N: n, K: k}, Sort: [n]}, db)?
+  value.Equal([r.K for r in rows], ["GB", "FR", "FR", "FR", "FR", "IT"])
+end
+
+Broken = app.Migration("2026-11-26 broken", env -> result.Err({Kind: "test", Message: "the disk is full"}))
+Mended = app.Migration("2026-11-26 broken", env -> result.Ok(missing))
+
+defn isFailedThenRunAgain()
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)?
+  bad = app.Of([auth.Module(), app.Module("clients", kinds = [Client, Counter], migrations = [Broken])], name = "clients")
+  s = app.Read(bad.Fields, {Profile: "test", Origin: "http://app.test", Pow: "off"}, defaults = bad.Defaults)!
+  failed = app.Migrate(bad, app.Start(bad, s, db)!)
+  bug.Assert(result.IsErr(failed) and text.Contains("the disk is full", failed.Error.Message), "the start stops: $failed")
+  good = app.Of([auth.Module(), app.Module("clients", kinds = [Client, Counter], migrations = [Mended])], name = "clients")
+  value.Equal(app.Migrate(good, app.Start(good, s, db)!)?, ["2026-11-26 broken"])
+end
+
+defn isTakenAgainAfterItsLease()
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)?
+  env = envOf(db)
+  cepheus.Insert(app.MigrationRun, {Name: Once.Name, State: "running", Started: env.Now() - 100, Lease: env.Now() - 1}, db)?
+  ran = app.Migrate(App, env)?
+  "2026-11-26 count" in ran
+end
+
+defn isWhatNeedsA2Refused()
+  renamed = app.Of([auth.Module(), app.Module("clients", kinds = [Client], migrations = [app.Rename(Client, "Name", "FullName")])], name = "clients")
+  got = apptest.Start(renamed)
+  bug.Assert(result.IsErr(got) and text.Contains("A2", got.Error.Message) and text.Contains("app.Fill", got.Error.Message), "a rename: $got")
+  db = cepheus.Fork(cepheus.Empty, [Client])?
+  retyped = cepheus.Fork(db, [app.Kind("client", {Tenant: cepheus.Link(), Name: cepheus.Int()})])
+  bug.Assert(result.IsErr(retyped), "Cepheus refuses a type changed")
+  words = app.Retyped(retyped.Error.Message)
+  not value.IsMissing(words) and text.Contains("A2", words) and result.IsErr(apptest.Start(app.Of([auth.Module(), app.Module("c", migrations = [app.Drop(Client, "Name")])])))
+end
+
+defn isRunByApptest()
+  t = apptest.Start(App)?
+  value.Equal(runs(t.Db), [{N: 1}])
+end
