@@ -77,7 +77,7 @@ defn Who(req, env)
     if value.IsMissing(m) or value.IsMissing(m.Tenant)
       return result.Ok(missing)
     end
-    roles = app.Expand(m.Roles, env.Roles)
+    roles = app.RolesOf(m.Roles, env)
   end
   if now - s.Seen > 300
     fiber.Spawn(() -> cepheus.Write([cepheus.Expect(p.Id, Session.Seen, s.Seen), cepheus.Add(p.Id, Session.Seen, now)], env.Db, by = s.User, why = "session seen"))

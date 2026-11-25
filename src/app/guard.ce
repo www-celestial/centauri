@@ -59,24 +59,25 @@ end
 (** Does a request change something: any method but GET, HEAD and OPTIONS, or the opening of a WebSocket. *)
 Changes(request) = not (request.Method in ["GET", "HEAD", "OPTIONS"]) or value.IsText(http.HeaderValue("upgrade", request.Headers))
 
-defn Secure(response, csp, https)
-  (** A response with the headers of security that it lacks: its Content-Security-Policy (the setting Csp: no script
-      but the app's own and its WebAssembly, no framing), no sniffing of types, no referrer to other sites, its own
-      window (COOP) and resources (CORP), no cache of an answer of the API, and over https, https only for two years
-      (HSTS). *)
+(** The headers of security, in the order they are added: its Content-Security-Policy (the setting Csp: no script but
+    the app's own and its WebAssembly, no framing), no sniffing of types, no referrer to other sites, its own window
+    (COOP) and resources (CORP), no cache of an answer of the API, and over https, https only for two years (HSTS).
+
+      value.Len(Guards("default-src 'self'", false)) --> 7 *)
+defn Guards(csp, https)
+  out = [{Name: "content-security-policy", Value: csp}, {Name: "x-content-type-options", Value: "nosniff"},
+    {Name: "referrer-policy", Value: "same-origin"}, {Name: "cross-origin-opener-policy", Value: "same-origin"},
+    {Name: "cross-origin-resource-policy", Value: "same-origin"}, {Name: "x-frame-options", Value: "DENY"},
+    {Name: "cache-control", Value: "no-store"}]
+  if https list.Append({Name: "strict-transport-security", Value: "max-age=63072000; includeSubDomains"}, out) else out end
+end
+
+defn Secure(response, guards)
+  (** A response with the headers of security (Guards) that it lacks, added in one copy of its headers. *)
   headers = dict.GetOr("Headers", [], response)
-  has(name) = not value.IsMissing(http.HeaderValue(name, headers))
+  names = [h.Name for h in headers]
   out = response
-  for h in [["content-security-policy", csp], ["x-content-type-options", "nosniff"], ["referrer-policy", "same-origin"],
-            ["cross-origin-opener-policy", "same-origin"], ["cross-origin-resource-policy", "same-origin"], ["x-frame-options", "DENY"],
-            ["cache-control", "no-store"]]
-    if not has(h[1])
-      out = http.WithHeader(h[1], h[2], out)
-    end
-  end
-  if https and not has("strict-transport-security")
-    out = http.WithHeader("strict-transport-security", "max-age=63072000; includeSubDomains", out)
-  end
+  out.Headers = list.Concat(headers, [g for g in guards if not (g.Name in names)])
   out
 end
 

@@ -2,16 +2,17 @@
 # bench/run.sh micro|startup|load [ROUNDS]: Centauri's measures, under the heavy lock, one JSON line a measure in
 # $OUT (~/.cache/centauri-bench/results.jsonl). CESIA, CESIA_STD: the binary and the std/ to measure with.
 #   micro: the cost of a request in the program (bench/micro.ce), Centauri beside std/http alone.
-#   startup: from the command to the first 200, then the memory at rest (spike/tools/probe), Centauri and std/http
+#   startup: from the command to the first 200, then the memory at rest ($PROBE), Centauri and std/http
 #            alternated.
-#   load: http_load, 256 kept connections, 4 threads, 2 s a measure, on /hello, std/http then Centauri, alternated;
+#   load: http_load, 256 kept connections, 4 threads, 2 s a measure, on /hello, std/http then Centauri, alternated
+#         (the limit of an address raised: the load comes from one);
 #         servers on cores 0,1,4,5, the client on 2,3,6,7.
 set -u
 cd "$(dirname "$0")/.."
 B=${CESIA:-cesia}
 OUT=${OUT:-$HOME/.cache/centauri-bench/results.jsonl}
-P=/home/visual/Projects/www-celestial/.superpowers/back/spike/tools/probe/probe
-L=/home/visual/Projects/www-celestial/cesia/_build/default/bench/http_load.exe
+P=${PROBE:?PROBE: a program "probe PORT PATH cmd..." that prints the ms to the first 200 and the RSS in KB}
+L=${HTTP_LOAD:?HTTP_LOAD: the http_load of Cesia (bench/http_load.exe)}
 mkdir -p "$(dirname "$OUT")"
 rounds=${2:-21}
 tag=${TAG:-$(basename "$B")}
@@ -35,7 +36,7 @@ startup)
 load)
   ulimit -n 100000
   (PORT=18193 exec setsid taskset -c 0,1,4,5 $B run --allow native=cepheus,ffi=sodium,env,net=:18193 bench/plain.ce > /dev/null 2>&1) & p1=$!
-  (APP_PORT=18194 APP_LOG_REQUESTS=false exec setsid taskset -c 0,1,4,5 $B run --allow native=cepheus,ffi=sodium,env,net=:18194 bench/serve.ce > /dev/null 2>&1) & p2=$!
+  (APP_PORT=18194 APP_LOG_REQUESTS=false APP_LIMIT_IP=1000000 exec setsid taskset -c 0,1,4,5 $B run --allow native=cepheus,ffi=sodium,env,net=:18194 bench/serve.ce > /dev/null 2>&1) & p2=$!
   trap 'kill -TERM -- -$p1 -$p2 2>/dev/null' EXIT
   sleep 2
   for r in $(seq "$rounds"); do
@@ -44,7 +45,7 @@ load)
       name=$([ $port = 18193 ] && echo plain || echo centauri)
       taskset -c 2,3,6,7 $L --port $port --connections 256 --threads 4 --seconds 1 --path /hello > /dev/null 2>&1
       got=$(taskset -c 2,3,6,7 $L --port $port --connections 256 --threads 4 --seconds 2 --path /hello 2>&1 | tr '\n' ' ')
-      rss=$(/home/visual/Projects/www-celestial/.superpowers/back/spike/tools/rss.sh $([ $port = 18193 ] && echo $p1 || echo $p2))
+      rss=$(${RSS:?RSS: a program "rss PID" that prints the RSS of a tree in KB} $([ $port = 18193 ] && echo $p1 || echo $p2))
       note load "\"Server\":\"$name\",\"Round\":$r,\"RssKb\":$rss,\"Out\":\"$(echo "$got" | tr -d '"')\""
     done
   done

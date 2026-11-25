@@ -72,23 +72,22 @@ defn front(base, req, env)
       noted(env, "origin", "ip:$ip", "A request that changes something came from another site.", missing, missing, ip, req.Method)
       out = refuse(403, "This request comes from another site than the app's.", rid, env)
     else
-      allowed = Allow([Limit("ip:$ip", s.LimitIp, 60, list.Max([1, math.Floor(s.LimitIp / 4)]))], env.State)
-      if not allowed.Ok
-        metrics.Add("centauri_refused_total", labels = {reason: "limit"})
-        noted(env, "limited", allowed.Key, "Too many requests from this address.", missing, missing, ip, req.Method)
-        out = refuse(429, "Too many requests: wait $(allowed.Retry) seconds.", rid, env, retry = allowed.Retry)
-      else
-        req.Id = rid
-        req.Ip = ip
-        req.Site = site
-        out = base(req)
-      end
+      req.Id = rid
+      req.Ip = ip
+      req.Site = site
+      out = base(req)
     end
   end
-  if not dict.Has("Done", out) and out.Status >= 400
-    out = refuse(out.Status, if out.Status == 404 "There is no such address." else http.Reason(out.Status) end, rid, env)
+  if not dict.Has("Done", out)
+    (* no route took it, so the limit of its address is counted here; a route counts it with the user's *)
+    refused = limited([ipLimit(ip, s)], env, ip, req.Method, missing, rid)
+    if not value.IsMissing(refused)
+      out = refused
+    else if out.Status >= 400
+      out = refuse(out.Status, if out.Status == 404 "There is no such address." else http.Reason(out.Status) end, rid, env)
+    end
   end
-  out = Shared(Secure(out, s.Csp, env.Https), req, env.Cors)
+  out = Shared(Secure(out, env.Guards), req, env.Cors)
   ms = math.Round((sys.Now() - start) * 1000000) / 1000
   line = {Id: rid, Method: req.Method, Route: dict.GetOr("Route", req.Path, out), Status: out.Status, Ms: ms, Ip: ip}
   if dict.Has("User", out)
@@ -104,6 +103,20 @@ defn front(base, req, env)
   end
   Keep({At: start, Level: level, Message: "request", Fields: line}, env.State)
   out
+end
+
+ipLimit(ip, s) = Limit("ip:$ip", s.LimitIp, 60, list.Max([1, math.Floor(s.LimitIp / 4)]))   (* The limit of an address. *)
+
+defn limited(limits, env, ip, route, user, rid)
+  (** The 429 of the first of these limits that refuses a request, or missing when all of them let it pass: one round
+      trip to the state for all of them. *)
+  allowed = Allow(limits, env.State)
+  if allowed.Ok
+    return missing
+  end
+  metrics.Add("centauri_refused_total", labels = {reason: "limit"})
+  noted(env, "limited", allowed.Key, "Too many requests.", if value.IsMissing(user) missing else user.Id end, tenantOf(user), ip, route)
+  refuse(429, "Too many requests: wait $(allowed.Retry) seconds.", rid, env, retry = allowed.Retry)
 end
 
 defn readiness(env)
@@ -237,9 +250,9 @@ defn served(b, e, req, env, rid)
     return refuse(status, if status == 401 "Sign in first." else "This is for the role $(e.Role)." end, rid, env)
   end
   s = env.Settings
-  limits = []
+  limits = [ipLimit(req.Ip, s)]
   if not value.IsMissing(user)
-    limits = [Limit("u:$(user.Id)", s.LimitUser, 60, list.Max([1, math.Floor(s.LimitUser / 4)]))]
+    limits = list.Append(Limit("u:$(user.Id)", s.LimitUser, 60, list.Max([1, math.Floor(s.LimitUser / 4)])), limits)
     if not value.IsMissing(dict.Get("Tenant", user))
       limits = list.Append(Limit("t:$(user.Tenant)", s.LimitTenant, 60, list.Max([1, math.Floor(s.LimitTenant / 4)])), limits)
     end
@@ -247,13 +260,9 @@ defn served(b, e, req, env, rid)
   if not value.IsMissing(e.Limit)
     limits = list.Append(Limit("e:$(e.Name) $(if value.IsMissing(user) req.Ip else user.Id end)", e.Limit, 60, e.Limit), limits)
   end
-  if value.Len(limits) > 0
-    allowed = Allow(limits, env.State)
-    if not allowed.Ok
-      metrics.Add("centauri_refused_total", labels = {reason: "limit"})
-      noted(env, "limited", allowed.Key, "Too many requests to $(e.Name).", if value.IsMissing(user) missing else user.Id end, tenantOf(user), req.Ip, e.Name)
-      return refuse(429, "Too many requests: wait $(allowed.Retry) seconds.", rid, env, retry = allowed.Retry)
-    end
+  refused = limited(limits, env, req.Ip, e.Name, user, rid)
+  if not value.IsMissing(refused)
+    return refused
   end
   x = input(e, req)
   if result.IsErr(x)

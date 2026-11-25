@@ -1,0 +1,55 @@
+(** Where Centauri's time goes in a request: each step of its door and of its route, alone, the mean of n calls, as
+    JSON lines: cesia run --allow native=cepheus,ffi=sodium,env bench/parts.ce [N] *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/check
+use std/crypto
+use std/dict
+use std/http
+use std/io
+use std/json
+use std/metrics
+use std/result
+use std/sys
+use std/text
+use std/value
+
+args = sys.Args
+n = if value.Len(args) >= 1 text.Number(args[1]) else 5000 end
+
+Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = api.Public)
+a = app.Of([auth.Module(), app.Module("hello", serve = [app.Serve(Hello, r -> {Text: "Hello"})])])
+t = result.Unwrap(apptest.Start(a, settings = {Profile: "prod", Origin: "https://notes.example", Secret: text.Repeat(40, "s"), CepheusUrl: "cepheus://none", LogRequests: false}))
+ana = result.Unwrap(t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}))
+env = t.Env
+req = {Method: "GET", Path: "/hello", Query: "", Headers: [{Name: "host", Value: "notes.example"}, {Name: "cookie", Value: ana.Cookie}], Body: "", Peer: "203.0.113.7"}
+plainResponse = http.Json({Text: "Hello"})
+keys = env.Keys
+
+defn time(name, f)
+  start = sys.Now()
+  for k in 1..n
+    f()
+  end
+  io.Print(json.Text({Name: name, Us: (sys.Now() - start) / n * 1000000}))
+end
+
+time("the whole request, signed in", () -> t.Handle(req))
+time("the whole request, anonymous", () -> t.Handle({Method: "GET", Path: "/hello", Query: "", Headers: [{Name: "host", Value: "notes.example"}], Body: "", Peer: "203.0.113.7"}))
+time("state: Allow, one limit", () -> app.Allow([app.Limit("ip:203.0.113.7", 1000000, 60, 250000)], env.State))
+time("state: Keep a line", () -> app.Keep({At: 1, Level: "info", Message: "request", Fields: {Id: "x"}}, env.State))
+time("metrics.Add with labels", () -> metrics.Add("centauri_requests_total", labels = {route: "GET /hello", status: 200}))
+time("guard: Client, Site, Preflight", () -> [app.Client(req), app.Site(req, "https://notes.example", []), app.Preflight(req, [])])
+time("guard: Secure", () -> app.Secure(plainResponse, env.Guards))
+time("auth: Who (session)", () -> auth.Who(dict.Put("Cookies", {"__Host-sid": text.Split("=", ana.Cookie)[2]}, req), env))
+time("crypto.Blake2b of 64 bytes", () -> crypto.Blake2b(text.Repeat(64, "a"), keys))
+time("crypto.IsSame of 64 bytes", () -> crypto.IsSame(text.Repeat(64, "a"), text.Repeat(64, "b"), keys))
+time("crypto.Seal of 100 bytes", () -> crypto.Seal(text.Repeat(100, "a"), env.Key, keys))
+time("cepheus.Get", () -> cepheus.Get(auth.User, ana.User, t.Db))
+time("check.Out of a record", () -> check.Out(Hello.Out, {Text: "Hello"}))
+time("http.Json", () -> http.Json({Text: "Hello"}))
+time("a record of 26 fields", () -> {Method: 1, Path: 2, Params: 3, Query: 4, Headers: 5, Cookies: 6, Body: 7, Ip: 8, Id: 9, Route: 10, User: 11, Db: 12, Why: 13,
+  Settings: 14, Now: 15, Keys: 16, Limit: 17, After: 18, Env: 19})

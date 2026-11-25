@@ -13,6 +13,7 @@ take = ["cesia/cepheus"]
 # passwords and makes the secrets of the sessions.
 [test]
 allow = ["native=cepheus", "ffi=sodium", "read=.cesia", "write=.cesia"]
+skip = ["examples", "bench"]
 timeout = "60"
 
 # cesia doc --site: the site of Centauri, its book and the reference of its packages.

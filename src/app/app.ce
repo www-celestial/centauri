@@ -71,6 +71,15 @@ defn Expand(roles, table)
   out
 end
 
+defn RolesOf(roles, env)
+  (** Roles with every role they include, as Expand gives them, from the table that Start expanded once: what each
+      request does with the roles of its member. *)
+  if value.Len(roles) == 1
+    return dict.GetOr(roles[1], roles, env.Expanded)
+  end
+  list.Unique(list.Flatten([dict.GetOr(r, [r], env.Expanded) for r in roles]))
+end
+
 defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name = "app", version = "0.1.0", pages = missing)
   (** An app: its modules, in order, then its own settings (a check.Record, or a map of names to shapes), its roles,
       the defaults of its settings (values of their types, which the environment overrides: an app that is single-
@@ -120,7 +129,8 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
   env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles,
     Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
-    Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-",
+    Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: Guards(s.Csp, text.StartsWith("https://", s.Origin)),
+    Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
     Now: if value.IsMissing(clock) (() -> sys.Now()) else (() -> Now(state)) end,
     OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version))}
   result.Ok(env)
