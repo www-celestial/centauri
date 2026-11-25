@@ -1,0 +1,153 @@
+(** What the pieces of L2 cost, in this program: a background job (written in a group, taken, run, finished), a mail
+    made, a file stored by parts and read back, a webhook signed, a request with an Idempotency-Key against one
+    without, the check of an address, the next slot of a schedule, a change of the database seen by a live page.
+    Each measure is the mean of n calls, in rounds whose order turns; one JSON line a measure:
+    cesia run --allow native=cepheus,ffi=sodium,env,net=own,read=/usr/share/zoneinfo bench/month.ce [ROUNDS] [N] *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/hooks
+use src/jobs
+use src/mail
+use std/check
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/math
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket as ws
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+Add = api.Post("/notes", body = check.Record({Text: check.Text(1, 200)}), out = NoteOut, role = "member")
+Mine = api.Live("notes.mine", role = "member")
+Files = app.Files("doc")
+Count = jobs.Kind("count", check.Record({Note: check.Id()}), (job, env) -> result.Ok(missing))
+
+defn add(r, x)
+  id = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  {Id: id, Text: x.Text}
+end
+
+mine(s, args) = cepheus.Watch(2, (n, t) -> {Where: [[n, Note.Tenant, s.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}}, s.Db, until = s.Ended)
+App = app.Of([auth.Module(), app.Module("notes", kinds = [Note, Files], jobs = [Count], serve = [app.Serve(Add, add), app.Live(Mine, mine)])])
+
+args = sys.Args
+rounds = if value.Len(args) >= 1 text.Number(args[1]) else 21 end
+n = if value.Len(args) >= 2 text.Number(args[2]) else 500 end
+
+t = apptest.Start(App, settings = {LogRequests: false, LimitIp: 1000000, LimitUser: 1000000, LimitTenant: 10000000, UploadPart: 1048576})!
+ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})!
+note = ana.Call(Add, {Text: "a note"})!.Id
+kinds = dict.Dict([{Key: k.Name, Value: k} for k in App.Jobs])
+r = {User: {Id: ana.User, Tenant: ana.Tenant}, Db: t.Db, Env: t.Env, Settings: t.Env.Settings, Why: "bench", Now: t.Env.Now(), Keys: t.Env.Keys}
+megabytes = text.Repeat(10485760, "x")
+
+defn job()
+  (** A job written in a group with a fact, then taken, run and finished. *)
+  made = cepheus.Write(list.Concat([cepheus.Add(note, Note.Text, "a note")], jobs.Later(Count, {Note: note})), t.Db)!
+  jobs.RunOne(made.Things[1], kinds, t.Env, beat = false)!
+end
+
+made() = mail.Message({To: ["bo@example.com"], Subject: "Unpaid invoices: 3", Text: text.Repeat(20, "Three invoices are not paid, 1,280.50 in all.\n")}, "Invoices <no-reply@invoices.example>", 1794528000, "a1b2c3")
+signed() = hooks.Sign("msg_p5jXN8AQM9LWM0D4loKWxJek", 1614265330, "{\"type\":\"invoice.paid\",\"data\":{\"Invoice\":65540,\"Total\":1280.5}}", "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", keys = t.Env.Keys)
+private() = app.Private("2606:4700::6810:84e5") or app.Private("93.184.215.14")
+paris = jobs.Zone("Europe/Paris")!
+daily = jobs.Cron("0 6 * * *")!
+slot() = jobs.Next(daily, 1794528000, paris)!
+
+defn stored()
+  (** 10 MiB stored by parts of 1 MiB, from pieces of 64 KiB as a body comes. *)
+  ch = fiber.Channel()
+  for k in 1..160
+    fiber.Send(result.Ok(text.ByteSlice(1, 65536, megabytes)), ch)
+  end
+  fiber.Close(ch)
+  file = {Name: "big.bin", Type: "application/octet-stream", Size: 10485760, Read: () -> pieceOf(ch)}
+  app.Store(Files, file, r)!
+end
+
+defn pieceOf(ch)
+  got = fiber.Receive(ch, timeout = 0)
+  if result.IsOk(got) got.Value else result.Ok("") end
+end
+
+plainPost = {Method: "POST", Path: "/notes", Query: "", Headers: [{Name: "host", Value: "app.test"}, {Name: "cookie", Value: ana.Cookie}, {Name: "content-type", Value: "application/json"}],
+  Body: "{\"Text\": \"milk\"}", Peer: "203.0.113.7"}
+post() = t.Handle(plainPost)
+keyed(k) = t.Handle(dict.Put("Headers", list.Append({Name: "idempotency-key", Value: "k$k"}, plainPost.Headers), plainPost))
+
+cases = [{Name: "job written, taken, run, finished (fork)", F: job, N: n}, {Name: "mail made (1 KB of text)", F: made, N: n},
+  {Name: "webhook signed", F: signed, N: n * 4}, {Name: "address checked (SSRF)", F: private, N: n * 4}, {Name: "next slot of cron in Paris", F: slot, N: n},
+  {Name: "POST without Idempotency-Key", F: post, N: n}]
+
+l = net.Listen(0)!
+port = net.Port(l)
+served = app.Read(App.Fields, {Profile: "test", Origin: "http://localhost:$port", Pow: "off", LogRequests: false, SessionCache: 0}, defaults = App.Defaults)!
+live = app.Start(App, served, t.Db, clock = t.Env.Now())!
+fiber.Spawn(() -> http.Serve(app.App(live), listener = l, timeout = 30))
+screen = ws.Dial("ws://localhost:$port/live?shows=$(encode.UrlEncode(json.Text([{Show: "notes.mine", Args: {}}])))", headers = [{Name: "origin", Value: "http://localhost:$port"},
+  {Name: "cookie", Value: ana.Cookie}])!
+_ = ws.Send(json.Text({Hello: 1}), screen)
+_ = fiber.Receive(screen.Messages, timeout = 5)
+
+defn seen()
+  (** The milliseconds from a write to its change on the live page, the frames before it read first. *)
+  while result.IsOk(fiber.Receive(screen.Messages, timeout = 0))
+  end
+  start = sys.Now()
+  cepheus.Insert(Note, {Tenant: ana.Tenant, Text: "live $(start)"}, t.Db)!
+  _ = fiber.Receive(screen.Messages, timeout = 5)
+  (sys.Now() - start) * 1000
+end
+
+for round in 1..rounds
+  turn = math.Mod(round, value.Len(cases))
+  order = list.Concat(list.Skip(turn, cases), list.Take(turn, cases))
+  for c in order
+    start = sys.Now()
+    for i in 1..c.N
+      _ = c.F()
+    end
+    io.Print(json.Text({Case: c.Name, Us: (sys.Now() - start) / c.N * 1000000, Round: round}))
+  end
+  start = sys.Now()
+  for i in 1..n
+    _ = keyed(round * 1000000 + i)
+  end
+  io.Print(json.Text({Case: "POST with a new Idempotency-Key", Us: (sys.Now() - start) / n * 1000000, Round: round}))
+  start = sys.Now()
+  for i in 1..n
+    _ = keyed(round * 1000000 + i)
+  end
+  io.Print(json.Text({Case: "POST with a key seen (its answer given again)", Us: (sys.Now() - start) / n * 1000000, Round: round}))
+  start = sys.Now()
+  f = stored()
+  io.Print(json.Text({Case: "10 MiB stored by parts (fork), MB/s", Us: 10.48576 / (sys.Now() - start), Round: round}))
+  start = sys.Now()
+  io.Print(json.Text({Case: "10 MiB read back by parts (fork), MB/s", Us: 10.48576 / list.Max([1e-9, readBack(f) - start]), Round: round}))
+  delays = list.Sort([seen() for i in 1..20])
+  io.Print(json.Text({Case: "a write seen by a live page, ms (median of 20)", Us: delays[10], Round: round}))
+end
+
+defn readBack(f)
+  (** Reads a file back as a download would, part by part: the time it ended. *)
+  got = app.Download(Files, f, dict.Put("Headers", [], r))!
+  box = fiber.Channel()
+  _ = fiber.Wait(fiber.Spawn(() -> got.Response.Stream(p -> keep(p, box))))
+  sys.Now()
+end
+
+defn keep(p, box)
+  result.Ok(missing)
+end
