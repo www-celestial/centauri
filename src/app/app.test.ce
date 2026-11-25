@@ -187,6 +187,30 @@ defn isLimited()
   value.Equal(door, [200, 200, 200]) and value.IsText(header("retry-after", rest[8]))
 end
 
+defn isFloodOfKeysPrunedWithRoom()
+  (* past its most keys, the state keeps three quarters of them, the latest: the third key passes again, a recent
+     one is still refused, and the next keys come without a pruning at each *)
+  st = State(keys = 8, clock = 1794528000)?
+  for k in 1..9
+    Allow([Limit("k$k", 1, 3600, 1)], st)
+  end
+  old = Allow([Limit("k3", 1, 3600, 1)], st)
+  recent = Allow([Limit("k9", 1, 3600, 1)], st)
+  old.Ok and not recent.Ok and recent.Key == "k9"
+end
+
+defn isFloodOfSessionsBounded()
+  (* the sessions the state keeps stay under its most keys: past them the ended ones go, and all of them when three
+     quarters are still fresh; a session forgotten is read again, never trusted *)
+  st = State(keys = 4, clock = 1794528000)?
+  for k in 1..5
+    door("1.2.3.4", st, "s$k", {User: {Id: k, Roles: []}, Until: 1794528002}, missing, missing, 0)
+  end
+  first = door("1.2.3.4", st, "s1", missing, missing, missing, 0)
+  last = door("1.2.3.4", st, "s5", missing, missing, missing, 0)
+  not first.Hit and last.Hit and last.User.Id == 5
+end
+
 defn isNotFoundAProblem()
   a = app()?
   out = ask(a, "GET", "/nowhere")

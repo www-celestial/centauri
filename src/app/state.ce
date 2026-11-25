@@ -135,8 +135,10 @@ defn own(ch, slots, most, kept, keys, clock, rates)
           user = m.Store.User
           if m.Gen == gen
             if value.Len(sessions) >= keys
+              (* the ended ones go; if three quarters are still fresh, all of them, so that the next pruning waits
+                 for a quarter of keys more, and none comes at every request *)
               sessions = dict.Dict([p for p in dict.Pairs(sessions) if p.Value.Until > now])
-              if value.Len(sessions) >= keys
+              if 4 * value.Len(sessions) > 3 * keys
                 sessions = dict.Dict()
               end
             end
@@ -336,7 +338,8 @@ end
 
 defn pruned(due, now, keys)
   (** The limits whose next request is still due later: a key past its time is as a key never seen. Past keys of them,
-      the ones due soonest go too. *)
+      the ones due soonest go too, down to three quarters of keys: the next pruning then waits for a quarter of keys
+      more, so that a flood of new addresses never makes one at every request. *)
   kept = dict.Dict()
   for p in dict.Pairs(due)
     if p.Value > now
@@ -348,5 +351,5 @@ defn pruned(due, now, keys)
   end
   pairs = dict.Pairs(kept)
   order = list.Order([p.Value for p in pairs])
-  dict.Dict([pairs[k] for k in list.Skip(value.Len(pairs) - keys, order)])
+  dict.Dict([pairs[k] for k in list.Skip(value.Len(pairs) - math.Floor(3 * keys / 4), order)])
 end
