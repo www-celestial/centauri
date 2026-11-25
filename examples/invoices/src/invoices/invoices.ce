@@ -22,9 +22,10 @@ defn lineOps(inv, lines, from, tenant)
 end
 
 defn totalOf(x)
-  (** The total of the lines, in cents first, so that 0.1 + 0.2 is 0.3: an Ok, or a 422 past 1,000,000,000, or for a
-      due date before the date. *)
-  total = list.Sum([l.Quantity * math.Round(l.Price * 100) for l in x.Lines]) / 100
+  (** The total of the lines, in cents first, so that 0.1 + 0.2 is 0.3, and as floats, so that 50 lines of 1,000,000
+      times 1,000,000,000 pass no bound of 63 bits (apptest.Fuzz found it, in the app of Cepheus's book too): an Ok, or
+      a 422 past 1,000,000,000, or for a due date before the date. *)
+  total = math.Round(list.Sum([1.0 * l.Quantity * math.Round(l.Price * 100) for l in x.Lines])) / 100
   if x.Due < x.Date
     return app.Fail(422, "Check the fields.", fields = {Due: "A due date on or after the date."})
   end
