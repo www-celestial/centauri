@@ -79,6 +79,11 @@ SetRoles = Put("/auth/members/:id/roles", body = check.Record({Roles: check.List
 (** A member leaves the tenant of the session: his membership and its sessions end. *)
 RemoveMember = Delete("/auth/members/:id", role = "admin", about = "Takes a member out of this tenant.")
 
+(** An invitation taken by a user who has an account already: he becomes a member of its tenant, with its roles, and
+    his session enters it. *)
+Join = Post("/auth/join", body = check.Record({Invite: check.Text(1, 200)}), out = Account, role = Signed,
+  about = "Takes an invitation: the user joins its tenant.")
+
 (** The tenants of the user, with his roles in each. *)
 MyTenants = Get("/auth/tenants", out = check.List(check.Record({Tenant: check.Id(), Name: check.Text(0, 120),
   Roles: check.List(check.Text(1, 40), 0, 40)}), 0, 1000), role = Signed, about = "The tenants of the user.")
@@ -89,4 +94,4 @@ SwitchTenant = Post("/auth/tenant", body = check.Record({Tenant: check.Id()}), o
 
 (** The endpoints of the accounts, in their order. *)
 Accounts = [SignUp, SignIn, SignOut, SignOutAll, Me, Sessions, EndSession, ChangePassword, Challenge, Members, Invite,
-  SetRoles, RemoveMember, MyTenants, SwitchTenant]
+  Join, SetRoles, RemoveMember, MyTenants, SwitchTenant]

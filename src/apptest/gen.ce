@@ -1,0 +1,95 @@
+(* Values drawn from shapes, for the tests that Centauri makes of a whole app: a good value of each shape, marked so that
+   it is found again in an answer, and broken ones, which a server must refuse without a 500. *)
+use std/dict
+use std/list
+use std/math
+use std/text
+use std/value
+
+defn fit(s, lo, hi)
+  (** A text cut or padded to lo..hi bytes. *)
+  out = if text.ByteLength(s) > hi text.ByteSlice(1, list.Max([hi, 0]), s) else s end
+  if hi == 0
+    return ""
+  end
+  if text.ByteLength(out) < lo "$out$(text.Repeat(lo - text.ByteLength(out), "x"))" else out end
+end
+
+clamp(k, lo, hi) = list.Min([hi, list.Max([lo, k])])
+
+defn Sample(shape, k, ids, mark)
+  (** A good value of a shape, the k-th: its texts start with mark (in small letters), so that an answer that holds it
+      is found; its ids are drawn from ids. *)
+  kind = shape.Kind
+  if kind == "text"
+    return fit("$mark$k", shape.Min, shape.Max)
+  end
+  if kind == "secret"
+    return fit("correct horse $k battery staple", list.Max([shape.Min, 12]), shape.Max)
+  end
+  if kind == "int"
+    return clamp(k, shape.Min, shape.Max)
+  end
+  if kind == "float" or kind == "money"
+    return clamp(k, shape.Min, shape.Max)
+  end
+  if kind == "bool"
+    return math.Mod(k, 2) == 1
+  end
+  if kind == "date"
+    return "2026-12-0$(1 + math.Mod(k, 9))"
+  end
+  if kind == "time"
+    return "2026-12-01T08:30:0$(math.Mod(k, 10))Z"
+  end
+  if kind == "email"
+    return "$mark$k@example.com"
+  end
+  if kind == "id"
+    return if value.Len(ids) == 0 1 else ids[1 + math.Mod(k, value.Len(ids))] end
+  end
+  if kind == "url"
+    return "https://example.com/$mark$k"
+  end
+  if kind == "oneof"
+    return shape.Values[1 + math.Mod(k, value.Len(shape.Values))]
+  end
+  if kind == "list"
+    n = clamp(1, shape.Min, shape.Max)
+    return if n == 0 [] else [Sample(shape.Of, k + j, ids, mark) for j in 1..n] end
+  end
+  if kind == "record"
+    out = {}
+    for p in dict.Pairs(shape.Fields)
+      out[p.Key] = Sample(p.Value, k, ids, mark)
+    end
+    return out
+  end
+  missing
+end
+
+(** Values that are no good value of any shape, or of few: of each type, the edges of a parser and of a server. *)
+Broken = [missing, "", 0, -1, 1.5, 4611686018427387903, -4611686018427387903, 1e308, true, [], {}, [[[[[[[[1]]]]]]]],
+  text.Repeat(5000, "a"), text.FromBytes([97, 0, 98]), text.FromBytes([27, 91, 51, 49, 109]), text.FromBytes([255, 254, 97]), "<script>alert(1)</script>", "'); DROP TABLE x; --", "=CMD()",
+  "../../etc/passwd", "%00", "$${7*7}", "2026-02-30", "2026-12-01T25:00:00Z", "nobody@", "@x.y", "javascript:alert(1)"]
+
+defn Breaks(shape, k, ids, mark)
+  (** Broken values of a shape: its good value with each field in turn given each broken value, and the broken values
+      themselves, so that every field meets every edge at least once over the cases. *)
+  good = Sample(shape, k, ids, mark)
+  out = [Broken[1 + math.Mod(k + j, value.Len(Broken))] for j in 1..4]
+  if shape.Kind == "record"
+    for p in dict.Pairs(shape.Fields)
+      bad = good
+      bad[p.Key] = Broken[1 + math.Mod(k * 7 + text.ByteLength(p.Key), value.Len(Broken))]
+      out = list.Append(bad, out)
+      inner = good
+      inner[p.Key] = Breaks(p.Value, k, ids, mark)[1]
+      out = list.Append(inner, out)
+    end
+  end
+  if shape.Kind == "list"
+    out = list.Append(list.Fill(Sample(shape.Of, k, ids, mark), shape.Max + 1), out)
+  end
+  out
+end

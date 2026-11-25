@@ -1,0 +1,102 @@
+(* The surface of an API: what its clients rely on, read from its OpenAPI. A change that adds is free; one that breaks a
+   client (an endpoint taken away, an input field it must now send, an output field it reads taken away, a type changed)
+   fails the test, and becomes a new endpoint (/v2/...) while the old one stays: nothing that worked may break. *)
+use src/api
+use std/dict
+use std/json
+use std/list
+use std/result
+use std/sys
+use std/text
+use std/value
+
+defn flat(schema, path, out)
+  (** The fields of a JSON Schema, each path with its type and whether it is required. *)
+  if not value.IsDict(schema)
+    return out
+  end
+  out[path] = {Type: dict.GetOr("type", if dict.Has("enum", schema) "enum" else "any" end, schema), Enum: dict.GetOr("enum", [], schema)}
+  if dict.Has("properties", schema)
+    required = dict.GetOr("required", [], schema)
+    for p in dict.Pairs(schema.properties)
+      out = flat(p.Value, "$path.$(p.Key)", out)
+      at = out["$path.$(p.Key)"]
+      at.Required = p.Key in required
+      out["$path.$(p.Key)"] = at
+    end
+  end
+  if dict.Has("items", schema)
+    out = flat(schema.items, "$path[]", out)
+  end
+  out
+end
+
+defn SurfaceOf(endpoints)
+  (** The surface of these endpoints: for each, its parameters with whether each is required, the fields of its body,
+      and the fields of its answer. *)
+  doc = api.OpenApi(endpoints)
+  out = {}
+  for p in dict.Pairs(doc.paths)
+    for op in dict.Pairs(p.Value)
+      o = op.Value
+      ok = [r.Value for r in dict.Pairs(o.responses) if r.Key != "default"][1]
+      body = dict.GetIn(["requestBody", "content", "application/json", "schema"], o)
+      answer = dict.GetIn(["content", "application/json", "schema"], ok)
+      out["$(text.Upper(op.Key)) $(p.Key)"] = {Params: dict.Dict([{Key: x.name, Value: x.required} for x in o.parameters]),
+        In: flat(body, "", {}), Out: flat(answer, "", {})}
+    end
+  end
+  out
+end
+
+defn Breaking(old, now)
+  (** What a change from the surface old to the surface now breaks, one line each: empty when it only adds. *)
+  out = []
+  for p in dict.Pairs(old)
+    name = p.Key
+    if not dict.Has(name, now)
+      out = list.Append("$name was taken away.", out)
+    else
+      was = p.Value
+      is = now[name]
+      for q in dict.Pairs(is.Params)
+        if q.Value == true and dict.Get(q.Key, was.Params) != true
+          out = list.Append("$name: the parameter $(q.Key) is now required.", out)
+        end
+      end
+      for f in dict.Pairs(is.In)
+        before = dict.Get(f.Key, was.In)
+        if dict.Get("Required", f.Value) == true and (value.IsMissing(before) or dict.Get("Required", before) != true)
+          out = list.Append("$name: the field $(f.Key) of its body is now required.", out)
+        else if not value.IsMissing(before) and before.Type != f.Value.Type
+          out = list.Append("$name: the field $(f.Key) of its body is now of type $(f.Value.Type), not $(before.Type).", out)
+        else if not value.IsMissing(before) and list.Any([not (v in f.Value.Enum) for v in before.Enum])
+          out = list.Append("$name: the field $(f.Key) of its body takes fewer values.", out)
+        end
+      end
+      for f in dict.Pairs(was.Out)
+        after = dict.Get(f.Key, is.Out)
+        if value.IsMissing(after)
+          out = list.Append("$name: the field $(f.Key) of its answer was taken away.", out)
+        else if after.Type != f.Value.Type
+          out = list.Append("$name: the field $(f.Key) of its answer is now of type $(after.Type), not $(f.Value.Type).", out)
+        end
+      end
+    end
+  end
+  out
+end
+
+defn Surface(a, path, update = false)
+  (** The test that the API of an app breaks none of its clients: its surface now, against the one kept in the file at
+      path (the last published version's). The first run, or update = true when a version is published, writes it.
+      An Ok of true, or an Err of what breaks. Needs the permissions read and write of path. *)
+  now = SurfaceOf(a.Endpoints)
+  if update or not sys.Exists(path)
+    sys.Write(path, "$(json.Pretty(now))$(text.Char(10))")?
+    return result.Ok(true)
+  end
+  old = json.Parse(sys.Read(path)?)?
+  broken = Breaking(old, now)
+  if value.Len(broken) == 0 result.Ok(true) else result.Err({Kind: "apptest", Message: text.Join(" ", broken)}) end
+end

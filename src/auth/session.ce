@@ -1,0 +1,103 @@
+(* Sessions, as a token cut in two (selector:validator, Paragon Initiative 2015): the cookie is "id.secret", id the
+   session's thing in Cepheus, secret 32 random bytes of the kernel in hex. Checking one is a read by its id (0.7 µs in
+   the program's memory), a BLAKE2b of the secret and a comparison in constant time: no search by the value of the
+   secret, so the time of a reply tells nothing of it. The cookie is __Host-sid over https (the browser then insists on
+   Secure, Path=/ and no Domain, so no other subdomain can set it), HttpOnly (no script reads it), SameSite=Strict (no
+   page of another site sends it). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use std/crypto
+use std/dict
+use std/encode
+use std/fiber
+use std/list
+use std/result
+use std/text
+use std/value
+
+(** The name of the cookie of the sessions: __Host-sid over https, sid over plain http (dev on another machine of the
+    network, where a browser refuses a __Host- cookie). *)
+CookieName(env) = if env.Https "__Host-sid" else "sid" end
+
+hashOf(secret, keys) = encode.Hex(crypto.Blake2b(secret, keys))   (* What the database keeps of a secret. *)
+
+defn Cookie(content, env, age)
+  (** The Set-Cookie header of a session, or of its end (age 0). *)
+  secure = if env.Https "; Secure" else "" end
+  {Name: "set-cookie", Value: "$(CookieName(env))=$content; Path=/; Max-Age=$age; HttpOnly; SameSite=Strict$secure"}
+end
+
+defn parts(raw)
+  (** The id and the secret of a cookie's value, or missing when it is no session's. *)
+  if not value.IsText(raw) or text.ByteLength(raw) > 100
+    return missing
+  end
+  cut = text.Split(".", raw)
+  if value.Len(cut) != 2 or text.ByteLength(cut[2]) != 64
+    return missing
+  end
+  id = app.IdOf(cut[1])
+  if value.IsMissing(id) missing else {Id: id, Secret: cut[2]} end
+end
+
+defn NewSession(user, member, tenant, req, env, thing = 1)
+  (** A new session: {Ops, Value}, the operations that make it, its thing New(thing) of the group, and the value of
+      its cookie as a function of the session's id once the group wrote it. *)
+  secret = encode.Hex(crypto.Random(32, env.Keys))
+  now = env.Now()
+  agent = dict.GetOr("user-agent", "", dict.Dict([{Key: text.Lower(h.Name), Value: h.Value} for h in req.Headers]))
+  ops = app.Facts(Session, cepheus.New(thing), {User: user, Member: member, Tenant: tenant, Hash: hashOf(secret, env.Keys), Started: now,
+    Seen: now, Ends: now + env.Settings.SessionMax, Ip: dict.GetOr("Ip", "", req), Agent: text.ByteSlice(1, list.Min([300, text.ByteLength(agent)]), agent)})
+  {Ops: ops, Value: id -> "$id.$secret"}
+end
+
+defn Who(req, env)
+  (** The user of a request's session: an Ok of {Id, Tenant, Member, Session, Roles, Super, Email, Name}, Roles with
+      every role they include, or an Ok of missing for no session, an ended one, a disabled user, or a member taken out
+      of his tenant. The time of the session is seen again at most every 5 minutes, by a write in a fiber of its own. *)
+  p = parts(dict.Get(CookieName(env), dict.GetOr("Cookies", {}, req)))
+  if value.IsMissing(p)
+    return result.Ok(missing)
+  end
+  s = cepheus.Get(Session, p.Id, env.Db)?
+  if value.IsMissing(s) or not value.IsText(s.Hash) or not crypto.IsSame(hashOf(p.Secret, env.Keys), s.Hash, env.Keys)
+    return result.Ok(missing)
+  end
+  now = env.Now()
+  if now >= s.Ends or now >= s.Seen + env.Settings.SessionIdle
+    return result.Ok(missing)
+  end
+  u = cepheus.Get(User, s.User, env.Db)?
+  if value.IsMissing(u) or u.Disabled == true
+    return result.Ok(missing)
+  end
+  roles = []
+  if not value.IsMissing(s.Member)
+    m = cepheus.Get(Member, s.Member, env.Db)?
+    if value.IsMissing(m) or value.IsMissing(m.Tenant)
+      return result.Ok(missing)
+    end
+    roles = app.Expand(m.Roles, env.Roles)
+  end
+  if now - s.Seen > 300
+    fiber.Spawn(() -> cepheus.Write([cepheus.Expect(p.Id, Session.Seen, s.Seen), cepheus.Add(p.Id, Session.Seen, now)], env.Db, by = s.User, why = "session seen"))
+  end
+  result.Ok({Id: s.User, Tenant: s.Tenant, Member: s.Member, Session: p.Id, Roles: roles, Super: u.Super == true, Email: u.Email,
+    Name: dict.GetOr("Name", "", u)})
+end
+
+defn EndSessions(ids, by, why, db)
+  (** Ends sessions: their facts retracted, in one group. An Ok of how many. *)
+  ops = []
+  for id in ids
+    ops = list.Concat(ops, app.Gone(Session, id, db)?)
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, db, by = by, why = why)?
+  end
+  result.Ok(value.Len(ids))
+end
+
+(** The sessions of a user, as {Id, Started, Seen, Ip, Agent}, the newest first. *)
+SessionsOf(user, db) = cepheus.Find(5, (s, st, se, ip, ag) -> {Where: [[s, Session.User, user], [s, Session.Started, st], [s, Session.Seen, se],
+  [s, Session.Ip, ip], [s, Session.Agent, ag]], Give: {Id: s, Started: st, Seen: se, Ip: ip, Agent: ag}, Sort: [cepheus.Desc(st), cepheus.Desc(s)]}, db)

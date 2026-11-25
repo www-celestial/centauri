@@ -2,6 +2,7 @@
    counters that number things without a gap, and the reads that keep a tenant's things its own. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/bug
+use std/list
 use std/dict
 use std/result
 use std/text
@@ -90,4 +91,44 @@ defn Retry(f, times = 3)
     tries += 1
   end
   got
+end
+
+defn Facts(kind, thing, fields)
+  (** The operations of cepheus.Write that give a thing these fields of a kind: an Add for each value, one for each
+      item of a list (a field of many values); a missing value adds nothing. The thing may be a new one of the group,
+      cepheus.New(1).
+
+        value.Len(Facts(Counter, cepheus.New(1), {Key: "a/b", Last: missing})) --> 1 *)
+  ops = []
+  for p in dict.Pairs(fields)
+    v = p.Value
+    if value.IsArray(v)
+      for one in v
+        ops = list.Append(cepheus.Add(thing, kind[p.Key], one), ops)
+      end
+    else if not value.IsMissing(v)
+      ops = list.Append(cepheus.Add(thing, kind[p.Key], v), ops)
+    end
+  end
+  ops
+end
+
+defn Gone(kind, id, db)
+  (** The operations that take every fact of a kind from a thing, as it is now: an Ok of them, empty when it has none.
+      Written with an Expect of a field, the group is refused if the thing changed meanwhile. *)
+  t = cepheus.Get(kind, id, db)?
+  if value.IsMissing(t)
+    return result.Ok([])
+  end
+  ops = []
+  for p in dict.Pairs(t)
+    if value.IsArray(p.Value)
+      for one in p.Value
+        ops = list.Append(cepheus.Retract(id, kind[p.Key], one), ops)
+      end
+    else if not value.IsMissing(p.Value)
+      ops = list.Append(cepheus.Retract(id, kind[p.Key], p.Value), ops)
+    end
+  end
+  result.Ok(ops)
 end

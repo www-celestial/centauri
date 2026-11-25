@@ -1,0 +1,105 @@
+(* The members of a tenant, for its admins: the list, an invitation, the roles of each, taking one out. Nobody gives or
+   takes a role that he hasn't himself (an admin makes no owner), and a tenant always keeps one owner. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use std/crypto
+use std/dict
+use std/encode
+use std/list
+use std/result
+use std/value
+
+defn members(r)
+  (** GET /auth/members: a page of the members of the tenant of the session, by their e-mail. *)
+  rows = cepheus.Find(4, (m, u, e, n) -> {Where: [[m, Member.Tenant, r.User.Tenant], [m, Member.User, u], [u, User.Email, e], [u, User.Name, n]],
+    Give: {Member: m, User: u, Email: e, Name: n}, Sort: [e, m], Limit: r.Limit, After: r.After}, r.Db)?
+  result.Ok([dict.Put("Roles", cepheus.Get(Member, x.Member, r.Db)?.Roles, x) for x in rows])
+end
+
+defn grantable(roles, r)
+  (** An Ok when every role is a role of the app and one that the giver has, else a 422 or a 403. *)
+  for role in roles
+    if not dict.Has(role, r.Env.Roles)
+      return app.Fail(422, "Check the fields.", fields = {Roles: "$role is no role of this app."})
+    end
+    if not (role in r.User.Roles)
+      return app.Fail(403, "Only who has the role $role gives it or takes it.")
+    end
+  end
+  result.Ok(true)
+end
+
+defn owners(tenant, db)
+  (** How many members of a tenant have the role owner. *)
+  rows = cepheus.Find(1, m -> {Where: [[m, Member.Tenant, tenant], [m, Member.Roles, "owner"]], Give: {N: cepheus.Count()}}, db)?
+  result.Ok(if value.Len(rows) == 0 0 else rows[1].N end)
+end
+
+defn invite(r, x)
+  (** POST /auth/invites: a code, shown once, for this e-mail and these roles. *)
+  grantable(x.Roles, r)?
+  code = encode.Hex(crypto.Random(24, r.Env.Keys))
+  ends = r.Now + r.Settings.InviteTime
+  cepheus.Insert(Invite, {Tenant: r.User.Tenant, Email: x.Email, Roles: x.Roles, Hash: hashOf(code, r.Env.Keys), Ends: ends, By: r.User.Id}, r.Db,
+    by = r.User.Id, why = r.Why)?
+  note(r, "invite", "Invited $(x.Email) as $(x.Roles).", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  {Code: code, Ends: ends}
+end
+
+defn Join(user, tenant, roles, by, why, db, now)
+  (** A user becomes a member of a tenant with these roles, or a member already gets them: an Ok of the membership's
+      id. Its Key, unique, keeps two joins at once from making two memberships. *)
+  m = membershipOf(user, tenant, db)?
+  if value.IsMissing(m)
+    return cepheus.Insert(Member, {User: user, Tenant: tenant, Roles: roles, Key: "$user/$tenant", Created: now}, db, by = by, why = why)
+  end
+  ops = list.Concat([cepheus.Retract(m.Member, Member.Roles, ro) for ro in m.Roles if not (ro in roles)], [cepheus.Add(m.Member, Member.Roles, ro) for ro in roles if not (ro in m.Roles)])
+  if value.Len(ops) > 0
+    cepheus.Write(ops, db, by = by, why = why)?
+  end
+  result.Ok(m.Member)
+end
+
+defn joining(r, x)
+  (** POST /auth/join: the invitation of a code for the user's e-mail; his session enters its tenant. *)
+  inv = invitation(x.Invite, r.User.Email, r.Env)?
+  Join(r.User.Id, inv.Tenant, inv.Roles, r.User.Id, r.Why, r.Env.Db, r.Now)?
+  cepheus.Write(inv.Gone, r.Env.Db, by = r.User.Id, why = r.Why)?
+  EndSessions([r.User.Session], r.User.Id, r.Why, r.Env.Db)?
+  opened(r.User.Id, membershipOf(r.User.Id, inv.Tenant, r.Env.Db)?, r, "join")
+end
+
+defn memberIn(r)
+  (** The membership in the tenant of the session of the user of the path: an Ok of it, or a 404. *)
+  id = app.IdOf(r.Params.id)
+  m = if value.IsMissing(id) missing else membershipOf(id, r.User.Tenant, r.Db)? end
+  if value.IsMissing(m) app.Missing() else result.Ok(dict.Put("User", id, m)) end
+end
+
+defn setRoles(r, x)
+  (** PUT /auth/members/:id/roles: only the roles that change need the giver to have them. *)
+  m = memberIn(r)?
+  changed = list.Concat([ro for ro in m.Roles if not (ro in x.Roles)], [ro for ro in x.Roles if not (ro in m.Roles)])
+  grantable(changed, r)?
+  if "owner" in m.Roles and not ("owner" in x.Roles) and owners(r.User.Tenant, r.Db)? <= 1
+    return app.Fail(409, "A tenant keeps one owner at least: give the role owner to another member first.")
+  end
+  Join(m.User, r.User.Tenant, x.Roles, r.User.Id, r.Why, r.Db, r.Now)?
+  note(r, "roles", "The roles of $(m.User) are now $(x.Roles).", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  u = cepheus.Get(User, m.User, r.Db)?
+  {User: m.User, Email: u.Email, Name: dict.GetOr("Name", "", u), Roles: x.Roles}
+end
+
+defn removeMember(r)
+  (** DELETE /auth/members/:id: the membership ends, and the sessions of that user in this tenant. *)
+  m = memberIn(r)?
+  grantable(m.Roles, r)?
+  if "owner" in m.Roles and owners(r.User.Tenant, r.Db)? <= 1
+    return app.Fail(409, "A tenant keeps one owner at least.")
+  end
+  cepheus.Write(app.Gone(Member, m.Member, r.Db)?, r.Db, by = r.User.Id, why = r.Why)?
+  ended = cepheus.Find(1, s -> {Where: [[s, Session.Member, m.Member]], Give: {Id: s}}, r.Db)?
+  EndSessions([s.Id for s in ended], r.User.Id, r.Why, r.Db)?
+  note(r, "removed", "$(m.User) left the tenant.", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  result.Ok(missing)
+end

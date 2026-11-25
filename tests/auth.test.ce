@@ -1,0 +1,245 @@
+(** The accounts against what an attacker tries: guessing passwords, learning which accounts exist, stealing or forging a
+    session, keeping a stolen one after sign-out, filling forms by bots, making tenants by the thousand, raising his own
+    roles, reading another tenant; and the settings that make an app open, by invitation, single- or multi-tenant. Each
+    test is an app in memory (apptest). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/check
+use std/dict
+use std/http
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100)}), out = NoteOut, role = "member")
+Notes = api.Get("/notes", out = api.Page(NoteOut, 50), role = "member")
+
+defn add(r, x)
+  made = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Note, made, r)
+end
+
+listed(r) = cepheus.Find(2, (n, t) -> {Where: [[n, Note.Tenant, r.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}, Sort: [n], Limit: r.Limit, After: r.After}, r.Db)
+
+App = app.Of([auth.Module(), app.Module("notes", kinds = [Note], serve = [app.Serve(AddNote, add), app.Serve(Notes, listed)])], name = "notes")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+bo = {Email: "bo@example.com", Password: "another long secret", Name: "Bo"}
+
+header(name, response) = http.HeaderValue(name, response.Headers)
+status(got) = if result.IsOk(got) 200 else got.Error.Status end
+
+defn isSignedUpAndIn()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  set = header("set-cookie", a.Response)
+  bug.Assert(text.StartsWith("sid=", set) and text.Contains("HttpOnly", set) and text.Contains("SameSite=Strict", set), "the cookie: $set")
+  bug.Assert(value.Equal(a.Account.Roles, ["owner", "admin", "member"]) and a.Account.TenantName == "Ana", "the maker of a tenant owns it: $(a.Account)")
+  again = t.SignIn("ana@example.com", "correct horse 12")?
+  again.Call(api.Me)?.Email == "ana@example.com" and again.Tenant == a.Tenant
+end
+
+defn isCookieOverHttpsHost()
+  t = apptest.Start(App, settings = {Origin: "https://notes.example"})?
+  a = t.SignUp(ana)?
+  set = header("set-cookie", a.Response)
+  text.StartsWith("__Host-sid=", set) and text.Contains("; Secure", set) and text.Contains("Path=/", set) and not text.Contains("Domain", set)
+end
+
+defn isUnknownLoginAnsweredAsAWrongPassword()
+  t = apptest.Start(App)?
+  t.SignUp(ana)?
+  wrong = t.SignIn("ana@example.com", "not the password")
+  unknown = t.SignIn("nobody@example.com", "correct horse 12")
+  wrong.Error.Status == 401 and unknown.Error.Status == 401 and wrong.Error.Message == unknown.Error.Message
+end
+
+defn isLockedAfterFailures()
+  t = apptest.Start(App, settings = {LockAfter: "3"})?
+  t.SignUp(ana)?
+  codes = [status(t.SignIn("ana@example.com", "wrong password $k")) for k in 1..4]
+  bug.Assert(value.Equal(codes, [401, 401, 401, 429]), "locked at the 4th: $codes")
+  locked = t.SignIn("ana@example.com", "correct horse 12")
+  bug.Assert(locked.Error.Status == 429 and locked.Error.Problem.retry >= 1, "even the right password waits: $(locked.Error)")
+  t.Advance(2)
+  ok = t.SignIn("ana@example.com", "correct horse 12")
+  bug.Assert(result.IsOk(ok), "after the wait: $ok")
+  status(t.SignIn("ana@example.com", "wrong once more")) == 401
+end
+
+defn isProofOfWorkAsked()
+  t = apptest.Start(App, settings = {Pow: "always", PowBits: "6"})?
+  first = t.Anyone().Send(api.SignUp, ana)
+  p = json.Parse(first.Body)?
+  bug.Assert(first.Status == 428 and p.challenge.Bits == 6, "a challenge: $(first.Body)")
+  proof = auth.Solve(p.challenge.Challenge, t.Env.Keys)
+  made = t.Anyone().Call(api.SignUp, dict.Put("Proof", proof, ana))
+  replayed = t.Anyone().Call(api.SignUp, dict.Put("Proof", proof, bo))
+  forged = t.Anyone().Call(api.SignUp, dict.Put("Proof", "1.6.00.00:1", bo))
+  result.IsOk(made) and replayed.Error.Status == 428 and forged.Error.Status == 428
+end
+
+defn isProofOfWorkUnderAttack()
+  t = apptest.Start(App, settings = {Pow: "attack", PowAfter: "3", PowBits: "4"})?
+  t.SignUp(ana)?
+  for k in 1..3
+    t.SignIn("guess$k@example.com", "wrong password")
+  end
+  asked = t.SignIn("ana@example.com", "correct horse 12")
+  asked.Error.Status == 428
+end
+
+defn isBotTrapped()
+  t = apptest.Start(App)?
+  out = t.Anyone().Raw("POST", "/auth/signup", body = json.Text(dict.Put("Website", "http://spam.example", ana)))
+  boss = t.Super()?
+  events = boss.Call(api.AdminEvents, {Kind: "bot"})?
+  out.Status == 422 and value.Len(events.Rows) == 1
+end
+
+defn isSignUpLimitedByAddressAndTenantsByHour()
+  t = apptest.Start(App, settings = {SignUpPerIp: "2"})?
+  c = t.Anyone()
+  codes = [status(c.Call(api.SignUp, {Email: "u$k@example.com", Password: "correct horse 12", Name: "U$k"})) for k in 1..3]
+  u = apptest.Start(App, settings = {TenantsPerHour: "1"})?
+  tenants = [status(u.Anyone().Call(api.SignUp, {Email: "v$k@example.com", Password: "correct horse 12", Name: "V$k"})) for k in 1..2]
+  value.Equal(codes, [200, 200, 429]) and value.Equal(tenants, [200, 429])
+end
+
+defn isSignedOutForGood()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  stolen = a.Cookie
+  other = t.SignIn("ana@example.com", "correct horse 12")?
+  a.Call(api.SignOut)?
+  thief = t.Anyone().Raw("GET", "/auth/me", headers = [{Name: "cookie", Value: stolen}])
+  bug.Assert(thief.Status == 401 and result.IsOk(other.Call(api.Me)), "one session ended, not the other")
+  other.Call(api.SignOutAll)?
+  other.Call(api.Me).Error.Status == 401
+end
+
+defn isSessionIdleAndOld()
+  t = apptest.Start(App, settings = {SessionIdle: "600", SessionMax: "3600"})?
+  a = t.SignUp(ana)?
+  t.Advance(400)
+  bug.Assert(result.IsOk(a.Call(api.Me)), "seen at 400 s")
+  t.Advance(700)
+  a.Call(api.Me).Error.Status == 401
+end
+
+defn isForgedCookieNobody()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  id = text.Split(".", text.Split("=", a.Cookie)[2])[1]
+  forged = t.Anyone().Raw("GET", "/auth/me", headers = [{Name: "cookie", Value: "sid=$id.$(text.Repeat(64, "a"))"}])
+  junk = t.Anyone().Raw("GET", "/auth/me", headers = [{Name: "cookie", Value: "sid=1.2"}])
+  forged.Status == 401 and junk.Status == 401
+end
+
+defn isNoSecretKept()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  secret = text.Split(".", text.Split("=", a.Cookie)[2])[2]
+  u = cepheus.Get(auth.User, a.User, t.Db)?
+  s = cepheus.Find(1, x -> {Where: [[x, auth.Session.User, a.User]], Give: {S: x}}, t.Db)?
+  kept = cepheus.Get(auth.Session, s[1].S, t.Db)?
+  boss = t.Super()?
+  logs = json.Text(boss.Call(api.AdminLogs)?)
+  bug.Assert(text.StartsWith("$$argon2id$$", u.Hash) and not text.Contains("correct horse", json.Text(u)), "the password, hashed")
+  kept.Hash != secret and not text.Contains(secret, json.Text(kept)) and not text.Contains(secret, logs) and not text.Contains("correct horse", logs)
+end
+
+defn isSingleTenant()
+  t = apptest.Start(App, settings = {Tenancy: "single"})?
+  a = t.SignUp(ana)?
+  b = t.SignUp(bo)?
+  b.Call(AddNote, {Text: "milk"})?
+  bug.Assert(a.Tenant == b.Tenant and "owner" in a.Account.Roles and value.Equal(b.Account.Roles, ["member"]), "one tenant, its first owner")
+  value.Len(a.Call(Notes)?.Rows) == 1
+end
+
+defn isByInvitationOnly()
+  t = apptest.Start(App, settings = {SignUp: "invite"})?
+  bug.Assert(t.Anyone().Call(api.SignUp, ana).Error.Status == 403, "no invitation, no account")
+  open = apptest.Start(App)?
+  a = open.SignUp(ana)?
+  code = a.Call(api.Invite, {Email: "bo@example.com", Roles: ["member"]})?.Code
+  wrong = open.Anyone().Call(api.SignUp, dict.Put("Invite", code, {Email: "eve@example.com", Password: "correct horse 12", Name: "Eve"}))
+  b = open.Anyone().Call(api.SignUp, dict.Put("Invite", code, bo))?
+  again = open.Anyone().Call(api.SignUp, dict.Put("Invite", code, {Email: "bo@example.com", Password: "correct horse 12", Name: "Bo 2"}))
+  wrong.Error.Status == 403 and b.Tenant == a.Tenant and value.Equal(b.Roles, ["member"]) and again.Error.Status == 403
+end
+
+defn isNoRaiseOfOwnRoles()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  code = a.Call(api.Invite, {Email: "bo@example.com", Roles: ["admin"]})?.Code
+  b = t.Anyone().Call(api.SignUp, dict.Put("Invite", code, bo))?
+  bc = t.SignIn("bo@example.com", "another long secret")?
+  raise = bc.Call(api.SetRoles, {id: b.User, Roles: ["owner"]})
+  owner = bc.Call(api.SetRoles, {id: a.User, Roles: ["member"]})
+  last = a.Call(api.SetRoles, {id: a.User, Roles: ["admin"]})
+  bug.Assert(raise.Error.Status == 403 and owner.Error.Status == 403, "an admin makes no owner, and takes nothing from one")
+  last.Error.Status == 409
+end
+
+defn isRemovedMemberOut()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  code = a.Call(api.Invite, {Email: "bo@example.com", Roles: ["member"]})?.Code
+  t.Anyone().Call(api.SignUp, dict.Put("Invite", code, bo))?
+  b = t.SignIn("bo@example.com", "another long secret")?
+  bug.Assert(result.IsOk(b.Call(Notes)), "a member reads the notes")
+  a.Call(api.RemoveMember, {id: b.User})?
+  b.Call(Notes).Error.Status == 401
+end
+
+defn isDisabledBySuper()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  boss = t.Super()?
+  bug.Assert(a.Call(api.AdminUsers).Error.Status == 403, "the administration is the super-admin's")
+  users = boss.Call(api.AdminUsers, {Search: "ana"})?
+  boss.Call(api.AdminDisable, {id: users.Rows[1].Id})?
+  a.Call(api.Me).Error.Status == 401 and t.SignIn("ana@example.com", "correct horse 12").Error.Status == 401
+end
+
+defn isSessionsListedAndEnded()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignIn("ana@example.com", "correct horse 12")?
+  rows = a.Call(api.Sessions)?
+  other = [s for s in rows if not s.Current][1]
+  a.Call(api.EndSession, {id: other.Id})?
+  value.Len(rows) == 2 and b.Call(api.Me).Error.Status == 401 and result.IsOk(a.Call(api.Me))
+end
+
+defn isPasswordChanged()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignIn("ana@example.com", "correct horse 12")?
+  bug.Assert(a.Call(api.ChangePassword, {Old: "wrong one", New: "a new long secret"}).Error.Status == 403, "the old one first")
+  a.Call(api.ChangePassword, {Old: "correct horse 12", New: "a new long secret"})?
+  b.Call(api.Me).Error.Status == 401 and result.IsOk(a.Call(api.Me)) and result.IsOk(t.SignIn("ana@example.com", "a new long secret"))
+end
+
+defn isEventsAndAdministration()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  t.SignIn("ana@example.com", "wrong password")
+  boss = t.Super()?
+  kinds = [e.Kind for e in boss.Call(api.AdminEvents)?.Rows]
+  tenants = boss.Call(api.AdminTenants)?
+  one = boss.Call(api.AdminTenant, {id: a.Tenant})?
+  stats = boss.Call(api.AdminStats)?
+  bug.Assert("signup" in kinds and "signin-failed" in kinds and "signin" in kinds, "events: $kinds")
+  value.Len(tenants.Rows) == 1 and one.Members[1].Email == "ana@example.com" and stats.Users == 2 and stats.Tenants == 1
+end

@@ -1,0 +1,337 @@
+(** Tests of a whole app, in memory: Start runs it on a fork of Cepheus's Empty with the kinds and rules of its modules,
+    no server, no network, no Docker; a clock that a test moves; clients that sign up, sign in and call the endpoints by
+    their contracts. Three tests come made for every app: Isolated (no tenant reads or changes another's data, on every
+    endpoint), Surface (no change of the API breaks its clients) and Fuzz (no input, however broken, makes a 500).
+
+      t = apptest.Start(main.App)?
+      ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
+      ana.Call(api.Me)?.Email == "ana@example.com"
+
+    Each test of Centauri starts its own app: tests never share a database, and run in any order. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/auth
+use std/dict
+use std/encode
+use std/http
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(** The time a test starts at: 2026-11-13 00:00 UTC, the same at every run. *)
+Epoch = 1794528000
+
+defn Start(a, settings = {}, now = Epoch)
+  (** An app in memory: an Ok of its test t, with t.Db its fork, t.Env what its requests share, and t.SignUp(x),
+      t.SignIn(email, password), t.Anyone(), t.Super(), t.As(u, roles), t.Make(u, kind, fields), t.Advance(seconds),
+      t.Raw(method, path). settings are given as the environment would give them, over the profile test, proof of work
+      off and generous limits, which a test of them sets back. *)
+  db = cepheus.Fork(cepheus.Empty, a.Kinds)?
+  if value.Len(a.Rules) > 0
+    cepheus.Define(a.Rules, db)?
+  end
+  base = {Profile: "test", Origin: "http://app.test", Pow: "off", LimitIp: 1000000, LimitUser: 1000000, LimitTenant: 1000000,
+    SignInPerIp: 100000, SignUpPerIp: 100000, TenantsPerHour: 1000000}
+  s = app.Read(a.Fields, dict.Merge(base, settings), defaults = a.Defaults)
+  if result.IsErr(s)
+    return result.Err({Kind: "apptest", Message: text.Join("; ", s.Error)})
+  end
+  env = app.Start(a, s.Value, db, clock = now)?
+  t = {App: a, Db: db, Env: env, Handle: app.Handler(env)}
+  made(t)
+end
+
+defn made(t)
+  (** The test with its functions. *)
+  out = t
+  out.Raw = (method, path, body = "", headers = []) -> raw(t, method, path, body, headers, missing, "198.51.100.1")
+  out.Anyone = () -> client(t, missing, missing, missing, "198.51.100.2")
+  out.SignUp = x -> signUp(t, x)
+  out.SignIn = (email, password) -> signIn(t, email, password)
+  out.Super = () -> super(t)
+  out.As = (u, roles) -> as(t, u, roles)
+  out.Make = (u, kind, fields) -> make(t, u, kind, fields)
+  out.Advance = seconds -> app.Advance(seconds, t.Env.State)
+  result.Ok(out)
+end
+
+defn raw(t, method, target, body, headers, cookie, ip)
+  (** A request as a page of the app sends it, and its response. *)
+  parts = text.Split("?", target)
+  h = list.Concat([{Name: "host", Value: "app.test"}, {Name: "user-agent", Value: "apptest"}], headers)
+  if not value.IsMissing(cookie)
+    h = list.Append({Name: "cookie", Value: cookie}, h)
+  end
+  if body != ""
+    h = list.Append({Name: "content-type", Value: "application/json"}, h)
+  end
+  t.Handle({Method: method, Path: parts[1], Query: if value.Len(parts) > 1 parts[2] else "" end, Headers: h, Body: body, Peer: ip})
+end
+
+defn query(x)
+  (** A query string of a map of texts and numbers. *)
+  text.Join("&", ["$(p.Key)=$(encode.UrlEncode(value.Text(p.Value)))" for p in dict.Pairs(x) if not value.IsMissing(p.Value) and not value.IsArray(p.Value) and not value.IsDict(p.Value)])
+end
+
+defn Request(e, x)
+  (** The method, the path and the body of a call of an endpoint with x: the parameters of its path taken from x by their
+      names, the rest the query of a GET or a DELETE, or the JSON body of the others.
+
+        Request(api.Get("/notes/:id"), {id: 7}).Path --> "/notes/7"
+        Request(api.Get("/notes", query = missing), {Q: "a b"}).Path --> "/notes?Q=a%20b" *)
+  rest = if value.IsDict(x) x else {} end
+  path = e.Path
+  for name in api.Params(e.Path)
+    v = dict.Get(name, rest)
+    path = text.Replace(":$name", encode.UrlEncode(if value.IsMissing(v) "" else value.Text(v) end), path)
+    rest = dict.Drop(name, rest)
+  end
+  if e.Method == "GET" or e.Method == "DELETE"
+    q = query(rest)
+    return {Method: e.Method, Path: if q == "" path else "$path?$q" end, Body: ""}
+  end
+  {Method: e.Method, Path: path, Body: if value.IsMissing(e.In) and value.Len(rest) == 0 "" else json.Text(rest) end}
+end
+
+defn Answer(response)
+  (** What a test reads of a response: an Ok of its JSON (missing for no body), or an Err of {Status, Message, Fields,
+      Problem}, the Problem Details of the error. *)
+  data = if response.Body == "" result.Ok(missing) else json.Parse(response.Body) end
+  if response.Status < 400
+    return if result.IsOk(data) data else result.Ok(response.Body) end
+  end
+  p = if result.IsOk(data) and value.IsDict(data.Value) data.Value else {} end
+  result.Err({Status: response.Status, Message: dict.GetOr("detail", "", p), Fields: dict.GetOr("errors", {}, p), Problem: p})
+end
+
+defn cookieOf(response)
+  (** The session that a response sets: the pair name=value for a Cookie header, or missing. *)
+  for h in response.Headers
+    if h.Name == "set-cookie"
+      return text.Split(";", h.Value)[1]
+    end
+  end
+  missing
+end
+
+defn client(t, account, cookie, response, ip)
+  (** A client of the app: its account, its cookie, and c.Call(endpoint, x), c.Raw(method, path, body). *)
+  c = {Account: account, Cookie: cookie, Ip: ip, Response: response,
+    User: if value.IsDict(account) dict.Get("User", account) else missing end, Tenant: if value.IsDict(account) dict.Get("Tenant", account) else missing end}
+  c.Call = (e, x = {}) -> call(t, cookie, ip, e, x)
+  c.Send = (e, x = {}) -> send(t, cookie, ip, e, x)
+  c.Raw = (method, path, body = "", headers = []) -> raw(t, method, path, body, headers, cookie, ip)
+  c
+end
+
+defn send(t, cookie, ip, e, x)
+  (** The response of a call. *)
+  q = Request(e, x)
+  raw(t, q.Method, q.Path, q.Body, [], cookie, ip)
+end
+
+call(t, cookie, ip, e, x) = Answer(send(t, cookie, ip, e, x))
+
+defn signUp(t, x)
+  (** A client signed up with x, its fields as the endpoint takes them (Name, Email, Password at least). *)
+  ip = "198.51.100.$(1 + math.Mod(value.Len(x.Email) * 7, 200))"
+  out = send(t, missing, ip, api.SignUp, x)
+  got = Answer(out)
+  if result.IsErr(got)
+    return got
+  end
+  result.Ok(client(t, got.Value, cookieOf(out), out, ip))
+end
+
+defn signIn(t, email, password)
+  (** A client signed in. *)
+  ip = "198.51.100.250"
+  out = send(t, missing, ip, api.SignIn, {Email: email, Password: password})
+  got = Answer(out)
+  if result.IsErr(got)
+    return got
+  end
+  result.Ok(client(t, got.Value, cookieOf(out), out, ip))
+end
+
+defn super(t)
+  (** A client signed in as a super-admin of the platform. *)
+  auth.MakeSuper("super@app.test", "correct horse super", t.Env.Keys, t.Db, now = t.Env.Now())?
+  signIn(t, "super@app.test", "correct horse super")
+end
+
+defn as(t, u, roles)
+  (** The client u with these roles in his tenant, his session the same. *)
+  auth.Join(u.User, u.Tenant, roles, 0, "apptest", t.Db, t.Env.Now())?
+  result.Ok(u)
+end
+
+defn kindOf(t, kind)
+  (** A kind of the app, by its name (app.Kind) or as it is. *)
+  if not value.IsText(kind)
+    return kind
+  end
+  for k in t.App.Kinds
+    if dict.Get("name", k) == kind
+      return k
+    end
+  end
+  missing
+end
+
+defn make(t, u, kind, fields)
+  (** A thing of a kind of the tenant of u, written straight to the database: an Ok of its id. *)
+  k = kindOf(t, kind)
+  if value.IsMissing(k)
+    return result.Err({Kind: "apptest", Message: "No kind $kind declared with app.Kind."})
+  end
+  cepheus.Insert(k, if dict.Has("Tenant", k) dict.Put("Tenant", u.Tenant, fields) else fields end, t.Db, by = u.User, why = "apptest")
+end
+
+(* The endpoints that the generated tests leave alone: those that end or move the session that calls them, and those
+   that make accounts, which the tests make themselves. *)
+skipped = [api.SignUp.Name, api.SignIn.Name, api.SignOut.Name, api.SignOutAll.Name, api.SwitchTenant.Name, api.Join.Name, api.ChangePassword.Name]
+
+defn ownKinds(t)
+  (** The kinds of the app's modules that belong to a tenant: those of app.Kind with a field Tenant. *)
+  [k for k in t.App.Kinds if dict.Has("Tenant", k) and dict.Has("fields", k) and not text.StartsWith("centauri_", dict.Get("name", k))]
+end
+
+defn sampleOf(property, k, links, mark, now)
+  (** A value of a property of Cepheus for the k-th thing seeded. *)
+  ty = property.Type
+  v = if ty == "text" "$mark-$k" else if ty == "int" k else if ty == "float" k + 0.5 else if ty == "bool" true
+    else if ty == "date" now else if ty == "money" 10 else if ty == "link" (if value.Len(links) == 0 missing else links[1 + math.Mod(k, value.Len(links))] end) else missing end
+  if property.Many and not value.IsMissing(v) [v] else v end
+end
+
+defn seed(t, u, mark, cases)
+  (** Things of every kind of the tenant of u, written straight, then made through every POST and PUT of the app as u:
+      an Ok of the ids of all of them. *)
+  ids = [u.Tenant]
+  now = t.Env.Now()
+  for k in ownKinds(t)
+    for n in 1..cases
+      fields = {}
+      for p in dict.Pairs(k["fields"])
+        fields[p.Key] = sampleOf(p.Value, n, ids, mark, now)
+      end
+      fields.Tenant = u.Tenant
+      made = cepheus.Insert(k, fields, t.Db, why = "apptest seed")
+      if result.IsOk(made)
+        ids = list.Append(made.Value, ids)
+      end
+    end
+  end
+  for e in t.App.Endpoints
+    if (e.Method == "POST" or e.Method == "PUT") and not (e.Name in skipped) and e.Role != api.Super
+      for n in 1..cases
+        x = if value.IsMissing(e.In) {} else Sample(e.In, n, ids, mark) end
+        for name in api.Params(e.Path)
+          x[name] = ids[1 + math.Mod(n, value.Len(ids))]
+        end
+        got = u.Call(e, x)
+        if result.IsOk(got) and value.IsDict(got.Value) and value.IsInt(dict.Get("Id", got.Value))
+          ids = list.Append(got.Value.Id, ids)
+        end
+      end
+    end
+  end
+  result.Ok(ids)
+end
+
+defn snapshot(t, ids)
+  (** The facts of every kind of the tenant of each id, as text, to compare after. *)
+  [json.Text([cepheus.Get(k, id, t.Db) for k in ownKinds(t)]) for id in ids]
+end
+
+defn everyRole(t)
+  (** Every role of the app's table. *)
+  dict.Keys(t.App.Roles)
+end
+
+defn Isolated(a, settings = {}, cases = 3)
+  (** The test that no tenant reads or changes another's data, on every endpoint of the app. Tenant A is filled with
+      things marked "zqa": of each kind of the app's modules that has a Tenant (written straight), and made by every
+      POST and PUT. Then a user of tenant B, with every role of the app, calls every endpoint with the ids of A's
+      things in the paths and in the inputs. An Ok of true when no answer holds a mark of A and A's things are as they
+      were; else an Err of each endpoint that leaked or changed A's data. This is a property test (QuickCheck, Claessen
+      and Hughes 2000) of the access control, OWASP's A01. *)
+  t = Start(a, settings = dict.Merge(settings, {Tenancy: "multi"}))?
+  ua = t.SignUp({Email: "zqa-owner@example.com", Password: "correct horse zqa", Name: "zqa owner", Tenant: "zqa tenant"})?
+  ub = t.SignUp({Email: "b-owner@example.com", Password: "correct horse b", Name: "b owner", Tenant: "b tenant"})?
+  t.As(ua, everyRole(t))?
+  t.As(ub, everyRole(t))?
+  ids = seed(t, ua, "zqa", cases)?
+  before = snapshot(t, ids)
+  leaks = []
+  for e in t.App.Endpoints
+    if not (e.Name in skipped) and e.Role != api.Super
+      shape = if value.IsMissing(e.In) e.Query else e.In end
+      for n in 1..list.Max([cases, value.Len(ids)])
+        x = if value.IsMissing(shape) {} else Sample(shape, n, ids, "zqb") end
+        for name in api.Params(e.Path)
+          x[name] = ids[1 + math.Mod(n, value.Len(ids))]
+        end
+        out = ub.Send(e, x)
+        if text.Contains("zqa", text.Lower(out.Body))
+          leaks = list.Append("$(e.Name): an answer to tenant B holds data of tenant A ($(text.ByteSlice(1, list.Min([200, text.ByteLength(out.Body)]), out.Body))).", leaks)
+        end
+      end
+    end
+  end
+  after = snapshot(t, ids)
+  for k in 1..value.Len(ids)
+    if before[k] != after[k]
+      leaks = list.Append("A thing of tenant A, $(ids[k]), was changed by tenant B.", leaks)
+    end
+  end
+  if value.Len(leaks) == 0 result.Ok(true) else result.Err({Kind: "apptest", Message: text.Join(" ", list.Unique(leaks))}) end
+end
+
+defn Fuzz(a, settings = {}, cases = 5)
+  (** The test that no input makes a 500: every endpoint, called by a user with every role of the app (and a
+      super-admin for the administration), with good inputs drawn from its shapes and broken ones (wrong types, texts of
+      5,000 bytes, control characters, bad UTF-8, injections of SQL, HTML and formulas, nested lists, ids out of range,
+      bodies that are no JSON). An Ok of true, or an Err of each endpoint and input that gave a 500. *)
+  t = Start(a, settings = settings)?
+  u = t.SignUp({Email: "fuzz@example.com", Password: "correct horse fuzz", Name: "fuzz"})?
+  t.As(u, everyRole(t))?
+  boss = t.Super()?
+  ids = seed(t, u, "fz", 2)?
+  bad = []
+  for e in t.App.Endpoints
+    if not (e.Name in skipped)
+      c = if e.Role == api.Super boss else u end
+      shape = if value.IsMissing(e.In) e.Query else e.In end
+      inputs = []
+      for n in 1..cases
+        inputs = list.Concat(inputs, if value.IsMissing(shape) [{}] else list.Append(Sample(shape, n, ids, "fz"), Breaks(shape, n, ids, "fz")) end)
+      end
+      k = 0
+      for x in inputs
+        k += 1
+        y = if value.IsDict(x) x else {Value: x} end
+        for name in api.Params(e.Path)
+          y[name] = [ids[1], "0", "-1", "99999999999999999999", "abc", "..", "%2e%2e"][1 + math.Mod(k, 7)]
+        end
+        out = c.Send(e, y)
+        if out.Status >= 500 and out.Status != 503
+          bad = list.Append("$(e.Name) gave $(out.Status) for $(text.ByteSlice(1, list.Min([160, text.ByteLength(json.Text(y))]), json.Text(y))).", bad)
+        end
+      end
+      for body in ["{", "[]", "null", "\"x\"", text.FromBytes([123, 255, 125]), text.Repeat(100, "[")]
+        out = c.Raw(e.Method, text.Replace(":", "", e.Path), body = body)
+        if out.Status >= 500 and out.Status != 503
+          bad = list.Append("$(e.Name) gave $(out.Status) for the body $body.", bad)
+        end
+      end
+    end
+  end
+  if value.Len(bad) == 0 result.Ok(true) else result.Err({Kind: "apptest", Message: text.Join(" ", list.Unique(bad))}) end
+end

@@ -1,0 +1,83 @@
+(* Proof of work (hashcash, A. Back 2002), against bots that sign up or try passwords by the thousand: before it is
+   heard, a client finds a nonce such that BLAKE2b-256 of the challenge, a dot and the nonce starts with Bits bits at
+   zero, 2^Bits hashes on average (2^18: under a second in a page, in WebAssembly), where the server checks it with one
+   hash. The challenge is "ends.bits.random.mac", the mac an HMAC-SHA-256 of the rest under the app's key, so the server
+   keeps nothing until it is answered; then its random part is written once (unique), and no answer serves twice.
+   Asked always, never, or under attack only (the setting Pow): when the failed sign-ins of the last minute pass
+   PowAfter, or the login has failed 3 times. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/crypto
+use std/encode
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+ChallengeTime = 600   (** The seconds a challenge may be answered in. *)
+
+mac(rest, env) = text.ByteSlice(1, 32, encode.Hex(crypto.HmacSha256(env.Key, "pow $rest", env.Keys)))
+
+defn NewChallenge(bits, env)
+  (** A challenge of bits bits. *)
+  rest = "$(math.Floor(env.Now()) + ChallengeTime).$bits.$(encode.Hex(crypto.Random(16, env.Keys)))"
+  "$rest.$(mac(rest, env))"
+end
+
+defn zeros(hash)
+  (** The bits at zero at the start of a hash. *)
+  n = 0
+  for b in text.Bytes(hash)
+    if b != 0
+      k = 128
+      while math.BitAnd(b, k) == 0
+        n += 1
+        k = math.Div(k, 2)
+      end
+      return n
+    end
+    n += 8
+  end
+  n
+end
+
+(** Does this nonce answer this challenge: BLAKE2b-256 of "challenge.nonce" starts with bits bits at zero. *)
+Answers(challenge, nonce, bits, keys) = zeros(crypto.Blake2b("$challenge.$nonce", keys)) >= bits
+
+defn Solve(challenge, keys)
+  (** The answer to a challenge, "challenge:nonce", found by trying nonces 0, 1, 2...: what a page does, here for a
+      test or a program. *)
+  bits = text.Number(text.Split(".", challenge)[2])
+  nonce = 0
+  while not Answers(challenge, "$nonce", bits, keys)
+    nonce += 1
+  end
+  "$challenge:$nonce"
+end
+
+defn Proved(proof, bits, env)
+  (** Is a proof, "challenge:nonce", a fresh answer to a challenge of this app of at least bits bits: an Ok of true
+      once its random part is written, so that it serves once; an Ok of false for any other. *)
+  if not value.IsText(proof) or text.ByteLength(proof) > 400
+    return result.Ok(false)
+  end
+  cut = text.Split(":", proof)
+  parts = text.Split(".", cut[1])
+  if value.Len(cut) != 2 or value.Len(parts) != 4 or text.ByteLength(cut[2]) > 40
+    return result.Ok(false)
+  end
+  rest = "$(parts[1]).$(parts[2]).$(parts[3])"
+  ends = text.Number(parts[1])
+  asked = text.Number(parts[2])
+  if not crypto.IsSame(mac(rest, env), parts[4], env.Keys) or not value.IsInt(ends) or ends < env.Now() or not value.IsInt(asked) or asked < bits
+    return result.Ok(false)
+  end
+  if not Answers(cut[1], cut[2], asked, env.Keys)
+    return result.Ok(false)
+  end
+  once = cepheus.Insert(Proof, {Key: parts[3], Ends: ends}, env.Db, why = "proof of work")
+  if result.IsErr(once)
+    return if once.Error.Code == "unique" result.Ok(false) else once end
+  end
+  result.Ok(true)
+end

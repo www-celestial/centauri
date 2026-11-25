@@ -1,0 +1,159 @@
+(* The accounts' part of the administration of the platform, for its super-admins: the counts, the users, the tenants,
+   their members and roles, disabling a user, ending his sessions. Each is an endpoint of package api
+   (AdminOfAccounts), and each change is an event of the history. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use std/dict
+use std/list
+use std/metrics
+use std/result
+use std/text
+use std/value
+
+defn adminOfAccounts()
+  (** The routes of the accounts' part of the administration. *)
+  [app.Serve(api.AdminStats, adminStats), app.Serve(api.AdminUsers, adminUsers), app.Serve(api.AdminUser, adminUser),
+   app.Serve(api.AdminDisable, r -> disabled(r, true)), app.Serve(api.AdminEnable, r -> disabled(r, false)),
+   app.Serve(api.AdminSignOut, adminSignOut), app.Serve(api.AdminSuper, adminSuper), app.Serve(api.AdminTenants, adminTenants),
+   app.Serve(api.AdminTenant, adminTenant), app.Serve(api.AdminRoles, adminRoles)]
+end
+
+defn count(n, question, db)
+  (** The number of answers of a question of n variables, by the aggregate Count. *)
+  rows = cepheus.Find(n, question, db)?
+  result.Ok(if value.Len(rows) == 0 0 else rows[1].N end)
+end
+
+defn metric(name)
+  (** The sum of a counter of std/metrics over all its labels. *)
+  total = 0
+  for line in text.Lines(metrics.Text())
+    if text.StartsWith(name, line)
+      cut = text.Split(" ", line)
+      v = text.Number(cut[value.Len(cut)])
+      total = total + if value.IsNumber(v) v else 0 end
+    end
+  end
+  total
+end
+
+defn adminStats(r)
+  {Users: count(2, (u, e) -> {Where: [[u, User.Email, e]], Give: {N: cepheus.Count()}}, r.Db)?,
+    Tenants: count(2, (t, c) -> {Where: [[t, Tenant.Created, c]], Give: {N: cepheus.Count()}}, r.Db)?,
+    Sessions: count(2, (s, h) -> {Where: [[s, Session.Hash, h]], Give: {N: cepheus.Count()}}, r.Db)?,
+    Requests: metric("centauri_requests_total"), Refused: metric("centauri_refused_total"), Failures: app.Failures(r.Env.State)}
+end
+
+defn userRow(id, db)
+  (** A user as the admin sees him. *)
+  u = cepheus.Get(User, id, db)?
+  result.Ok({Id: id, Email: u.Email, Name: dict.GetOr("Name", "", u), Super: u.Super == true, Disabled: u.Disabled == true, Created: u.Created})
+end
+
+defn adminUsers(r, q)
+  (** A page of users, the newest first: those whose e-mail starts with Search, of the tenant Tenant. *)
+  rows = cepheus.Find(4, (u, e, c, m) -> {Where: list.Concat([[u, User.Email, e], [u, User.Created, c]],
+    list.Concat(if value.IsMissing(q.Search) or q.Search == "" [] else [cepheus.Prefix(e, text.Lower(q.Search))] end,
+      if value.IsMissing(q.Tenant) [] else [[m, Member.User, u], [m, Member.Tenant, q.Tenant]] end)),
+    Give: {Id: u, Created: c}, Sort: [cepheus.Desc(c), cepheus.Desc(u)], Limit: r.Limit, After: r.After}, r.Db)?
+  result.Ok([dict.Merge(x, userRow(x.Id, r.Db)?) for x in rows])
+end
+
+defn adminUser(r)
+  (** A user, his tenants with his roles, his sessions. *)
+  id = app.IdOf(r.Params.id)
+  u = if value.IsMissing(id) missing else cepheus.Get(User, id, r.Db)? end
+  if value.IsMissing(u) or value.IsMissing(u.Email)
+    return app.Missing()
+  end
+  ms = cepheus.Find(2, (m, t) -> {Where: [[m, Member.User, id], [m, Member.Tenant, t]], Give: {Member: m, Tenant: t}, Sort: [t]}, r.Db)?
+  {User: userRow(id, r.Db)?, Tenants: [{Tenant: m.Tenant, Name: tenantName(m.Tenant, r.Db), Roles: cepheus.Get(Member, m.Member, r.Db)?.Roles} for m in ms],
+    Sessions: [dict.Put("Current", false, s) for s in SessionsOf(id, r.Db)?]}
+end
+
+defn target(r)
+  (** The user of the path: an Ok of his id, or a 404. *)
+  id = app.IdOf(r.Params.id)
+  u = if value.IsMissing(id) missing else cepheus.Get(User, id, r.Db)? end
+  if value.IsMissing(u) or value.IsMissing(u.Email) app.Missing() else result.Ok(id) end
+end
+
+defn disabled(r, yes)
+  (** POST /admin/users/:id/disable and /enable: a disabled user's sessions end, and no new one opens. *)
+  id = target(r)?
+  if yes and id == r.User.Id
+    return app.Fail(409, "You may not disable yourself.")
+  end
+  cepheus.Update(User, id, {Disabled: yes}, r.Db, by = r.User.Id, why = r.Why)?
+  if yes
+    EndSessions([s.Id for s in SessionsOf(id, r.Db)?], r.User.Id, r.Why, r.Db)?
+  end
+  note(r, if yes "disabled" else "enabled" end, "User $id.", user = r.User.Id, every = 0)
+  result.Ok(missing)
+end
+
+defn adminSignOut(r)
+  (** POST /admin/users/:id/signout. *)
+  id = target(r)?
+  EndSessions([s.Id for s in SessionsOf(id, r.Db)?], r.User.Id, r.Why, r.Db)?
+  note(r, "signout-all", "Every session of user $id ended.", user = r.User.Id, every = 0)
+  result.Ok(missing)
+end
+
+defn adminSuper(r, x)
+  (** PUT /admin/users/:id/super: no super-admin takes the role from himself, so the platform keeps one. *)
+  id = target(r)?
+  if not x.Super and id == r.User.Id
+    return app.Fail(409, "You may not take the role super from yourself.")
+  end
+  cepheus.Update(User, id, {Super: x.Super}, r.Db, by = r.User.Id, why = r.Why)?
+  note(r, "super", "User $id: super $(x.Super).", user = r.User.Id, every = 0)
+  result.Ok(missing)
+end
+
+defn adminTenants(r, q)
+  (** A page of tenants, the newest first, whose name starts with Search (in small letters). *)
+  cepheus.Find(4, (t, n, c, s) -> {Where: list.Concat([[t, Tenant.Name, n], [t, Tenant.Created, c]],
+    if value.IsMissing(q.Search) or q.Search == "" [] else [[t, Tenant.Search, s], cepheus.Prefix(s, text.Lower(q.Search))] end),
+    Give: {Id: t, Name: n, Created: c}, Sort: [cepheus.Desc(c), cepheus.Desc(t)], Limit: r.Limit, After: r.After}, r.Db)
+end
+
+defn adminTenant(r)
+  (** A tenant and all its members. *)
+  id = app.IdOf(r.Params.id)
+  t = if value.IsMissing(id) missing else cepheus.Get(Tenant, id, r.Db)? end
+  if value.IsMissing(t) or value.IsMissing(t.Created)
+    return app.Missing()
+  end
+  rows = cepheus.Find(4, (m, u, e, n) -> {Where: [[m, Member.Tenant, id], [m, Member.User, u], [u, User.Email, e], [u, User.Name, n]],
+    Give: {Member: m, User: u, Email: e, Name: n}, Sort: [e, m]}, r.Db)?
+  {Tenant: {Id: id, Name: dict.GetOr("Name", "", t), Created: t.Created}, Members: [dict.Put("Roles", cepheus.Get(Member, x.Member, r.Db)?.Roles, x) for x in rows]}
+end
+
+defn adminRoles(r, x)
+  (** PUT /admin/tenants/:id/members/:user: the roles of a user in a tenant; none ends his membership. *)
+  tenant = app.IdOf(r.Params.id)
+  user = app.IdOf(r.Params.user)
+  t = if value.IsMissing(tenant) missing else cepheus.Get(Tenant, tenant, r.Db)? end
+  u = if value.IsMissing(user) missing else cepheus.Get(User, user, r.Db)? end
+  if value.IsMissing(t) or value.IsMissing(t.Created) or value.IsMissing(u) or value.IsMissing(u.Email)
+    return app.Missing()
+  end
+  for role in x.Roles
+    if not dict.Has(role, r.Env.Roles)
+      return app.Fail(422, "Check the fields.", fields = {Roles: "$role is no role of this app."})
+    end
+  end
+  if value.Len(x.Roles) == 0
+    m = membershipOf(user, tenant, r.Db)?
+    if not value.IsMissing(m)
+      cepheus.Write(app.Gone(Member, m.Member, r.Db)?, r.Db, by = r.User.Id, why = r.Why)?
+      EndSessions([s.Id for s in cepheus.Find(1, s -> {Where: [[s, Session.Member, m.Member]], Give: {Id: s}}, r.Db)?], r.User.Id, r.Why, r.Db)?
+    end
+  else
+    Join(user, tenant, x.Roles, r.User.Id, r.Why, r.Db, r.Now)?
+  end
+  note(r, "roles", "The roles of $user in $tenant are now $(x.Roles).", user = r.User.Id, tenant = tenant, every = 0)
+  result.Ok(missing)
+end

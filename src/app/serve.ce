@@ -274,7 +274,7 @@ defn served(b, e, req, env, rid)
     return failed(db.Error, rid, env, e)
   end
   before = if reads and s.GetDb == "fork" probe(db.Value) else missing end
-  r = {Method: req.Method, Path: req.Path, Params: req.Params, Query: req.Query, Headers: req.Headers, Cookies: req.Cookies, Ip: req.Ip,
+  r = {Method: req.Method, Path: req.Path, Params: req.Params, Query: req.Query, Headers: req.Headers, Cookies: req.Cookies, Body: req.Body, Ip: req.Ip,
     Id: rid, Route: e.Name, User: user, Db: db.Value, Why: "$(e.Name) #$rid", Settings: s, Now: env.Now(), Keys: env.Keys,
     Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
   got = if value.IsMissing(e.In) and value.IsMissing(e.Query) b.Handler(r) else b.Handler(r, x.Value) end

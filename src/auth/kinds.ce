@@ -1,0 +1,41 @@
+(* The kinds of the accounts. A user is a person; a tenant is what keeps its data apart from the others' (an office, a
+   company, a family); a member is a user in a tenant with his roles; a session is a sign-in, whose cookie holds its
+   id and a secret of which the database keeps the BLAKE2b hash only, so a copy of the database opens no session. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+
+(** A user: his e-mail (unique), his name, the Argon2id hash of his password, Super for an administrator of the whole
+    platform, Disabled for one who may no longer sign in, and when he signed up. *)
+User = app.Kind("centauri_user", {Email: cepheus.Text(unique = true), Name: cepheus.Text(), Hash: cepheus.Text(), Super: cepheus.Bool(),
+  Disabled: cepheus.Bool(), Created: cepheus.Date()})
+
+(** A tenant: its name, its name in small letters for a search by its start, when it was made, its first owner, and
+    Key, unique, for the one tenant of a single-tenant app ("single"). *)
+Tenant = app.Kind("centauri_tenant", {Name: cepheus.Text(), Search: cepheus.Text(), Created: cepheus.Date(), Owner: cepheus.Link(),
+  Key: cepheus.Text(unique = true)})
+
+(** A user in a tenant, with his roles there; Key, unique, is "user/tenant", so a user is a member of a tenant once. *)
+Member = app.Kind("centauri_member", {User: cepheus.Link(), Tenant: cepheus.Link(), Roles: cepheus.Text(many = true),
+  Key: cepheus.Text(unique = true), Created: cepheus.Date()})
+
+(** A session: its user, his membership and its tenant (none for a super-admin who is a member of none), the hash of its
+    secret, when it started, when it was last seen, when it ends at the latest, and the address and browser it began
+    from, which the user sees in the list of his sessions. *)
+Session = app.Kind("centauri_session", {User: cepheus.Link(), Member: cepheus.Link(), Tenant: cepheus.Link(), Hash: cepheus.Text(),
+  Started: cepheus.Date(), Seen: cepheus.Date(), Ends: cepheus.Date(), Ip: cepheus.Text(), Agent: cepheus.Text()})
+
+(** An invitation to a tenant: the e-mail it is for, the roles it gives, the hash of its code (unique), when it ends,
+    and who made it. *)
+Invite = app.Kind("centauri_invite", {Tenant: cepheus.Link(), Email: cepheus.Text(), Roles: cepheus.Text(many = true),
+  Hash: cepheus.Text(unique = true), Ends: cepheus.Date(), By: cepheus.Link()})
+
+(** The failed sign-ins of a login: Key, unique, is "login:" and the e-mail; Count the failures in a row; Last the
+    time of the last one. A success sets Count back to 0. *)
+Failure = app.Kind("centauri_failure", {Key: cepheus.Text(unique = true), Count: cepheus.Int(), Last: cepheus.Date()})
+
+(** A challenge of proof of work once answered: Key, unique, is its random part, so that no answer serves twice; it is
+    forgotten once it has ended. *)
+Proof = app.Kind("centauri_proof", {Key: cepheus.Text(unique = true), Ends: cepheus.Date()})
+
+(** The kinds of package auth. *)
+Kinds = [User, Tenant, Member, Session, Invite, Failure, Proof]
