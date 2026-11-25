@@ -39,3 +39,9 @@ timeout = "120"
 [tasks.admin-serve]
 file = "tools/admin-serve.ce"
 allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", "read", "read=/usr/share/zoneinfo"]
+
+# The test of the admin pages in Chrome without a window (CHROME, a Chrome or a chrome-headless-shell), driven by its
+# DevTools protocol: pictures of each page in OUT (shots/). cesia build --target wasm admin/page.ce first.
+[tasks.admin-shot]
+file = "tools/admin-shot.ce"
+allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", "read", "write", "exec", "read=/usr/share/zoneinfo"]

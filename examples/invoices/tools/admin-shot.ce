@@ -1,0 +1,118 @@
+(** The test of the admin pages in a browser: the invoices and their admin served in this program (tools/admin-serve.ce,
+    a database in memory filled with a month), Chrome without a window opens /admin, driven by its DevTools protocol over
+    std/websocket; tools/admin-play.js, evaluated in the page, plays a super-admin who signs in, visits each page, disables
+    a user, changes an invoice in place, marks one paid by the app's own action, reads the audit trail and signs out. A
+    picture of each page goes to OUT (shots/ by default). CHROME names the browser, a Chrome or a chrome-headless-shell;
+    its profile is in PROFILE (/tmp/centauri-admin-shot). Build the pages first: cesia build --target wasm admin/page.ce. *)
+use deps/www-celestial/centauri/src/app
+use src/filled
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket
+
+defn env(name, default)
+  v = sys.Env(name)
+  if value.IsText(v) and v != "" v else default end
+end
+
+defn ask(conn, id, method, params)
+  (** A command of the DevTools protocol and its result, the messages before it left aside. *)
+  _ = websocket.Send(json.Text({id: id, method: method, params: params}), conn)
+  while true
+    m = json.Parse(fiber.Receive(conn.Messages, timeout = 60)?)?
+    if value.IsDict(m) and "id" in m and m["id"] == id
+      return if "error" in m result.Err({Kind: "cdp", Message: json.Text(m["error"])}) else result.Ok(m["result"]) end
+    end
+  end
+end
+
+defn evaluated(conn, id, expression)
+  (** The value of an expression evaluated in the page, its promise awaited. *)
+  r = ask(conn, id, "Runtime.evaluate", {expression: expression, awaitPromise: true, returnByValue: true})?
+  result.Ok(dict.GetOr("value", "", r["result"]))
+end
+
+defn pictured(conn, id, path)
+  (** A picture of the page, in a file. *)
+  s = ask(conn, id, "Page.captureScreenshot", {format: "png"})?
+  sys.Write(path, encode.Unbase64(s["data"])?)
+end
+
+defn waitReady(conn, n, start)
+  (** Waits for the page to have loaded its canvas: the next number of a command. *)
+  ready = false
+  k = n
+  while not ready and sys.Now() - start < 60
+    sys.Sleep(0.2)
+    k += 1
+    got = evaluated(conn, k, "document.readyState === 'complete' && !!document.querySelector('canvas')")
+    ready = result.IsOk(got) and got.Value == true
+  end
+  k + 1
+end
+
+defn main()
+  (** Serves, opens, plays, pictures: an Ok of the lines of the steps. *)
+  out = env("OUT", "shots")
+  profile = env("PROFILE", "/tmp/centauri-admin-shot")
+  l = net.Listen(0)?
+  port = net.Port(l)
+  t = filled.App(port)?
+  fiber.Spawn(() -> http.Serve(app.App(t.Env), listener = l))
+  _ = sys.Mkdir(out)
+  _ = sys.Remove("$profile/DevToolsActivePort")
+  proc = sys.Start(env("CHROME", "chrome"), args = ["--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "http://127.0.0.1:$port/admin"])?
+  start = sys.Now()
+  while not sys.Exists("$profile/DevToolsActivePort") and sys.Now() - start < 15
+    sys.Sleep(0.05)
+  end
+  debug = text.Split("\n", sys.Read("$profile/DevToolsActivePort")?)[1]
+  targets = json.Parse(http.Fetch("http://127.0.0.1:$debug/json")?.Body)?
+  page = [x for x in targets if x["type"] == "page"][1]
+  conn = websocket.Dial(page["webSocketDebuggerUrl"])?
+  lines = []
+  n = waitReady(conn, 1, start)
+  evaluated(conn, n, sys.Read("tools/admin-play.js")?)?
+  steps = [["signIn", missing, "signin"], ["signedIn", missing, "dashboard"], ["visit", "Dashboard", "dashboard"], ["visit", "Users", "users"], ["disable", missing, "users-disabled"],
+    ["visit", "Tenants", "tenants"], ["visit", "Events", "events"], ["visit", "Log", "log"], ["visit", "Jobs", "jobs"], ["visit", "Webhooks", "webhooks"],
+    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"],
+    ["visit", "Unpaid", "unpaid"], ["pay", missing, "unpaid-paid"], ["visit", "Audit", "audit"], ["audit", missing, "audit-after"], ["signOut", missing, "signout"], ["signedOut", missing, "signout"]]
+  for s in steps
+    n += 2
+    if s[1] == "signedIn" or s[1] == "signedOut"
+      (* the page loaded again with its new cookie: the player goes in it again *)
+      sys.Sleep(1)
+      n = waitReady(conn, n, start)
+      evaluated(conn, n, sys.Read("tools/admin-play.js")?)?
+      n += 2
+    end
+    got = evaluated(conn, n, "adminPlay($(json.Text(s[1])), $(json.Text(s[2])))")?
+    lines = list.Append(got, lines)
+    if s[1] != "signIn" and s[1] != "signOut"
+      pictured(conn, n + 1, "$out/admin-$(s[3]).png")?
+    end
+  end
+  sys.Stop(proc)
+  result.Ok(lines)
+end
+
+got = main()
+if result.IsErr(got)
+  io.PrintError("admin-shot: $(got.Error)")
+  sys.Exit(1)
+end
+for l in got.Value
+  io.Print(l)
+end
+sys.Exit(if list.All([text.StartsWith("ok", l) for l in got.Value]) 0 else 1 end)
