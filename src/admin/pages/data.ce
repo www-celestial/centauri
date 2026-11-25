@@ -105,6 +105,10 @@ defn typed(s, f)
     if f.Type == "bool"
       return if x in ["yes", "true", "1"] true else if x in ["no", "false", "0"] false else x end
     end
+    if f.Type == "date" and value.Len(x) == 10
+      day = Seconds(x)
+      return if value.IsMissing(day) x else day end
+    end
     if f.Type == "date"
       iso = Iso(x)
       s1 = if value.IsMissing(iso) missing else Seconds(iso) end

@@ -131,10 +131,14 @@ OffsetAt(seconds) = date.Local(seconds).Offset
 Utc(seconds) = date.Format(date.FromUnix(seconds))
 
 defn Local(x)
-  (** A time on the viewer's clock, as 2026-11-13 03:00:05, from ISO text or seconds: "" for none. *)
+  (** A time on the viewer's clock, as 2026-11-13 03:00:05, from ISO text or seconds: "" for none. A day, as Cepheus
+      keeps one (00:00 UTC), is shown as the day, 2026-11-13, on no clock. *)
   s = Seconds(x)
   if value.IsMissing(s)
     return ""
+  end
+  if math.Floor(s) == s and math.Mod(math.Floor(s), 86400) == 0
+    return date.FormatDate(date.FromUnix(s))
   end
   d = date.Local(s)
   "$(d.Year)-$(two(d.Month))-$(two(d.Day)) $(two(d.Hour)):$(two(d.Minute)):$(two(d.Second))"
