@@ -1,0 +1,110 @@
+(* The contracts of the administration of the whole platform, for its super-admins (role Super): what the admin pages
+   read and do. The app's part (its settings, logs, metrics, endpoints, kinds and data) is served by package app; the
+   accounts' part (users, tenants, roles, sessions) by package auth. *)
+use std/check
+use std/dict
+
+(** The app: its name, its version, its profile, when it started, its modules, how many endpoints and kinds. *)
+AdminApp = Get("/admin/app", out = check.Record({Name: check.Text(0, 200), Version: check.Text(0, 50), Profile: check.Text(0, 10),
+  Started: check.Time(), Uptime: check.Float(0), Modules: check.List(check.Text(0, 100), 0, 1000), Endpoints: check.Int(0),
+  Kinds: check.Int(0)}), role = Super, about = "The app, its modules and its counts.")
+
+(** A setting as the admin sees it: its name, its variable of the environment, its value as text ("(secret)" for a
+    secret), and where it came from: "env", "code" (a default of the app) or "default" (Centauri's). *)
+SettingRow = check.Record({Name: check.Text(1, 100), Env: check.Text(1, 120), Value: check.Text(0, 4000), From: check.OneOf(["env", "code", "default"])})
+
+(** The settings of the app, the secrets masked. *)
+AdminSettings = Get("/admin/settings", out = check.List(SettingRow, 0, 1000), role = Super, about = "The settings, secrets masked.")
+
+(** A line of the log: when, its level, its message and its fields as JSON. *)
+LogRow = check.Record({At: check.Time(), Level: check.OneOf(["info", "warn", "error"]), Message: check.Text(0, 1000),
+  Fields: check.Text(0, 10000)})
+
+(** The last lines of the log of this process, the newest first, filtered by level and by a text they hold. *)
+AdminLogs = Get("/admin/logs", query = check.Record({Level: check.OneOf(["info", "warn", "error"], optional = true),
+  Search: check.Text(0, 200, optional = true)}), out = check.List(LogRow, 0, 10000), role = Super, about = "The last lines of the log.")
+
+(** An endpoint as the admin sees it. *)
+EndpointRow = check.Record({Name: check.Text(1, 300), Method: check.Text(1, 10), Path: check.Text(1, 300), Role: check.Text(1, 40),
+  Module: check.Text(0, 100), Limit: check.Int(0, optional = true), About: check.Text(0, 1000, optional = true)})
+
+(** Every endpoint of the app, by module. *)
+AdminEndpoints = Get("/admin/endpoints", out = check.List(EndpointRow, 0, 10000), role = Super, about = "Every endpoint, by module.")
+
+(** A value of a metric: its name, its labels as Prometheus writes them, and its value. *)
+MetricRow = check.Record({Name: check.Text(1, 200), Labels: check.Text(0, 1000), Value: check.Float(-1e300, 1e300)})
+
+(** The metrics of this process: requests, their times, refusals by reason, and the rest of std/metrics. *)
+AdminMetrics = Get("/admin/metrics", out = check.List(MetricRow, 0, 100000), role = Super, about = "The metrics of this process.")
+
+(** An event of the history of the platform: a sign-in, a failure, a lockout, a refusal, a change of roles. *)
+EventRow = check.Record({Id: check.Id(), At: check.Time(), Kind: check.Text(1, 60), User: check.Id(optional = true),
+  Tenant: check.Id(optional = true), Ip: check.Text(0, 64), Route: check.Text(0, 300), Detail: check.Text(0, 2000)})
+
+(** The events, the newest first, filtered by kind, tenant and user. *)
+AdminEvents = Get("/admin/events", query = check.Record({Kind: check.Text(1, 60, optional = true), Tenant: check.Id(optional = true),
+  User: check.Id(optional = true)}), out = Page(EventRow, 50), role = Super, about = "The history of sign-ins, failures, refusals and changes.")
+
+(** A kind of the database, with its fields, and the module that declares it. *)
+KindRow = check.Record({Name: check.Text(1, 100), Module: check.Text(0, 100), Fields: check.List(check.Record({Name: check.Text(1, 100),
+  Type: check.Text(1, 20), Unique: check.Bool(), Many: check.Bool()}), 0, 1000)})
+
+(** The kinds of the app. *)
+AdminKinds = Get("/admin/kinds", out = check.List(KindRow, 0, 10000), role = Super, about = "The kinds of the database.")
+
+(** A thing of a kind: its id and its fields, as JSON. *)
+ThingRow = check.Record({Id: check.Id(), Fields: check.Text(0, 1000000)})
+
+(** The things of a kind, by their ids, of one tenant when Tenant is given and the kind has a Tenant. *)
+AdminData = Get("/admin/data/:kind", query = check.Record({Tenant: check.Id(optional = true)}), out = Page(ThingRow, 50), role = Super,
+  about = "The things of a kind.")
+
+(** The counts of the platform. *)
+AdminStats = Get("/admin/stats", out = check.Record({Users: check.Int(0), Tenants: check.Int(0), Sessions: check.Int(0),
+  Requests: check.Int(0), Refused: check.Int(0), Failures: check.Int(0)}), role = Super, about = "Users, tenants, sessions, requests.")
+
+(** A user as the admin sees him. *)
+UserRow = check.Record({Id: check.Id(), Email: check.Email(), Name: check.Text(0, 120), Super: check.Bool(), Disabled: check.Bool(),
+  Created: check.Time()})
+
+(** The users, the newest first, of one tenant or all, whose e-mail starts with Search. *)
+AdminUsers = Get("/admin/users", query = check.Record({Search: check.Text(0, 254, optional = true), Tenant: check.Id(optional = true)}),
+  out = Page(UserRow, 50), role = Super, about = "The users.")
+
+(** A user, his tenants with his roles, and his sessions. *)
+AdminUser = Get("/admin/users/:id", out = check.Record({User: UserRow, Tenants: check.List(check.Record({Tenant: check.Id(),
+  Name: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40)}), 0, 1000), Sessions: check.List(SessionRow, 0, 1000)}),
+  role = Super, about = "A user, his tenants and his sessions.")
+
+(** A user may no longer sign in, and his sessions end. *)
+AdminDisable = Post("/admin/users/:id/disable", role = Super, about = "Disables a user: his sessions end.")
+
+(** A user disabled may sign in again. *)
+AdminEnable = Post("/admin/users/:id/enable", role = Super, about = "Enables a user again.")
+
+(** Every session of a user ends. *)
+AdminSignOut = Post("/admin/users/:id/signout", role = Super, about = "Ends every session of a user.")
+
+(** A user becomes a super-admin, or stops being one. *)
+AdminSuper = Put("/admin/users/:id/super", body = check.Record({Super: check.Bool()}), role = Super, about = "Gives or takes the role super.")
+
+(** A tenant as the admin sees it. *)
+TenantRow = check.Record({Id: check.Id(), Name: check.Text(0, 120), Created: check.Time()})
+
+(** The tenants, the newest first, whose name starts with Search. *)
+AdminTenants = Get("/admin/tenants", query = check.Record({Search: check.Text(0, 120, optional = true)}), out = Page(TenantRow, 50),
+  role = Super, about = "The tenants.")
+
+(** A tenant and its members. *)
+AdminTenant = Get("/admin/tenants/:id", out = check.Record({Tenant: TenantRow, Members: check.List(MemberRow, 0, 10000)}), role = Super,
+  about = "A tenant and its members.")
+
+(** The roles of a user in a tenant: a membership made when he has none, ended when Roles is empty. *)
+AdminRoles = Put("/admin/tenants/:id/members/:user", body = check.Record({Roles: check.List(check.Text(1, 40), 0, 20)}), role = Super,
+  about = "Sets the roles of a user in a tenant.")
+
+(** The endpoints of the app's part of the administration, served by package app. *)
+AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData]
+
+(** The endpoints of the accounts' part, served by package auth. *)
+AdminOfAccounts = [AdminStats, AdminUsers, AdminUser, AdminDisable, AdminEnable, AdminSignOut, AdminSuper, AdminTenants, AdminTenant, AdminRoles]

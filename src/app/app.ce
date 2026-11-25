@@ -1,0 +1,211 @@
+(** Centauri's core: an app is a list of modules, each a record of its kinds, its rules and its routes; a route is an
+    endpoint of a contract (package api) and the function that answers it. No class, no annotation, no container of
+    dependencies: what a handler uses comes in its request r, as r.User (who asks: Id, Tenant, Roles, Super), r.Db
+    (the database), r.Why (what writes, for the history), r.Params, r.Settings. Run reads the settings, connects to
+    Cepheus and serves; apptest.Start runs the same app in memory.
+
+      Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = api.Public)
+      hello(r) = {Text: "Hello!"}
+      Of([Module("hello", serve = [Serve(Hello, hello)])]).Endpoints[1].Name --> "GET /hello" *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use std/bug
+use std/check
+use std/crypto
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/log
+use std/metrics
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+(** A route: an endpoint of a contract and its handler. The handler is handler(r) for an endpoint that takes nothing,
+    handler(r, x) for one with a body or a query, x read through its shape. It gives a value, which leaves through the
+    endpoint's out (only the fields it declares), or an Err (Fail, or one of Cepheus, passed on by ?). A page endpoint
+    (out = api.Page) gives its rows, at most r.Limit of them after r.After, as cepheus.Find gives them with Limit:
+    r.Limit, After: r.After; Centauri makes the page and its cursor.
+
+      Serve(api.Get("/ping", role = api.Public), r -> missing).Endpoint.Path --> "/ping" *)
+Serve(endpoint, handler) = {Endpoint: endpoint, Handler: handler}
+
+(** A kind of Cepheus that keeps its name and fields for the administration, which lists the kinds and their things:
+    cepheus.Kind, and two keys more, in small letters so that they meet no field.
+
+      Kind("note", {Text: cepheus.Text()})["name"] --> "note" *)
+Kind(name, fields) = cepheus.Kind(name, fields) then dict.Put("name", name) then dict.Put("fields", fields)
+
+(** A module: its name, its kinds and rules of Cepheus, its routes (Serve), and for a module of the framework, who
+    (the function that reads the session of a request, as auth gives it), settings (the shapes of its own settings),
+    start (a function of env that runs in its own fiber once the app serves, as a keeper that ends old sessions).
+
+      Module("notes", serve = []).Name --> "notes" *)
+Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing) = {Name: name, Kinds: kinds, Rules: rules,
+  Serve: serve, Who: who, Settings: settings, Start: start}
+
+(** The roles of an app unless it names its own: each role with the roles it includes. owner and admin manage the
+    members of their tenant (the endpoints of auth need admin); member is the role of every user who signs up. *)
+DefaultRoles = {owner: ["admin", "member"], admin: ["member"], member: []}
+
+defn Expand(roles, table)
+  (** Roles with every role they include, from a table of roles.
+
+        Expand(["owner"], DefaultRoles) --> ["owner", "admin", "member"] *)
+  out = []
+  todo = roles
+  while value.Len(todo) > 0
+    r = todo[1]
+    todo = list.Skip(1, todo)
+    if not (r in out)
+      out = list.Append(r, out)
+      todo = list.Concat(todo, dict.GetOr(r, [], table))
+    end
+  end
+  out
+end
+
+defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name = "app", version = "0.1.0", pages = missing)
+  (** An app: its modules, in order, then its own settings (a check.Record, or a map of names to shapes), its roles,
+      the defaults of its settings (values of their types, which the environment overrides: an app that is single-
+      tenant says defaults = {Tenancy: "single"}), its name and version (for OpenAPI and the admin), and pages, the
+      folder of its front (dist/), served for the paths that no route takes. An endpoint whose role is no role of the
+      table, nor api.Public, api.Signed or api.Super, stops here: a role written wrong never opens a route. *)
+  fields = Core
+  kinds = Kinds
+  rules = []
+  served = []
+  for m in modules
+    fields = dict.Merge(fields, m.Settings)
+    kinds = list.Concat(kinds, m.Kinds)
+    rules = list.Concat(rules, m.Rules)
+    for b in m.Serve
+      if b.Endpoint.Method != "LIVE"
+        served = list.Append({Endpoint: b.Endpoint, Handler: b.Handler, Module: m.Name}, served)
+      end
+    end
+  end
+  if not value.IsMissing(settings)
+    fields = dict.Merge(fields, if dict.Has("Kind", settings) and settings.Kind == "record" settings.Fields else settings end)
+  end
+  known = list.Concat([api.Public, api.Signed, api.Super], dict.Keys(roles))
+  for b in served
+    bug.Assert(b.Endpoint.Role in known, "$(b.Endpoint.Name): the role $(b.Endpoint.Role) is no role of the app ($(text.Join(", ", dict.Keys(roles)))).")
+  end
+  {Name: name, Version: version, Modules: modules, Fields: fields, Defaults: defaults, Roles: roles, Kinds: kinds, Rules: rules,
+    Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served]}
+end
+
+defn Start(a, s, db, readDb = missing, clock = missing)
+  (** What every request of an app shares, env: its settings s (as Read gives them), its database, the database of a
+      token that reads only (for GetDb = "read"), the state of the process, the keys of libsodium, and the time (the
+      clock of a test, when given). An Ok of env; Handler(env) serves it. *)
+  keys = crypto.Open()?
+  hashSlots = dict.GetOr("HashSlots", 2, s)
+  state = State(slots = hashSlots, kept = s.LogLines, clock = clock)?
+  key = if value.IsMissing(dict.Get("Secret", s)) crypto.Random(32, keys) else crypto.Blake2b("centauri cursor $(s.Secret)", keys) end
+  who = missing
+  for m in a.Modules
+    if value.IsMissing(who) and not value.IsMissing(m.Who)
+      who = m.Who
+    end
+  end
+  served = list.Concat(adminOfApp(), a.Served)
+  cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
+  env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles,
+    Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
+    Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-",
+    Now: if value.IsMissing(clock) (() -> sys.Now()) else (() -> Now(state)) end,
+    OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version))}
+  result.Ok(env)
+end
+
+defn App(env)
+  (** The app as std/http serves it: its routes behind Centauri's door. *)
+  routes = http.App()
+  for b in env.Served
+    routes = http.Route(b.Endpoint.Method, b.Endpoint.Path, req -> answer(b, req, env), routes)
+  end
+  if env.Profile.OpenApi
+    routes = http.Get("/openapi.json", req -> openapi(env), routes)
+  end
+  if not value.IsMissing(env.Pages)
+    routes = http.Get("/*", req -> page(env.Pages, req.Params["*"]), routes)
+  end
+  routes then http.Wrap((next, req) -> front(next, req, env))
+end
+
+(** The function of a request that the app is: what http.Serve calls, and what a test calls without the network. *)
+Handler(env) = http.Handler(App(env))
+
+defn openapi(env)
+  (** /openapi.json, in the profiles dev and test. *)
+  out = {Status: 200, Body: env.OpenApi, Headers: [{Name: "content-type", Value: "application/json"}]}
+  out.Done = true
+  out
+end
+
+defn stop(lines)
+  (** Stops the start with what is wrong, one line each. *)
+  for l in lines
+    io.PrintError("centauri: $l")
+  end
+  sys.Exit(2)
+end
+
+defn ready(what, x)
+  (** The value of an Ok, or the start stops with what failed; the message of the Err holds no secret. *)
+  if result.IsErr(x)
+    stop(["$what: $(if value.IsDict(x.Error) dict.GetOr("Message", value.Text(x.Error), x.Error) else value.Text(x.Error) end)"])
+  end
+  x.Value
+end
+
+defn Run(a)
+  (** Serves an app until a stop signal: reads its settings from the environment (each from APP_ and its name; a
+      wrong or missing one stops the start, with all of them named), connects to Cepheus with the kinds of every
+      module (Cepheus declares those it lacks: adding a field needs no migration), defines the rules, starts the
+      modules' keepers, and serves, with TLS when Cert and Key are given, and /metrics on 127.0.0.1:AdminPort when it
+      is given. Without APP_CEPHEUS_URL in dev, the database is a fork in memory, which keeps nothing. *)
+  started = sys.Now()
+  got = Load(a.Fields, defaults = a.Defaults)
+  if result.IsErr(got)
+    stop(got.Error)
+  end
+  s = got.Value
+  db = missing
+  readDb = missing
+  if value.IsMissing(dict.Get("CepheusUrl", s))
+    log.Warn("no APP_CEPHEUS_URL: the database is in memory, and nothing is kept")
+    db = ready("database", cepheus.Fork(cepheus.Empty, a.Kinds))
+  else
+    db = ready("connect", cepheus.Connect(s.CepheusUrl, a.Kinds, token = dict.Get("CepheusToken", s), ca = dict.Get("CepheusCa", s)))
+    if s.GetDb == "read"
+      readDb = ready("connect with the token that reads", cepheus.Connect(s.CepheusUrl, a.Kinds, token = s.CepheusReadToken, ca = dict.Get("CepheusCa", s)))
+    end
+  end
+  if value.Len(a.Rules) > 0
+    ready("rules", cepheus.Define(a.Rules, db))
+  end
+  env = ready("start", Start(a, s, db, readDb = readDb))
+  for m in a.Modules
+    if not value.IsMissing(m.Start)
+      fiber.Spawn(() -> m.Start(env))
+    end
+  end
+  wrap = missing
+  if not value.IsMissing(dict.Get("Cert", s))
+    wrap = ready("https", tls.Server(s.Cert, dict.Get("Key", s), ready("OpenSSL", tls.Open())))
+  end
+  if s.AdminPort > 0
+    fiber.Spawn(() -> http.Serve(http.App() then http.Get("/metrics", r -> http.Plain(metrics.Text())), port = s.AdminPort, host = "127.0.0.1"))
+  end
+  log.Info("ready", {App: a.Name, Profile: s.Profile, Port: s.Port, Ms: (sys.Now() - started) * 1000})
+  ready("serve", http.Serve(App(env), port = s.Port, host = s.Host, timeout = s.Timeout, maxBody = s.MaxBody, wrap = wrap))
+end

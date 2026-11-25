@@ -1,0 +1,93 @@
+(* The data that every app shares: the events of its history (sign-ins, failures, refusals, changes of roles), the
+   counters that number things without a gap, and the reads that keep a tenant's things its own. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/bug
+use std/dict
+use std/result
+use std/text
+use std/value
+
+(** An event of the history: when, its kind ("signin", "signin-failed", "locked", "limited", "origin", "bot", "roles",
+    or the app's own), who and in which tenant, from which address, by which route, and what happened, in words that
+    hold no secret. Every write of the app is in Cepheus's history too, with who wrote it and why. *)
+Event = Kind("centauri_event", {At: cepheus.Date(), Kind: cepheus.Text(), User: cepheus.Link(), Tenant: cepheus.Link(),
+  Ip: cepheus.Text(), Route: cepheus.Text(), Detail: cepheus.Text()})
+
+(** A counter: Key, unique, names it (a tenant's invoices: "70001/invoice"); Last is the last number it gave. *)
+Counter = Kind("centauri_counter", {Key: cepheus.Text(unique = true), Last: cepheus.Int()})
+
+(** The kinds of package app. *)
+Kinds = [Event, Counter]
+
+defn IdOf(x)
+  (** An id from outside, as a parameter of a path: an Int above 0 from a whole number or its digits, else missing.
+
+        IdOf("65537") --> 65537
+        IdOf("-1") --> missing
+        IdOf("1e3") --> missing *)
+  if value.IsInt(x)
+    return if x > 0 x else missing end
+  end
+  if not value.IsText(x) or text.ByteLength(x) == 0 or text.ByteLength(x) > 18 or not value.IsMissing(text.ByteFindAny("0123456789", 1, x, not = true))
+    return missing
+  end
+  n = text.Number(x)
+  if value.IsInt(n) and n > 0 n else missing end
+end
+
+defn Own(kind, id, r)
+  (** A thing of a kind that belongs to the tenant of who asks: an Ok of its fields and its Id, or a 404 when there is
+      no such thing or it is another tenant's: a 404 and not a 403, so that nobody learns that it exists. The kind has a
+      field Tenant, a link, which the handler writes from r.User.Tenant, never from the request. id may be a text, as
+      a parameter of the path. This is the second wall of the rights (OWASP A01, the insecure direct object
+      reference): the handler reads each thing named from outside through it, and apptest.Isolated proves the rest. *)
+  bug.Assert(dict.Has("Tenant", kind), "app.Own reads a kind with a field Tenant.")
+  n = IdOf(id)
+  if value.IsMissing(n) or value.IsMissing(r.User)
+    return Missing()
+  end
+  t = cepheus.Get(kind, n, r.Db)?
+  if value.IsMissing(t) or not value.Equal(dict.Get("Tenant", t), r.User.Tenant)
+    return Missing()
+  end
+  t.Id = n
+  result.Ok(t)
+end
+
+defn counter(key, db)
+  (** The counter of a key: an Ok of its id, made at its first use; two requests that make it at once get the same one,
+      its key being unique. *)
+  for attempt in 1..3
+    found = cepheus.Find(1, c -> {Where: [[c, Counter.Key, key]], Give: {C: c}}, db)?
+    if value.Len(found) > 0
+      return result.Ok(found[1].C)
+    end
+    made = cepheus.Insert(Counter, {Key: key, Last: 0}, db, why = "counter $key")
+    if result.IsOk(made) or made.Error.Code != "unique"
+      return made
+    end
+  end
+  result.Err({Kind: "cepheus", Code: "busy", Message: "The counter $key is being made."})
+end
+
+defn Next(name, into, r)
+  (** The operation of cepheus.Write that gives a thing the next number of the tenant's counter name: into is
+      [thing, property], an Int property. The database takes the number in the group that writes the thing, so the
+      numbers follow each other without a gap (as the law of many countries asks of invoices), and two requests at
+      once neither wait nor retry. An Ok of the operation, to write in the group that makes the thing, as
+      cepheus.Write([app.Next("invoice", [cepheus.New(1), k.Invoice.Number], r)?, ...], r.Db). *)
+  c = counter("$(r.User.Tenant)/$name", r.Db)?
+  result.Ok(cepheus.Incr(c, Counter.Last, into = into))
+end
+
+defn Retry(f, times = 3)
+  (** f() again while it gives an Err of a conflict (Code "conflict": the data changed between its read and its
+      write), at most times in all: the read-decide-write of a handler, made safe without a lock. *)
+  got = f()
+  tries = 1
+  while tries < times and result.IsErr(got) and dict.Get("Code", got.Error) == "conflict"
+    got = f()
+    tries += 1
+  end
+  got
+end

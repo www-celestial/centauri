@@ -1,0 +1,159 @@
+(** Contracts: the endpoints of an app as values, each with its method, its path, the shapes of what comes in and goes
+    out (std/check), and who may call it. A module writes them in its api.ce, which the server reads to serve them and a
+    page reads to call them: one definition, two sides. This package holds Centauri's own contracts too, those of its
+    accounts (auth.ce) and of its administration (admin.ce), and runs anywhere, in a page too: it uses std/check only.
+    OpenApi gives the OpenAPI 3.2 description of a list of endpoints.
+
+      Add = Post("/invoices", body = check.Record({Client: check.Id()}), role = "member")
+      Add.Name --> "POST /invoices"
+      Add.Role --> "member" *)
+use std/check
+use std/dict
+use std/list
+use std/text
+use std/value
+
+(** The role of an endpoint that names none: anyone signed in, of any role. *)
+Signed = "signed"
+
+(** The role of an endpoint that anyone may call, signed in or not, as signing up. *)
+Public = "public"
+
+(** The role of the platform's own administrators, above every tenant: the super-admin. *)
+Super = "super"
+
+defn endpoint(method, path, body, query, out, role, name, limit, about, more = {})
+  (** The record of an endpoint; limit is the calls a minute that one caller may make to it, missing for the app's. *)
+  e = {Method: method, Path: path, In: body, Query: query, Out: out, Role: role, Limit: limit, About: about,
+    Name: if value.IsMissing(name) "$method $path" else name end}
+  for p in dict.Pairs(more)
+    e[p.Key] = p.Value
+  end
+  e
+end
+
+(** A GET endpoint: query, the shape of its query string, whose values are texts (check.Read with texts = true); out,
+    the shape of its answer. A GET changes nothing: Centauri proves it in its tests and refuses its writes in prod with
+    a token that only reads (the setting GetDb).
+
+      Get("/invoices/:id").Method --> "GET" *)
+Get(path, query = missing, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("GET", path, missing, query, out, role, name, limit, about)
+
+(** A POST endpoint: body, the shape of its JSON body. It answers 201 when it has a body, else 200.
+
+      Post("/invoices", role = "member").Role --> "member" *)
+Post(path, body = missing, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("POST", path, body, missing, out, role, name, limit, about)
+
+(** A PUT endpoint: body replaces what the path names.
+
+      Put("/notes/:id").Name --> "PUT /notes/:id" *)
+Put(path, body = missing, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("PUT", path, body, missing, out, role, name, limit, about)
+
+(** A PATCH endpoint: body is a Record whose fields are all optional, as a change of some fields.
+
+      Patch("/notes/:id").Method --> "PATCH" *)
+Patch(path, body = missing, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("PATCH", path, body, missing, out, role, name, limit, about)
+
+(** A DELETE endpoint.
+
+      Delete("/notes/:id").Method --> "DELETE" *)
+Delete(path, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("DELETE", path, missing, missing, out, role, name, limit, about)
+
+(** A POST endpoint that takes a file as its body, of one of these media types and at most most bytes. Centauri serves
+    it from L2, with the body read in pieces; its contract is here already, so that pages can name it.
+
+      Upload("/invoices/:id/scan", ["application/pdf"]).Most --> 10485760 *)
+Upload(path, types, most = 10485760, out = missing, role = Signed, name = missing, limit = missing, about = missing) = endpoint("POST", path, missing, missing, out, role, name, limit, about, more = {Types: types, Most: most})
+
+(** A live screen of std/live, named name, with args the shape of what the page asks it with; served from L2.
+
+      Live("invoices.unpaid").Name --> "invoices.unpaid" *)
+Live(name, args = missing, out = missing, role = Signed, about = missing) = endpoint("LIVE", name, args, missing, out, role, name, missing, about)
+
+(** The shape of a page of rows of a shape, at most size of them: {Rows, After}, After the cursor of the next page,
+    absent on the last. The next page is asked with ?After= that cursor. A page is read by a cursor, never by an
+    offset: the thousandth page costs as the first, and a row written between two pages moves none of them.
+
+      Page(check.Int(), 20).Fields.Rows.Max --> 20
+      Page(check.Int(), 20).Size --> 20 *)
+Page(of, size = 20) = check.Record({Rows: check.List(of, 0, size), After: check.Text(0, 4096, optional = true)}) then dict.Put("Size", size)
+
+(** The parts of a path: its fixed words, and :name for a parameter.
+
+      Parts("/invoices/:id/pay") --> ["invoices", ":id", "pay"] *)
+Parts(path) = [p for p in text.Split("/", path) if p != ""]
+
+(** The names of the parameters of a path.
+
+      Params("/tenants/:tenant/users/:id") --> ["tenant", "id"] *)
+Params(path) = [text.ByteSlice(2, text.ByteLength(p), p) for p in Parts(path) if text.StartsWith(":", p)]
+
+(* The path as OpenAPI writes it: {id} for :id. *)
+openPath(path) = "/$(text.Join("/", [if text.StartsWith(":", p) "{$(text.ByteSlice(2, text.ByteLength(p), p))}" else p end for p in Parts(path)]))"
+
+problem = {type: "object", properties: {type: {type: "string"}, title: {type: "string"}, status: {type: "integer"},
+  detail: {type: "string"}, instance: {type: "string"}, errors: {type: "object", additionalProperties: {type: "string"}}}}
+
+defn param(name, where, required, schema)
+  (** A parameter of OpenAPI: in is a word of Cesia, so it is set by its text. *)
+  out = {name: name, required: required, schema: schema}
+  out["in"] = where
+  out
+end
+
+(** The status of an endpoint's answer when it works: 201 for a POST with a body (something was made), 204 for an
+    endpoint with no out, else 200.
+
+      Done(Post("/notes", body = check.Record({Text: check.Text()}), out = check.Id())) --> 201
+      Done(Delete("/notes/:id")) --> 204 *)
+Done(e) = if value.IsMissing(e.Out) 204 else if e.Method == "POST" and not value.IsMissing(e.In) 201 else 200 end
+
+defn operation(e)
+  (** The OpenAPI operation of an endpoint: its parameters, its body, its answers, its security. *)
+  params = [param(p, "path", true, {type: "string"}) for p in Params(e.Path)]
+  if not value.IsMissing(e.Query)
+    for f in dict.Pairs(e.Query.Fields)
+      params = list.Append(param(f.Key, "query", not f.Value.Optional, check.Schema(f.Value)), params)
+    end
+  end
+  if value.IsDict(e.Out) and "Size" in e.Out
+    params = list.Append(param("After", "query", false, {type: "string"}), params)
+  end
+  ok = if value.IsMissing(e.Out) {description: "Done."} else {description: "Done.", content: {"application/json": {schema: check.Schema(e.Out)}}} end
+  op = {operationId: e.Name, parameters: params, responses: dict.Dict([
+    {Key: "$(Done(e))", Value: ok},
+    {Key: "default", Value: {description: "An error, as RFC 9457 writes it.", content: {"application/problem+json": {schema: problem}}}}])}
+  if not value.IsMissing(e.About)
+    op.summary = e.About
+  end
+  if not value.IsMissing(e.In)
+    op.requestBody = {required: true, content: {"application/json": {schema: check.Schema(e.In)}}}
+  end
+  if dict.Has("Types", e)
+    op.requestBody = {required: true, content: dict.Dict([{Key: t, Value: {schema: {type: "string", format: "binary"}}} for t in e.Types])}
+  end
+  op.security = if e.Role == Public [] else [{session: []}] end
+  if e.Role != Public and e.Role != Signed
+    op["x-role"] = e.Role
+  end
+  op
+end
+
+defn OpenApi(endpoints, title = "API", version = "0.1.0")
+  (** The OpenAPI 3.2 description of these endpoints, as a map to write with json.Text: their paths, operations,
+      parameters, bodies and answers, from their shapes. Live screens are not HTTP and are left out.
+
+        OpenApi([Get("/ping", role = Public)]).paths["/ping"].get.operationId --> "GET /ping"
+        OpenApi([Get("/ping", role = Public)]).openapi --> "3.2.0" *)
+  paths = {}
+  for e in endpoints
+    if e.Method != "LIVE"
+      p = openPath(e.Path)
+      at = dict.GetOr(p, {}, paths)
+      at[text.Lower(e.Method)] = operation(e)
+      paths[p] = at
+    end
+  end
+  {openapi: "3.2.0", info: {title: title, version: version}, paths: paths,
+    components: {securitySchemes: {session: param("__Host-sid", "cookie", missing, missing) then dict.Drop("required") then dict.Drop("schema") then dict.Put("type", "apiKey")}}}
+end

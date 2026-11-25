@@ -1,0 +1,103 @@
+(* The guards every request passes before a route: where it comes from (the address of the client, its site), the
+   headers of security every response carries, and CORS for the origins the settings name. *)
+use std/dict
+use std/http
+use std/list
+use std/text
+use std/value
+
+defn Client(request, trustProxy = false)
+  (** The address of the client that sent a request: the peer of its connection, or behind a proxy that the settings
+      trust (TrustProxy), the last address of X-Forwarded-For, the one that proxy wrote. An address of IPv6 is cut to
+      its first 64 bits, the block one subscriber gets: a limit per address is then a limit per subscriber, who could
+      take any of 2^64 addresses of his block.
+
+        Client({Peer: "203.0.113.7", Headers: []}) --> "203.0.113.7"
+        Client({Peer: "2001:db8:1:2:3:4:5:6", Headers: []}) --> "2001:db8:1:2::/64"
+        Client({Peer: "10.0.0.1", Headers: [{Name: "x-forwarded-for", Value: "198.51.100.4, 203.0.113.9"}]}, trustProxy = true) --> "203.0.113.9" *)
+  peer = dict.GetOr("Peer", "", request)
+  if trustProxy
+    forwarded = http.HeaderValue("x-forwarded-for", request.Headers)
+    if value.IsText(forwarded)
+      parts = [text.Trim(p) for p in text.Split(",", forwarded) if text.Trim(p) != ""]
+      if value.Len(parts) > 0
+        peer = parts[value.Len(parts)]
+      end
+    end
+  end
+  if value.IsMissing(peer) "" else block(peer) end
+end
+
+defn block(ip)
+  (** An address of IPv4 as it is; one of IPv6 as its first four groups, then ::/64. *)
+  if not text.Contains(":", ip) or text.ByteLength(ip) > 45
+    return ip
+  end
+  halves = text.Split("::", ip)
+  head = [g for g in text.Split(":", halves[1]) if g != ""]
+  tail = if value.Len(halves) > 1 [g for g in text.Split(":", halves[2]) if g != ""] else [] end
+  groups = list.Concat(list.Concat(head, list.Fill("0", list.Max([0, 8 - value.Len(head) - value.Len(tail)]))), tail)
+  "$(text.Join(":", [text.Lower(g) for g in list.Take(4, groups)]))::/64"
+end
+
+defn Site(request, origin, cors)
+  (** Where a request comes from, for its rights: "same" (a page of the app, or no browser at all), "partner" (a page
+      of an origin of the setting Cors), or "other" (a page of any other site). The browser's Sec-Fetch-Site decides
+      when it is there, else Origin. A request of another site never reads the session of its cookie, whatever the
+      browser sent; one that changes something is refused, unless it comes from a partner, who has no session. *)
+  asked = http.HeaderValue("origin", request.Headers)
+  site = http.HeaderValue("sec-fetch-site", request.Headers)
+  if value.IsText(site) and site != "same-origin" and site != "none"
+    return if value.IsText(asked) and asked in cors "partner" else "other" end
+  end
+  if value.IsMissing(asked) or asked == origin
+    return "same"
+  end
+  if asked in cors "partner" else "other" end
+end
+
+(** Does a request change something: any method but GET, HEAD and OPTIONS, or the opening of a WebSocket. *)
+Changes(request) = not (request.Method in ["GET", "HEAD", "OPTIONS"]) or value.IsText(http.HeaderValue("upgrade", request.Headers))
+
+defn Secure(response, csp, https)
+  (** A response with the headers of security that it lacks: its Content-Security-Policy (the setting Csp: no script
+      but the app's own and its WebAssembly, no framing), no sniffing of types, no referrer to other sites, its own
+      window (COOP) and resources (CORP), no cache of an answer of the API, and over https, https only for two years
+      (HSTS). *)
+  headers = dict.GetOr("Headers", [], response)
+  has(name) = not value.IsMissing(http.HeaderValue(name, headers))
+  out = response
+  for h in [["content-security-policy", csp], ["x-content-type-options", "nosniff"], ["referrer-policy", "same-origin"],
+            ["cross-origin-opener-policy", "same-origin"], ["cross-origin-resource-policy", "same-origin"], ["x-frame-options", "DENY"],
+            ["cache-control", "no-store"]]
+    if not has(h[1])
+      out = http.WithHeader(h[1], h[2], out)
+    end
+  end
+  if https and not has("strict-transport-security")
+    out = http.WithHeader("strict-transport-security", "max-age=63072000; includeSubDomains", out)
+  end
+  out
+end
+
+defn Shared(response, request, cors)
+  (** A response that a partner's page may read: its origin allowed, never with credentials (a partner has no
+      session: SameSite=Strict keeps the cookie from it), and Vary: Origin for the caches. *)
+  asked = http.HeaderValue("origin", request.Headers)
+  if not (value.IsText(asked) and asked in cors)
+    return response
+  end
+  http.WithHeader("vary", "Origin", http.WithHeader("access-control-allow-origin", asked, response))
+end
+
+defn Preflight(request, cors)
+  (** The answer to the question a browser asks before a partner's page sends a request that changes something (CORS
+      preflight), or missing when the request is no such question or its origin no partner. *)
+  asked = http.HeaderValue("origin", request.Headers)
+  if request.Method != "OPTIONS" or not value.IsText(http.HeaderValue("access-control-request-method", request.Headers)) or not (value.IsText(asked) and asked in cors)
+    return missing
+  end
+  {Status: 204, Body: "", Headers: [{Name: "access-control-allow-origin", Value: asked}, {Name: "vary", Value: "Origin"},
+    {Name: "access-control-allow-methods", Value: "GET, POST, PUT, PATCH, DELETE"},
+    {Name: "access-control-allow-headers", Value: "content-type"}, {Name: "access-control-max-age", Value: "600"}]}
+end

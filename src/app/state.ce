@@ -1,0 +1,177 @@
+(* What the requests of a process share. In Cesia a function never changes a variable of its module, so this state
+   lives in one fiber that owns it, and a request asks it by a message: a round trip costs about 0.8 µs (measured,
+   20,000 trips). It holds the rate limits, the slots of the password hashes, the last lines of the log, the events
+   already written, the failed sign-ins of the last minutes, and the clock of a test. Each process of cesia run
+   --workers has its own: a limit of 600 a minute is then 600 a minute in each worker. *)
+use std/dict
+use std/fiber
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/value
+
+defn State(slots = 2, waiting = 64, kept = 500, keys = 100000, clock = missing)
+  (** A new state, an Ok of the channel to ask it: slots, the password hashes that run at once (each takes 64 MiB);
+      waiting, the hashes that wait at most for each slot, past which a sign-in gets a 503; kept, the lines of the log
+      it keeps; keys, the most keys of the rate limits it holds, past which the oldest are dropped; clock, the time of a
+      test, which Advance moves, else the time of the system. *)
+  ch = fiber.Channel(size = 4096)
+  fiber.Spawn(() -> own(ch, slots, slots * waiting, kept, keys, clock))
+  result.Ok(ch)
+end
+
+defn ask(state, message)
+  (** The answer of the state to a message. *)
+  reply = fiber.Channel(size = 1)
+  message.Reply = reply
+  fiber.Send(message, state)
+  fiber.Receive(reply).Value
+end
+
+(** The time of the state: the system's, or the test's clock. *)
+Now(state) = ask(state, {Op: "now"})
+
+(** Moves the clock of a test forward by seconds. *)
+Advance(seconds, state) = ask(state, {Op: "advance", By: seconds})
+
+(** A rate limit of the state: a key, as "ip:203.0.113.7", that may make per requests every period seconds, and burst
+    at once. GCRA (the generic cell rate algorithm of ATM networks, ITU-T I.371) keeps one number a key, the time its
+    next request is due: a request passes when it comes no earlier than that time minus the burst allowed.
+
+      Limit("ip:203.0.113.7", 600, 60, 100).Per --> 600 *)
+Limit(key, per, period, burst) = {Key: key, Per: per, Period: period, Burst: burst}
+
+(** Do requests of these limits pass now, all of them: an answer {Ok, Retry, Key}, Retry the seconds to wait when one
+    doesn't, Key the one that refused. A refused request counts in none of them. *)
+Allow(limits, state) = ask(state, {Op: "limit", Limits: limits})
+
+(** Takes a slot of the password hashes: true once one is free, false when too many wait already. *)
+Slot(state) = ask(state, {Op: "slot"})
+
+(** Gives back a slot of the password hashes. *)
+Free(state) = fiber.Send({Op: "free"}, state)
+
+(** Keeps a line of the log, a map. *)
+Keep(line, state) = fiber.Send({Op: "line", Line: line}, state)
+
+(** The lines the state keeps, the oldest first. *)
+Lines(state) = ask(state, {Op: "lines"})
+
+(** Is an event of this key worth writing now: true at most once every seconds, so that a flood of refusals writes one
+    event a key and not one a request. *)
+Fresh(key, seconds, state) = ask(state, {Op: "fresh", Key: key, Every: seconds})
+
+(** Counts a failed sign-in in the failures of the last minute. *)
+Failed(state) = fiber.Send({Op: "failed"}, state)
+
+(** The failed sign-ins of the last minute (between 60 and 120 seconds of them, by whole minutes). *)
+Failures(state) = ask(state, {Op: "failures"})
+
+defn own(ch, slots, most, kept, keys, clock)
+  (** The fiber of the state: it answers its messages one after the other, so no two requests change it at once. *)
+  due = dict.Dict()
+  free = slots
+  queue = []
+  lines = list.Fill(missing, kept)
+  at = 0
+  seen = dict.Dict()
+  minute = 0
+  fails = [0, 0]
+  served = 0
+  while true
+    got = fiber.Receive(ch)
+    if result.IsErr(got)
+      return missing
+    end
+    m = got.Value
+    op = m.Op
+    now = if value.IsMissing(clock) sys.Now() else clock end
+    if op == "limit"
+      out = {Ok: true, Retry: 0, Key: missing}
+      times = []
+      for l in m.Limits
+        gap = l.Period / l.Per
+        t = list.Max([dict.GetOr(l.Key, now, due), now])
+        if t - now > gap * l.Burst - gap
+          out = {Ok: false, Retry: math.Ceil(t - now - gap * l.Burst + gap), Key: l.Key}
+        end
+        times = list.Append(t + gap, times)
+      end
+      if out.Ok
+        for k in 1..value.Len(m.Limits)
+          due[m.Limits[k].Key] = times[k]
+        end
+        served += 1
+        if math.Mod(served, 10000) == 0 or value.Len(due) > keys
+          due = pruned(due, now, keys)
+        end
+      end
+      fiber.Send(out, m.Reply)
+    else if op == "slot"
+      if free > 0
+        free -= 1
+        fiber.Send(true, m.Reply)
+      else if value.Len(queue) < most
+        queue = list.Append(m.Reply, queue)
+      else
+        fiber.Send(false, m.Reply)
+      end
+    else if op == "free"
+      if value.Len(queue) > 0
+        fiber.Send(true, queue[1])
+        queue = list.Skip(1, queue)
+      else
+        free += 1
+      end
+    else if op == "line"
+      at = math.Mod(at, kept) + 1
+      lines[at] = m.Line
+    else if op == "lines"
+      fiber.Send([x for x in list.Concat(list.Skip(at, lines), list.Take(at, lines)) if not value.IsMissing(x)], m.Reply)
+    else if op == "fresh"
+      last = dict.Get(m.Key, seen)
+      ok = value.IsMissing(last) or now - last >= m.Every
+      if ok
+        if value.Len(seen) > keys
+          seen = dict.Dict()
+        end
+        seen[m.Key] = now
+      end
+      fiber.Send(ok, m.Reply)
+    else if op == "failed" or op == "failures"
+      this = math.Floor(now / 60)
+      if this != minute
+        fails = if this == minute + 1 [fails[2], 0] else [0, 0] end
+        minute = this
+      end
+      if op == "failed"
+        fails[2] += 1
+      else
+        fiber.Send(fails[1] + fails[2], m.Reply)
+      end
+    else if op == "now"
+      fiber.Send(now, m.Reply)
+    else if op == "advance"
+      clock = now + m.By
+      fiber.Send(clock, m.Reply)
+    end
+  end
+end
+
+defn pruned(due, now, keys)
+  (** The limits whose next request is still due later: a key past its time is as a key never seen. Past keys of them,
+      the ones due soonest go too. *)
+  kept = dict.Dict()
+  for p in dict.Pairs(due)
+    if p.Value > now
+      kept[p.Key] = p.Value
+    end
+  end
+  if value.Len(kept) <= keys
+    return kept
+  end
+  pairs = dict.Pairs(kept)
+  order = list.Order([p.Value for p in pairs])
+  dict.Dict([pairs[k] for k in list.Skip(value.Len(pairs) - keys, order)])
+end

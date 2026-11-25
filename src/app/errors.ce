@@ -1,0 +1,74 @@
+(* Errors: one value of Cesia, {Kind: "api", Status, Message, Fields}, which a handler gives as any Err (Fail makes it,
+   and ? passes it on), and which goes out over HTTP as Problem Details (RFC 9457). An Err of Cepheus becomes its
+   status; any other Err is a 500 that tells the client its request's number only, and the log the rest. *)
+use std/dict
+use std/http
+use std/json
+use std/result
+use std/text
+use std/value
+
+(** An Err of a route: its HTTP status, a message for the person, and fields, a map from each wrong field to what is
+    wrong, as check.Read gives it.
+
+      Fail(409, "Paid already.").Error.Status --> 409
+      Fail(422, "Check the form.", fields = {Due: "A date."}).Error.Fields.Due --> "A date." *)
+Fail(status, message, fields = missing) = result.Err({Kind: "api", Status: status, Message: message, Fields: fields})
+
+(** The Err of a thing that isn't there, or that the caller may not know of: a 404.
+
+      Missing().Error.Status --> 404 *)
+Missing(message = "There is no such thing.") = Fail(404, message)
+
+(* The status and message of each code of a Cepheus Err, as the client gets them. *)
+cepheusCodes = {"conflict": [409, "This changed meanwhile: read it again, then try again."],
+  "unique": [409, "This value is taken already."], "denied": [403, "This is not yours to read or change."],
+  "unreachable": [503, "The database can't be reached: try again in a moment."], "timeout": [503, "This took too long: try again."],
+  "busy": [503, "Busy: try again in a moment."], "damaged": [500, "Something went wrong on our side."],
+  "invalid": [422, "This was refused by a rule of the data."], "missing": [404, "There is no such thing."]}
+
+defn Problem(e, id, detailed = false)
+  (** The status and the body of an Err as Problem Details: {Status, Body}, Body the map to write as JSON, with type,
+      title, status, detail, errors for the wrong fields, and the number of the request. An Err that is no route's
+      own (a bug, a lost connection) says only that something went wrong, unless detailed (the profiles dev and test),
+      when its message comes too.
+
+        Problem({Kind: "api", Status: 409, Message: "Paid already."}, "r1").Body.detail --> "Paid already."
+        Problem({Kind: "cepheus", Code: "conflict", Message: "..."}, "r1").Status --> 409
+        Problem({Kind: "io", Message: "disk full"}, "r1").Body.detail --> "Something went wrong on our side. Request r1." *)
+  kind = if value.IsDict(e) dict.Get("Kind", e) else missing end
+  status = 500
+  message = "Something went wrong on our side. Request $id."
+  fields = missing
+  if kind == "api" and value.IsInt(dict.Get("Status", e))
+    status = e.Status
+    message = if value.IsText(dict.Get("Message", e)) e.Message else http.Reason(status) end
+    fields = dict.Get("Fields", e)
+  else if kind == "cepheus" and dict.Has(dict.GetOr("Code", "", e), cepheusCodes)
+    known = cepheusCodes[e.Code]
+    status = known[1]
+    message = if status == 500 message else known[2] end
+  end
+  if status == 500 and detailed and value.IsDict(e) and value.IsText(dict.Get("Message", e))
+    message = "$message $(e.Message)"
+  end
+  body = {type: "about:blank", title: http.Reason(status), status: status, detail: message, instance: "urn:request:$id"}
+  if value.IsDict(fields) and value.Len(fields) > 0
+    body.errors = fields
+  end
+  for extra in ["Challenge", "Retry"]
+    if value.IsDict(e) and dict.Has(extra, e)
+      body[text.Lower(extra)] = e[extra]
+    end
+  end
+  {Status: status, Body: body}
+end
+
+defn Answer(p)
+  (** The HTTP response of a Problem: application/problem+json, and Retry-After for a 429 or a 503 that knows it. *)
+  out = {Status: p.Status, Body: json.Text(p.Body), Headers: [{Name: "content-type", Value: "application/problem+json"}]}
+  if dict.Has("retry", p.Body)
+    out = http.WithHeader("retry-after", "$(p.Body.retry)", out)
+  end
+  out
+end

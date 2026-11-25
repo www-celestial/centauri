@@ -1,0 +1,322 @@
+(* How a request is served: the guards (health, CORS, the site it comes from, the limit of its address), then its
+   route, where Centauri reads the session, checks the role, the limits of the user, his tenant and the endpoint,
+   reads the input through its shape, gives a GET a database that only reads, calls the handler, and sends its value
+   through the shape of the output, or its Err as Problem Details. Each request writes one line of the log and two
+   metrics, and none of them holds a secret, a body, a query or a cookie. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use std/check
+use std/crypto
+use std/dict
+use std/encode
+use std/http
+use std/json
+use std/list
+use std/log
+use std/math
+use std/metrics
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(** A value of a handler with more of its response: headers to add (as the cookie of a session), and a status other
+    than the endpoint's.
+
+      Reply({Id: 7}, headers = [{Name: "set-cookie", Value: "sid=; Max-Age=0"}]).Headers[1].Name --> "set-cookie" *)
+Reply(v, headers = [], status = missing) = {CentauriReply: true, Value: v, Headers: headers, Status: status}
+
+defn page(folder, rest)
+  (** A file of the pages of the app (its dist/ folder), index.html for the paths that name no file: a page of the
+      front shows each of its addresses itself. *)
+  if ".." in text.Split("/", rest)
+    return http.NotFound()
+  end
+  out = http.FileResponse("$folder/$(if rest == "" "index.html" else rest end)")
+  if out.Status == 404 and not text.Contains(".", rest) http.FileResponse("$folder/index.html") else out end
+end
+
+defn json200(data, status = 200)
+  (** A JSON response of Centauri's own. *)
+  out = http.Json(data, status = status)
+  out.Done = true
+  out
+end
+
+defn refuse(status, message, rid, env, retry = missing)
+  (** The response of a refusal at the door. *)
+  out = Answer(Problem(if value.IsMissing(retry) {Kind: "api", Status: status, Message: message} else {Kind: "api", Status: status, Message: message, Retry: retry} end, rid))
+  out.Done = true
+  out
+end
+
+defn front(base, req, env)
+  (** A request at the door: health, CORS, its site, the limit of its address, then its route, and the headers of
+      security, the log and the metrics. *)
+  start = sys.Now()
+  rid = "$(env.Prefix)$(math.Mod(math.Floor(start * 1000000), 10000000000))"
+  s = env.Settings
+  ip = Client(req, trustProxy = s.TrustProxy)
+  out = missing
+  if req.Path == "/health/live"
+    out = json200({Status: "live"})
+  else if req.Path == "/health/ready"
+    out = readiness(env)
+  else
+    out = Preflight(req, env.Cors)
+  end
+  if value.IsMissing(out)
+    site = Site(req, s.Origin, env.Cors)
+    if site == "other" and Changes(req)
+      metrics.Add("centauri_refused_total", labels = {reason: "origin"})
+      noted(env, "origin", "ip:$ip", "A request that changes something came from another site.", missing, missing, ip, req.Method)
+      out = refuse(403, "This request comes from another site than the app's.", rid, env)
+    else
+      allowed = Allow([Limit("ip:$ip", s.LimitIp, 60, list.Max([1, math.Floor(s.LimitIp / 4)]))], env.State)
+      if not allowed.Ok
+        metrics.Add("centauri_refused_total", labels = {reason: "limit"})
+        noted(env, "limited", allowed.Key, "Too many requests from this address.", missing, missing, ip, req.Method)
+        out = refuse(429, "Too many requests: wait $(allowed.Retry) seconds.", rid, env, retry = allowed.Retry)
+      else
+        req.Id = rid
+        req.Ip = ip
+        req.Site = site
+        out = base(req)
+      end
+    end
+  end
+  if not dict.Has("Done", out) and out.Status >= 400
+    out = refuse(out.Status, if out.Status == 404 "There is no such address." else http.Reason(out.Status) end, rid, env)
+  end
+  out = Shared(Secure(out, s.Csp, env.Https), req, env.Cors)
+  ms = math.Round((sys.Now() - start) * 1000000) / 1000
+  line = {Id: rid, Method: req.Method, Route: dict.GetOr("Route", req.Path, out), Status: out.Status, Ms: ms, Ip: ip}
+  if dict.Has("User", out)
+    line.User = out.User
+  end
+  level = if out.Status >= 500 "error" else "info" end
+  if s.LogRequests
+    if level == "error"
+      log.Error("request", line)
+    else
+      log.Info("request", line)
+    end
+  end
+  Keep({At: start, Level: level, Message: "request", Fields: line}, env.State)
+  out
+end
+
+defn readiness(env)
+  (** /health/ready: 200 while the database answers and the process isn't stopping, else 503; what Docker and
+      Kubernetes ask before they send it requests. *)
+  db = cepheus.Get(Event, 1, env.Db)
+  if result.IsOk(db) and not sys.StopAsked() json200({Status: "ready"}) else json200({Status: "not ready"}, status = 503) end
+end
+
+defn noted(env, kind, key, detail, user, tenant, ip, route)
+  (** An event of the door, written at most once a minute a key: a flood of refusals writes one event, not one a
+      request. *)
+  if Fresh("$kind $key", 60, env.State)
+    _ = Note(env, kind, detail, user = user, tenant = tenant, ip = ip, route = route)
+  end
+end
+
+defn Note(env, kind, detail, user = missing, tenant = missing, ip = "", route = "")
+  (** Writes an event of the history: an Ok of its id. *)
+  fields = {At: env.Now(), Kind: kind, Ip: ip, Route: route, Detail: detail}
+  if not value.IsMissing(user)
+    fields.User = user
+  end
+  if not value.IsMissing(tenant)
+    fields.Tenant = tenant
+  end
+  cepheus.Insert(Event, fields, env.Db, by = if value.IsMissing(user) 0 else user end, why = "event $kind")
+end
+
+defn allowedRole(need, user, roles)
+  (** May a user (missing when nobody is signed in) call an endpoint of this role: Ok of true, or the status that
+      refuses him. *)
+  if need == api.Public
+    return 0
+  end
+  if value.IsMissing(user)
+    return 401
+  end
+  if need == api.Signed or (need == api.Super and user.Super) or need in user.Roles
+    return 0
+  end
+  403
+end
+
+defn input(e, req)
+  (** What a request brings to its handler, read through the endpoint's shapes: an Ok of it (missing when the endpoint
+      takes nothing), or an Err of the route. *)
+  if not value.IsMissing(e.Query)
+    q = check.Read(e.Query, req.Query, texts = true)
+    return if result.IsOk(q) q else Fail(400, "Check the query.", fields = q.Error) end
+  end
+  if value.IsMissing(e.In)
+    return result.Ok(missing)
+  end
+  body = if req.Body == "" result.Ok({}) else missing end
+  if value.IsMissing(body)
+    kind = http.HeaderValue("content-type", req.Headers)
+    if not (value.IsText(kind) and text.StartsWith("application/json", text.Lower(text.Trim(kind))))
+      return Fail(415, "The body is JSON: send it with Content-Type: application/json.")
+    end
+    body = json.Parse(req.Body)
+    if result.IsErr(body)
+      return Fail(400, "The body is not JSON.")
+    end
+  end
+  x = check.Read(e.In, body.Value)
+  if result.IsOk(x) x else Fail(422, "Check the fields.", fields = x.Error) end
+end
+
+defn getDb(env)
+  (** The database of a GET: a fork, whose writes go nowhere and are caught (dev and test); the connection of the
+      token that only reads, whose writes Cepheus refuses (prod with APP_CEPHEUS_READ_TOKEN); or the app's own. *)
+  mode = env.Settings.GetDb
+  if mode == "fork" cepheus.Fork(env.Db) else if mode == "read" result.Ok(env.ReadDb) else result.Ok(env.Db) end
+end
+
+probe(db) = cepheus.Write([cepheus.Expect(1, Event.Kind)], db)?.Group   (* The number of the next group of a fork. *)
+
+(* Base64 with - and _ for + and /, without =: a cursor goes in a query string as it is. *)
+url64(s) = text.Replace("=", "", text.Replace("/", "_", text.Replace("+", "-", encode.Base64(s))))
+defn unurl64(s)
+  t = text.Replace("_", "/", text.Replace("-", "+", s))
+  encode.Unbase64("$t$(text.Repeat(math.Mod(4 - math.Mod(text.ByteLength(t), 4), 4), "="))")
+end
+
+defn seal(row, e, user, env)
+  (** The cursor after a row of a page: the row, sealed (XSalsa20-Poly1305 under the app's key) with the endpoint and
+      the tenant, so that it shows nothing of the row and cannot be made by hand nor used in another list. *)
+  url64(crypto.Seal(json.Text({E: e.Name, T: tenantOf(user), R: row}), env.Key, env.Keys))
+end
+
+defn opened(cursor, e, user, env)
+  (** The row of a cursor of seal: an Ok of it, or a 400. *)
+  bad = Fail(400, "This cursor is not one of this list: ask the first page again.")
+  if not value.IsText(cursor) or text.ByteLength(cursor) > 4096
+    return bad
+  end
+  raw = unurl64(cursor)
+  plain = if result.IsOk(raw) crypto.Unseal(raw.Value, env.Key, env.Keys) else raw end
+  c = if result.IsOk(plain) json.Parse(plain.Value) else plain end
+  if result.IsErr(c) or not value.IsDict(c.Value) or dict.Get("E", c.Value) != e.Name or not value.Equal(dict.Get("T", c.Value), tenantOf(user))
+    return bad
+  end
+  result.Ok(c.Value.R)
+end
+
+tenantOf(user) = if value.IsMissing(user) 0 else dict.GetOr("Tenant", 0, user) end
+
+defn answer(b, req, env)
+  (** A request at its route. *)
+  e = b.Endpoint
+  rid = dict.GetOr("Id", "-", req)
+  out = served(b, e, req, env, rid)
+  out.Route = e.Name
+  out.Done = true
+  out
+end
+
+defn served(b, e, req, env, rid)
+  user = missing
+  if req.Site == "same" and not value.IsMissing(env.Who)
+    who = env.Who(req, env)
+    if result.IsErr(who)
+      return failed(who.Error, rid, env, e)
+    end
+    user = who.Value
+  end
+  status = allowedRole(e.Role, user, env.Roles)
+  if status != 0
+    metrics.Add("centauri_refused_total", labels = {reason: if status == 401 "signin" else "role" end})
+    return refuse(status, if status == 401 "Sign in first." else "This is for the role $(e.Role)." end, rid, env)
+  end
+  s = env.Settings
+  limits = []
+  if not value.IsMissing(user)
+    limits = [Limit("u:$(user.Id)", s.LimitUser, 60, list.Max([1, math.Floor(s.LimitUser / 4)]))]
+    if not value.IsMissing(dict.Get("Tenant", user))
+      limits = list.Append(Limit("t:$(user.Tenant)", s.LimitTenant, 60, list.Max([1, math.Floor(s.LimitTenant / 4)])), limits)
+    end
+  end
+  if not value.IsMissing(e.Limit)
+    limits = list.Append(Limit("e:$(e.Name) $(if value.IsMissing(user) req.Ip else user.Id end)", e.Limit, 60, e.Limit), limits)
+  end
+  if value.Len(limits) > 0
+    allowed = Allow(limits, env.State)
+    if not allowed.Ok
+      metrics.Add("centauri_refused_total", labels = {reason: "limit"})
+      noted(env, "limited", allowed.Key, "Too many requests to $(e.Name).", if value.IsMissing(user) missing else user.Id end, tenantOf(user), req.Ip, e.Name)
+      return refuse(429, "Too many requests: wait $(allowed.Retry) seconds.", rid, env, retry = allowed.Retry)
+    end
+  end
+  x = input(e, req)
+  if result.IsErr(x)
+    return failed(x.Error, rid, env, e)
+  end
+  pageSize = if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end
+  after = missing
+  if not value.IsMissing(pageSize) and value.IsText(dict.Get("After", req.Query)) and req.Query.After != ""
+    a = opened(req.Query.After, e, user, env)
+    if result.IsErr(a)
+      return failed(a.Error, rid, env, e)
+    end
+    after = a.Value
+  end
+  reads = e.Method == "GET"
+  db = if reads getDb(env) else result.Ok(env.Db) end
+  if result.IsErr(db)
+    return failed(db.Error, rid, env, e)
+  end
+  before = if reads and s.GetDb == "fork" probe(db.Value) else missing end
+  r = {Method: req.Method, Path: req.Path, Params: req.Params, Query: req.Query, Headers: req.Headers, Cookies: req.Cookies, Ip: req.Ip,
+    Id: rid, Route: e.Name, User: user, Db: db.Value, Why: "$(e.Name) #$rid", Settings: s, Now: env.Now(), Keys: env.Keys,
+    Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
+  got = if value.IsMissing(e.In) and value.IsMissing(e.Query) b.Handler(r) else b.Handler(r, x.Value) end
+  if result.IsErr(got)
+    return failed(got.Error, rid, env, e)
+  end
+  if not value.IsMissing(before) and probe(db.Value) != before + 1
+    log.Error("a GET wrote to the database", {Route: e.Name, Id: rid})
+    return failed({Kind: "api", Status: 500, Message: "$(e.Name) wrote to the database: a GET only reads (A06)."}, rid, env, e)
+  end
+  v = if result.IsOk(got) got.Value else got end
+  extra = []
+  status = api.Done(e)
+  if value.IsDict(v) and dict.Has("CentauriReply", v)
+    extra = v.Headers
+    status = if value.IsMissing(v.Status) status else v.Status end
+    v = v.Value
+  end
+  if not value.IsMissing(pageSize)
+    rows = if value.IsArray(v) v else [] end
+    v = {Rows: list.Take(pageSize, rows), After: if value.Len(rows) > pageSize seal(rows[pageSize], e, user, env) else missing end}
+  end
+  out = if value.IsMissing(e.Out) {Status: if status == 200 204 else status end, Body: "", Headers: []} else http.Json(check.Out(e.Out, v), status = status) end
+  for h in extra
+    out = http.WithHeader(h.Name, h.Value, out)
+  end
+  if not value.IsMissing(user)
+    out.User = user.Id
+  end
+  metrics.Add("centauri_requests_total", labels = {route: e.Name, status: out.Status})
+  out
+end
+
+defn failed(e, rid, env, endpoint)
+  (** The response of an Err of a route, logged when it is the server's fault. *)
+  p = Problem(e, rid, detailed = env.Profile.Detailed)
+  if p.Status >= 500
+    log.Error("request failed", {Id: rid, Route: endpoint.Name, Error: if value.IsDict(e) dict.GetOr("Message", "", e) else value.Text(e) end})
+    Keep({At: sys.Now(), Level: "error", Message: "request failed", Fields: {Id: rid, Route: endpoint.Name, Error: if value.IsDict(e) dict.GetOr("Message", "", e) else value.Text(e) end}}, env.State)
+  else if value.IsDict(e) and dict.Get("Kind", e) == "cepheus"
+    log.Warn("refused by the database", {Id: rid, Route: endpoint.Name, Code: dict.Get("Code", e), Message: dict.Get("Message", e)})
+  end
+  metrics.Add("centauri_requests_total", labels = {route: endpoint.Name, status: p.Status})
+  Answer(p)
+end

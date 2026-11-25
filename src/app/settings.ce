@@ -1,0 +1,145 @@
+(* Settings: one way. Each setting is a field of a shape, read once at the start from a variable of the environment,
+   APP_ and its name in capitals, CepheusUrl from APP_CEPHEUS_URL. A setting the environment doesn't give takes the
+   app's default (Of's defaults), else Centauri's. A wrong or missing one stops the start, with every wrong one named;
+   a secret (check.Secret) never reaches a log. Three profiles, dev, test and prod, and their only differences are
+   Centauri's, written in Profiles. *)
+use std/check
+use std/dict
+use std/list
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(** Centauri's own settings, those of every app. The modules add theirs (auth adds those of the accounts), and the
+    app its own. *)
+Core = {
+  Profile: check.OneOf(["dev", "test", "prod"], optional = true, default = "dev"),
+  Origin: check.Url(optional = true),
+  Port: check.Int(0, 65535, optional = true, default = 8080),
+  Host: check.Text(1, 255, optional = true, default = "127.0.0.1"),
+  CepheusUrl: check.Text(1, 1000, optional = true),
+  CepheusToken: check.Secret(optional = true),
+  CepheusReadToken: check.Secret(optional = true),
+  CepheusCa: check.Text(1, 1000, optional = true),
+  Secret: check.Secret(32, 512, optional = true),
+  Cert: check.Text(1, 1000, optional = true),
+  Key: check.Text(1, 1000, optional = true),
+  Cors: check.Text(0, 4000, optional = true, default = ""),
+  TrustProxy: check.Bool(optional = true, default = false),
+  LimitIp: check.Int(1, 1000000, optional = true, default = 600),
+  LimitUser: check.Int(1, 1000000, optional = true, default = 1200),
+  LimitTenant: check.Int(1, 10000000, optional = true, default = 6000),
+  MaxBody: check.Int(1024, 1073741824, optional = true, default = 1048576),
+  Timeout: check.Int(1, 3600, optional = true, default = 60),
+  LogRequests: check.Bool(optional = true, default = true),   (* false in the profile test, unless given *)
+  LogLines: check.Int(10, 100000, optional = true, default = 1000),
+  GetDb: check.OneOf(["fork", "read", "same"], optional = true),
+  AdminPort: check.Int(0, 65535, optional = true, default = 0),
+  Csp: check.Text(1, 2000, optional = true, default = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
+}
+
+(** What each profile changes, and nothing else does. Mail and the database of a test come with L2 and apptest. *)
+Profiles = {
+  dev: {Detailed: true, OpenApi: true, Https: false, GetDb: "fork"},
+  test: {Detailed: true, OpenApi: true, Https: false, GetDb: "fork"},
+  prod: {Detailed: false, OpenApi: false, Https: true, GetDb: "same"},
+}
+
+defn Env(name)
+  (** The variable of the environment of a setting: APP_, then its name in capitals, a _ before each capital inside it.
+
+        Env("CepheusUrl") --> "APP_CEPHEUS_URL"
+        Env("Port") --> "APP_PORT" *)
+  out = []
+  bytes = text.Bytes(name)
+  for k in 1..value.Len(bytes)
+    b = bytes[k]
+    if b >= 65 and b <= 90 and k > 1
+      out = list.Append(95, out)
+    end
+    out = list.Append(if b >= 97 and b <= 122 b - 32 else b end, out)
+  end
+  "APP_$(text.FromBytes(out))"
+end
+
+defn Read(fields, given, defaults = {})
+  (** The settings: an Ok of a map of every field to its value, or an Err of a list of what is wrong, each line naming
+      its variable. given is a map of names to texts, as the environment gives them (sys.Env for each, by Load), and
+      defaults the app's defaults, values of their type. The profile's rules come after the shape's: in prod, the
+      Origin is https, a Secret and a database are given.
+
+        Read(Core, {Port: "9000"}).Value.Port --> 9000
+        Read(Core, {Port: "high"}) then result.IsErr() --> true
+        Read(Core, {Profile: "prod"}).Error[1] --> "APP_ORIGIN: an https:// address is needed in prod." *)
+  values = {}
+  for p in dict.Pairs(defaults)
+    values[p.Key] = p.Value
+  end
+  for p in dict.Pairs(given)
+    if value.IsText(p.Value) and p.Value != ""
+      values[p.Key] = p.Value
+    end
+  end
+  got = check.Read(check.Record(fields), values, texts = true)
+  if result.IsErr(got)
+    return result.Err(["$(Env(p.Key)): $(text.Lower(text.ByteSlice(1, 1, p.Value)))$(text.ByteSlice(2, text.ByteLength(p.Value), p.Value))" for p in dict.Pairs(got.Error)])
+  end
+  s = got.Value
+  if value.IsMissing(dict.Get("Origin", s))
+    s.Origin = "http://localhost:$(s.Port)"
+  end
+  wrong = []
+  if s.Profile == "prod"
+    if not text.StartsWith("https://", s.Origin)
+      wrong = list.Append("APP_ORIGIN: an https:// address is needed in prod.", wrong)
+    end
+    if value.IsMissing(dict.Get("Secret", s))
+      wrong = list.Append("APP_SECRET: a secret of 32 bytes at least is needed in prod (the key of the cursors and of the challenges).", wrong)
+    end
+    if value.IsMissing(dict.Get("CepheusUrl", s))
+      wrong = list.Append("APP_CEPHEUS_URL: the database is needed in prod, as cepheus://localhost:7400/app.", wrong)
+    end
+  end
+  if s.Profile == "test" and not dict.Has("LogRequests", given) and not dict.Has("LogRequests", defaults)
+    s.LogRequests = false
+  end
+  if value.IsMissing(dict.Get("GetDb", s))
+    s.GetDb = if s.Profile == "prod" and not value.IsMissing(dict.Get("CepheusReadToken", s)) "read" else Profiles[s.Profile].GetDb end
+  end
+  if s.GetDb == "read" and value.IsMissing(dict.Get("CepheusReadToken", s))
+    wrong = list.Append("APP_GET_DB: read needs APP_CEPHEUS_READ_TOKEN, a token of Cepheus that reads only.", wrong)
+  end
+  if value.Len(wrong) > 0 result.Err(wrong) else result.Ok(s) end
+end
+
+defn Load(fields, defaults = {})
+  (** The settings of the environment: each field read from its variable (Env), then as Read does. Needs the
+      permission env=APP_... of each, which cesia do gives from the task's allow. *)
+  given = {}
+  for name in dict.Keys(fields)
+    v = sys.Env(Env(name))
+    if value.IsText(v)
+      given[name] = v
+    end
+  end
+  got = Read(fields, given, defaults = defaults)
+  if result.IsErr(got)
+    return got
+  end
+  s = got.Value
+  s.Given = dict.Dict([{Key: k, Value: true} for k in dict.Keys(given)])
+  result.Ok(s)
+end
+
+defn Rows(fields, s, defaults = {}, given = {})
+  (** The settings as the admin sees them, one row each, the secrets masked. *)
+  masked = check.Masked(check.Record(fields), s)
+  rows = []
+  for name in list.Sort(dict.Keys(fields))
+    v = dict.Get(name, masked)
+    from = if dict.Has(name, given) "env" else if dict.Has(name, defaults) "code" else "default" end
+    rows = list.Append({Name: name, Env: Env(name), Value: if value.IsMissing(v) "" else value.Text(v) end, From: from}, rows)
+  end
+  rows
+end

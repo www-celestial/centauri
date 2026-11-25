@@ -1,0 +1,92 @@
+(* The contracts of the accounts: signing up and in, the sessions, the members of a tenant and their roles. The server
+   serves them in the module of package auth; a page calls them as any endpoint. *)
+use std/check
+use std/dict
+
+(** A password: 12 to 128 bytes, any characters, no rule of composition (NIST SP 800-63B, 5.1.1.2, advises none). A
+    server may ask more bytes with the setting PasswordMin. *)
+Password = check.Secret(12, 128)
+
+(** Who is signed in, as the account endpoints give it: the user, the tenant of the session and the user's roles in it
+    (each role with the roles it includes), and Super for an administrator of the whole platform. *)
+Account = check.Record({User: check.Id(), Email: check.Email(), Name: check.Text(0, 120), Tenant: check.Id(),
+  TenantName: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40), Super: check.Bool()})
+
+(** The fields of signing up. Tenant is the name of a new tenant (multi-tenant apps; the user's name else); Invite the
+    code of an invitation, to join its tenant; Proof the answer to a challenge of proof of work, when the server asks
+    one (428). *)
+SignUpFields = {Email: check.Email(), Password: Password, Name: check.Text(1, 120), Tenant: check.Text(1, 120, optional = true),
+  Invite: check.Text(1, 200, optional = true), Proof: check.Text(1, 400, optional = true)}
+
+(** The sign-up endpoint of an app that asks more fields: extra, a map of names to shapes, as {Phone: check.Text(6, 20)}.
+    The fields come to the module's then, with the user, in the group that makes the account.
+
+      SignUpOf({Phone: check.Text(6, 20)}).In.Fields.Phone.Kind --> "text" *)
+SignUpOf(extra) = Post("/auth/signup", body = check.Record(dict.Merge(SignUpFields, extra)), out = Account, role = Public,
+  about = "Makes an account and signs it in: a session cookie comes back.")
+
+(** Signing up with the fields of SignUpFields. *)
+SignUp = SignUpOf({})
+
+(** Signing in: an e-mail and a password, and the tenant to enter when the user belongs to several (the first else). *)
+SignIn = Post("/auth/signin", body = check.Record({Email: check.Email(), Password: check.Secret(1, 128), Tenant: check.Id(optional = true),
+  Proof: check.Text(1, 400, optional = true)}), out = Account, role = Public, about = "Signs in: a session cookie comes back.")
+
+(** Signing out: the session of the cookie ends. *)
+SignOut = Post("/auth/signout", role = Signed, about = "Ends this session.")
+
+(** Signing out everywhere: every session of the user ends, this one too. *)
+SignOutAll = Post("/auth/signout-all", role = Signed, about = "Ends every session of the user.")
+
+(** Who is signed in. *)
+Me = Get("/auth/me", out = Account, role = Signed, about = "The account of this session.")
+
+(** A session, as the user sees the list of his own: where and when it began, when it was last seen. *)
+SessionRow = check.Record({Id: check.Id(), Started: check.Time(), Seen: check.Time(), Ip: check.Text(0, 64), Agent: check.Text(0, 300),
+  Current: check.Bool()})
+
+(** The sessions of the user. *)
+Sessions = Get("/auth/sessions", out = check.List(SessionRow, 0, 1000), role = Signed, about = "The sessions of the user.")
+
+(** Ends one of the user's sessions, by its id. *)
+EndSession = Delete("/auth/sessions/:id", role = Signed, about = "Ends one of the user's sessions.")
+
+(** A new password: the old one must be given, and every other session of the user ends. *)
+ChangePassword = Post("/auth/password", body = check.Record({Old: check.Secret(1, 128), New: Password}), role = Signed,
+  about = "Changes the password; the user's other sessions end.")
+
+(** A challenge of proof of work, for signing up and in when the server is under attack: Bits 0 when none is asked.
+    The answer is a nonce such that BLAKE2b-256 of the challenge, a dot and the nonce starts with Bits bits at zero;
+    signing up or in then gives "challenge:nonce" as its Proof. *)
+Challenge = Get("/auth/challenge", out = check.Record({Challenge: check.Text(0, 400), Bits: check.Int(0, 32)}), role = Public,
+  about = "A challenge of proof of work, when one is asked.")
+
+(** A member of a tenant: the user and his roles there. *)
+MemberRow = check.Record({User: check.Id(), Email: check.Email(), Name: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40)})
+
+(** The members of the tenant of the session, for its admins. *)
+Members = Get("/auth/members", out = Page(MemberRow, 50), role = "admin", about = "The members of this tenant.")
+
+(** An invitation to the tenant of the session, with roles: its code comes back once (only its hash is kept), and
+    lasts the setting InviteTime. L2 sends it by mail. *)
+Invite = Post("/auth/invites", body = check.Record({Email: check.Email(), Roles: check.List(check.Text(1, 40), 1, 20)}),
+  out = check.Record({Code: check.Text(1, 200), Ends: check.Time()}), role = "admin", about = "Invites someone to this tenant.")
+
+(** The roles of a member of the tenant of the session; only an owner gives or takes the role owner. *)
+SetRoles = Put("/auth/members/:id/roles", body = check.Record({Roles: check.List(check.Text(1, 40), 0, 20)}), out = MemberRow,
+  role = "admin", about = "Sets the roles of a member of this tenant.")
+
+(** A member leaves the tenant of the session: his membership and its sessions end. *)
+RemoveMember = Delete("/auth/members/:id", role = "admin", about = "Takes a member out of this tenant.")
+
+(** The tenants of the user, with his roles in each. *)
+MyTenants = Get("/auth/tenants", out = check.List(check.Record({Tenant: check.Id(), Name: check.Text(0, 120),
+  Roles: check.List(check.Text(1, 40), 0, 40)}), 0, 1000), role = Signed, about = "The tenants of the user.")
+
+(** Moves the session into another tenant of the user: its secret changes, as at signing in. *)
+SwitchTenant = Post("/auth/tenant", body = check.Record({Tenant: check.Id()}), out = Account, role = Signed,
+  about = "Enters another tenant of the user.")
+
+(** The endpoints of the accounts, in their order. *)
+Accounts = [SignUp, SignIn, SignOut, SignOutAll, Me, Sessions, EndSession, ChangePassword, Challenge, Members, Invite,
+  SetRoles, RemoveMember, MyTenants, SwitchTenant]
