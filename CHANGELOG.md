@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+The admin pages in French, and the book in French. Nothing breaks: every endpoint answers as it did. What changes,
+each additive: in an app of several languages (`APP_LANGS`), `GET /auth/me` sends `Content-Language`, the language the
+app speaks to that user, and the actions of a live screen carry the browser's language, so their errors come in it;
+`pages.Run` takes `words`; an English page shows `1 row` where it showed `1 rows`. The admin pages need Ceres's
+`web.App(say = ...)`.
+
+- The admin pages speak English or French: the language of `GET /auth/me`'s `Content-Language` (the account's, else
+  the browser's, among the app's languages), every text through `pages.Say` and a catalogue, `pages.Words` (254
+  texts: titles, the menu, buttons, columns, help lines, empty lists, questions, the band of keys of Ceres, the errors
+  of the screen), numbers as French writes them (`pages.Num`: `12 345,5`, a narrow space that no line breaks), times
+  day first (`26/11/2026 09:22:01`, `pages.Local`; `pages.DayFirst` reads one typed so), plurals by CLDR; a text
+  without its French shows in English, never empty; `<html lang>` set for screen readers. An app's own pages say their
+  texts with `pages.Say(text, args)`, and give their French to `pages.Run(words = ...)`, after Centauri's; the titles
+  of `Page`, `Kind`, `Column`, `Action` and `Run` are said where they show. The invoices' admin page in French.
+- `apptest.Untranslated(paths, words, lang)`: the texts of pages that a catalogue doesn't give in a language (a text
+  said without its translation, an empty one, a name of a value lost or added, a value written into a text, a text
+  given straight to a widget of Ceres), and the catalogue's own entries.
+- `i18n`: a plural reads a number written with spaces between its thousands (`12 345`); an empty translation gives
+  the English.
+- The book in French, `docs/fr/book/`, chapter for chapter, checked by `cesia doc --site` as Cesia's and Cepheus's
+  are: the same headings, blocks byte for byte and links; `README.fr.md`. Every block of the book says its language,
+  so that the site colors the Cesia ones, and each page's Cesia blocks are checked as one program.
+- A picture at each step of the admin pages in the book, in English and in French, taken again by `tools/shots.sh`
+  (`examples/invoices/tools/admin-shot.ce` with `DOCS`); the browser test of the admin plays in French too
+  (`LANG=fr`), each page checked to fit the window and markup typed into a field kept a text.
+- `tools/deps.sh` puts every package of Centauri and its tools in an example; `bench/words.ce`, what a text said costs.
+- Fixes: the site check passes again (README's link to `examples/notes`, `jobs`' doc).
+
 ## 0.4.0 (not released)
 
 The third batch, L3: signing in with a provider, passkeys and two-factor, keys of programs, languages, feature flags,

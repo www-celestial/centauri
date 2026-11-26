@@ -326,7 +326,7 @@ kind, a column, an action) must be in the catalogue, not empty, with the names o
 given straight to a widget of Ceres (`web.Text("…")`, `label = "…"`) shows in English in every language, and is named
 with its line. Centauri's own pages pass the same check (`tests/translated.test.ce`).
 
-![The dashboard in French: "Tableau de bord", the boxes Utilisateurs, Tenants, Sessions, Requêtes, Refusées and "Connexions échouées/min", the line "Dernière seconde : …", the graphs "Requêtes par seconde" and "Durée d'une requête (ms)", the menu in French and the band of keys "premier champ", "faire défiler la page".](images/admin-dashboard-fr.png)
+![The dashboard in French: "Tableau de bord", the boxes Utilisateurs, Tenants, Sessions, Requêtes, Refusées and "Connexions échouées/min", the line "Dernière seconde : …" and the graphs "Requêtes par seconde" and "Durée d'une requête (ms)".](images/admin-dashboard-fr.png)
 
 ```python
 # Django: {% translate %} in the templates and gettext in the code, makemessages then compilemessages,
@@ -340,7 +340,7 @@ LANGUAGES = [("en", "English"), ("fr", "French")]
 `tests/admin.test.ce`: the files served with their type, ETag, 304 and brotli, no script of its own in the page, no
 source and nothing outside the folder (`isPagesServedWithTheirHeaders`); off by its setting (`isTurnedOffBySetting`);
 each endpoint of `api.AdminOfApp`, `api.AdminOfAccounts` and the jobs refused without a session (401) and without the
-role (403) (`isEveryEndpointForSuperOnly`; the endpoints of the flags are not in its list);
+role (403) (`isEveryEndpointForSuperOnly`);
 no secret sent (`isSecretNeverSent`); a field changed through its type, a secret refused, a unique value checked, the
 audit naming fields only (`isEditCheckedByTheKind`); a job cancelled, not while it runs, and run again
 (`isJobCancelledAndRetried`); events by time and route (`isEventsFilteredByTimeAndRoute`); a request of another site

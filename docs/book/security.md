@@ -76,7 +76,7 @@ each with its test in `tests/oidc.test.ce` (oidc), `tests/passkeys.test.ce` (pas
 | threat | defense | test |
 |---|---|---|
 | token substitution: an ID token of another app, or of another sign-in | `aud` this app's client, and `azp` when there are several; `nonce` a BLAKE2b of the secret of this browser's cookie | oidc `isTokenOfAnotherAppOrSignInRefused` |
-| mix-up: a provider's answer that another provider named | the answer's `iss` checked when given, and asked when the provider says it gives it (RFC 9207); the code sent only to the token endpoint of the flow's provider, from its own discovery document | oidc `isMixUpRefused`, `isIssuerAskedWhenPromised` |
+| mix-up: the answer of one provider taken for another's, the code of a sign-in sent to the wrong provider | the answer's `iss` checked when given, and asked when the provider says it gives it (RFC 9207); the code sent only to the token endpoint of the flow's provider, from its own discovery document | oidc `isMixUpRefused`, `isIssuerAskedWhenPromised` |
 | replay of a flow: a finish sent twice | the flow ends at its first finish, by a write that expects it | oidc `isFinishedOnce` |
 | CSRF of the callback, login CSRF: a sign-in started in the attacker's browser, finished in the victim's | `state` a BLAKE2b of the secret of the cookie of the browser that started (`__Host-oidc`, `SameSite=Strict`), compared in constant time; the finish refused from another site; the callback writes nothing | oidc `isLoginCsrfRefused`, `isCallbackPassedOn`, `isFlowCookieGuarded` |
 | open redirect of `Return` | a path of the app only: a `/` not followed by another, no `\` nor control character, 2,000 bytes at most; else `/` | oidc `isReturnKeptInTheApp` |
