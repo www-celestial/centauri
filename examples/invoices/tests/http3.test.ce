@@ -1,0 +1,66 @@
+(** The invoices served both ways at once, as APP_HTTP3=on serves them: HTTP/1.1 over TCP and HTTP/3 over QUIC on the
+    same port, the same routes. Ada's list of invoices, its export in CSV and an invoice read the same over each; a
+    payment over HTTP/3 sent twice with its Idempotency-Key, as a page sends it again after a break, is paid once. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use src/invoices
+use src/invoices/endpoints as e
+use std/bug
+use std/fiber
+use std/http
+use std/http3
+use std/json
+use std/net
+use std/quic
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+lines = [{Label: "Design", Quantity: 3, Price: 400}, {Label: "Hosting", Quantity: 1, Price: 80.5}]
+
+defn office()
+  (** Ada's office served on a free port, over TCP and UDP, with TLS. *)
+  certs = apptest.TestCerts()!
+  l = net.Listen(0, host = "127.0.0.1")!
+  port = net.Port(l)
+  url = "https://localhost:$port"
+  t = apptest.Start(invoices.App, settings = {Origin: url, Port: port, Cert: certs.Cert, Key: certs.Key, Http3: "on"})!
+  ada = t.SignUp({Email: "ada@example.com", Password: "correct horse battery", Name: "Ada", Tenant: "Martin & Co"})!
+  am = ada.Call(e.AddClient, {Name: "Ada Martin", Email: "ada@example.com", City: "Lyon"})!
+  one = ada.Call(e.AddInvoice, {Client: am.Id, Date: "2026-10-01", Due: "2026-12-01", Lines: lines})!
+  fiber.Spawn(() -> app.Listen(t.Env, listener = l))
+  sys.Sleep(0.05)
+  {Url: url, Ada: ada, One: one, Secure: tls.Client(tls.Open()!, ca = certs.Ca), H3: http3.Client(quic.Open()!, ca = certs.Ca)}
+end
+
+defn asked(o, path, method = "GET", key = missing, h3 = true)
+  (** Ada's request over HTTP/3 once the app said it speaks it, or over TCP with h3 = false. *)
+  headers = [{Name: "cookie", Value: o.Ada.Cookie}, {Name: "origin", Value: o.Url}]
+  if not value.IsMissing(key)
+    headers = [{Name: "cookie", Value: o.Ada.Cookie}, {Name: "origin", Value: o.Url}, {Name: "idempotency-key", Value: key}]
+  end
+  http.Fetch("$(o.Url)$path", method = method, headers = headers, secure = o.Secure, http3 = if h3 o.H3 else missing end)!
+end
+
+defn isTheSameEitherWay()
+  o = office()
+  first = asked(o, "/invoices")
+  bug.Assert(http.HeaderValue("alt-svc", first.Headers) == "h3=\":$(text.Split(":", o.Url)[3])\"; ma=86400", "the first request goes over TCP and hears of HTTP/3")
+  paths = ["/invoices", "/invoices.csv", "/invoices/$(o.One.Id)"]
+  over3 = [asked(o, p) for p in paths]
+  overTcp = [asked(o, p, h3 = false) for p in paths]
+  bug.Assert(value.Len([r for r in over3 if not value.IsMissing(http.HeaderValue("alt-svc", r.Headers))]) == 0, "the others go over HTTP/3")
+  value.Equal([r.Body for r in over3], [r.Body for r in overTcp]) and value.Equal([r.Status for r in over3], [200, 200, 200])
+end
+
+defn isPaidOnceOverHttp3()
+  o = office()
+  _ = asked(o, "/invoices")
+  paid = asked(o, "/invoices/$(o.One.Id)/pay", method = "POST", key = "pay-1")
+  again = asked(o, "/invoices/$(o.One.Id)/pay", method = "POST", key = "pay-1")
+  shown = json.Parse(asked(o, "/invoices/$(o.One.Id)").Body)!
+  paid.Status == 200 and again.Status == 200 and again.Body == paid.Body and shown.Status == "paid"
+end

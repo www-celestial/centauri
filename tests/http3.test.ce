@@ -1,0 +1,90 @@
+(** HTTP/3 beside TCP, a setting: APP_HTTP3=on serves the same routes over QUIC on the TCP port, every response of TCP
+    says so (Alt-Svc), and a client that heard it asks over HTTP/3 from then on, with the same answers and the same
+    session; APP_WEBTRANSPORT=on lets the live screens take WebTransport sessions on the same path. HTTP/3 without TLS,
+    or WebTransport without HTTP/3 on the page's own port, stops the start with the setting named. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/dict
+use std/fiber
+use std/http
+use std/http3
+
+use std/list
+use std/net
+use std/quic
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+Mine = api.Live("notes.mine", role = "member")
+mine(s, args) = cepheus.Watch(2, (n, t) -> {Where: [[n, Note.Tenant, s.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}}, s.Db, until = s.Ended)
+App = app.Of([auth.Module(), app.Module("notes", kinds = [Note], serve = [app.Live(Mine, mine)])], name = "notes")
+
+defn served(given)
+  (** The app served on a free port, TCP and UDP, with TLS: {Port, Ca}. *)
+  certs = apptest.TestCerts()!
+  l = net.Listen(0, host = "127.0.0.1")!
+  port = net.Port(l)
+  base = {Profile: "test", Origin: "https://localhost:$port", Pow: "off", SessionCache: 0, Port: port, Cert: certs.Cert, Key: certs.Key}
+  s = app.Read(App.Fields, dict.Merge(base, given), defaults = App.Defaults)!
+  env = app.Start(App, s, cepheus.Fork(cepheus.Empty, App.Kinds)!)!
+  fiber.Spawn(() -> app.Listen(env, listener = l))
+  sys.Sleep(0.05)
+  {Port: port, Ca: certs.Ca}
+end
+
+defn isRefusedWithoutTls()
+  plain = app.Read(App.Fields, {Profile: "test", Http3: "on"}, defaults = App.Defaults)
+  alone = app.Read(App.Fields, {Profile: "test", WebTransport: "on", Cert: "c.pem", Key: "k.pem"}, defaults = App.Defaults)
+  apart = app.Read(App.Fields, {Profile: "test", Http3: "on", Http3Port: 9443, Port: 8443, WebTransport: "on", Cert: "c.pem", Key: "k.pem"}, defaults = App.Defaults)
+  said(r, name) = result.IsErr(r) and value.Len([e for e in r.Error if text.StartsWith(name, e)]) == 1
+  said(plain, "APP_HTTP3:") and said(alone, "APP_WEBTRANSPORT:") and said(apart, "APP_WEBTRANSPORT:")
+end
+
+defn isServedBothWays()
+  one = served({Http3: "on"})
+  secure = tls.Client(tls.Open()!, ca = one.Ca)
+  h3 = http3.Client(quic.Open()!, ca = one.Ca)
+  url = "https://localhost:$(one.Port)"
+  asked = [{Name: "content-type", Value: "application/json"}, {Name: "origin", Value: url}]
+  made = http.Fetch("$url/auth/signup", method = "POST", body = "{\"Email\":\"ana@example.com\",\"Password\":\"correct horse 12\",\"Name\":\"Ana\"}", headers = asked, secure = secure, http3 = h3)!
+  offered = http.HeaderValue("alt-svc", made.Headers)
+  cookie = text.Split(";", http.HeaderValue("set-cookie", made.Headers))[1]
+  me = [{Name: "cookie", Value: cookie}]
+  over3 = http.Fetch("$url/auth/me", headers = me, secure = secure, http3 = h3)!
+  overTcp = http.Fetch("$url/auth/me", headers = me, secure = secure)!
+  bug.Assert(made.Status == 201 and offered == "h3=\":$(one.Port)\"; ma=86400", "signed up over TCP: $made")
+  bug.Assert(value.IsMissing(http.HeaderValue("alt-svc", over3.Headers)), "the second request went over HTTP/3")
+  over3.Status == 200 and over3.Body == overTcp.Body and text.Contains("ana@example.com", over3.Body)
+end
+
+defn isSessionOfWebTransport()
+  q = quic.Open()!
+  on = served({Http3: "on", WebTransport: "on"})
+  off = served({Http3: "on"})
+  value.Equal([connected(q, on.Port), connected(q, off.Port)], ["200", "400"])
+end
+
+defn connected(q, port)
+  (** The status of a WebTransport session asked of the live screens at /live. *)
+  conn = quic.Dial("127.0.0.1", port, q, verify = false)!
+  control = conn.Open(true)!
+  control.Write("$(http3.Varint(0))$(http3.Frame(4, ""))")!
+  st = conn.Open(false)!
+  fields = [{Name: ":method", Value: "CONNECT"}, {Name: ":protocol", Value: "webtransport"}, {Name: ":scheme", Value: "https"},
+    {Name: ":authority", Value: "localhost:$port"}, {Name: ":path", Value: "/live"}, {Name: "origin", Value: "https://localhost:$port"}]
+  st.Write(http3.Frame(1, http3.EncodeHead(fields)))!
+  got = st.Read()!
+  kind = http3.ReadVarint(got, 1)
+  size = http3.ReadVarint(got, kind.Next)
+  head = http3.DecodeHead(text.ByteSlice(size.Next, size.Next + size.Value - 1, got))!
+  conn.Close(256)
+  [f.Value for f in head if f.Name == ":status"][1]
+end

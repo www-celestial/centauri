@@ -25,6 +25,9 @@ Core = {
   Secret: check.Secret(32, 512, optional = true),
   Cert: check.Text(1, 1000, optional = true),
   Key: check.Text(1, 1000, optional = true),
+  Http3: check.OneOf(["off", "on"], optional = true, default = "off"),
+  Http3Port: check.Int(0, 65535, optional = true, default = 0),
+  WebTransport: check.OneOf(["off", "on"], optional = true, default = "off"),
   Cors: check.Text(0, 4000, optional = true, default = ""),
   TrustProxy: check.Bool(optional = true, default = false),
   LimitIp: check.Int(1, 1000000, optional = true, default = 600),
@@ -134,6 +137,12 @@ defn Read(fields, given, defaults = {})
   end
   if s.ReconnectMax < s.ReconnectFirst
     wrong = list.Append("APP_RECONNECT_MAX: at least APP_RECONNECT_FIRST milliseconds.", wrong)
+  end
+  if s.Http3 == "on" and value.IsMissing(dict.Get("Cert", s))
+    wrong = list.Append("APP_HTTP3: needs APP_CERT and APP_KEY: QUIC has no clear text.", wrong)
+  end
+  if s.WebTransport == "on" and (s.Http3 != "on" or s.Http3Port != 0 and s.Http3Port != s.Port)
+    wrong = list.Append("APP_WEBTRANSPORT: needs APP_HTTP3=on on APP_PORT itself (APP_HTTP3_PORT 0 or the same): a page asks for its session on its own origin.", wrong)
   end
   if s.GetDb == "read" and value.IsMissing(dict.Get("CepheusReadToken", s))
     wrong = list.Append("APP_GET_DB: read needs APP_CEPHEUS_READ_TOKEN, a token of Cepheus that reads only.", wrong)

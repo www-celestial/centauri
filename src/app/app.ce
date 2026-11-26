@@ -16,11 +16,13 @@ use std/dict
 use std/encode
 use std/fiber
 use std/http
+use std/http3
 use std/io
 use std/json
 use std/list
 use std/log
 use std/metrics
+use std/quic
 use std/result
 use std/sys
 use std/text
@@ -325,14 +327,38 @@ defn Run(a)
       fiber.Spawn(() -> m.Start(env))
     end
   end
-  wrap = missing
-  if not value.IsMissing(dict.Get("Cert", s))
-    wrap = ready("https", tls.Server(s.Cert, dict.Get("Key", s), ready("OpenSSL", tls.Open())))
-  end
   fiber.Spawn(() -> keeping(env))
   if s.AdminPort > 0
     fiber.Spawn(() -> http.Serve(http.App() then http.Get("/metrics", r -> http.Plain(metrics.Text())), port = s.AdminPort, host = "127.0.0.1"))
   end
   log.Info("ready", {App: a.Name, Profile: s.Profile, Port: s.Port, Ms: (sys.Now() - started) * 1000})
-  ready("serve", http.Serve(App(env), port = s.Port, host = s.Host, timeout = s.Timeout, maxBody = s.MaxBody, wrap = wrap))
+  ready("serve", Listen(env))
+end
+
+defn Listen(env, listener = missing)
+  (** Serves an app that Start started, as Run does once it started it: on the Port and Host of its settings, or on a
+      listener already open (a test's, on port 0); with TLS when Cert and Key are given; with HTTP/3 beside TCP when
+      Http3 is on, and WebTransport for the live screens when WebTransport is on too. The same routes answer every
+      way. An Ok once a stop signal ended it, or an Err when TLS can't start. *)
+  s = env.Settings
+  wrap = missing
+  if not value.IsMissing(dict.Get("Cert", s))
+    wrap = tls.Server(s.Cert, dict.Get("Key", s), tls.Open()?)?
+  end
+  h3 = if s.Http3 == "on" quicServer(s) else missing end
+  http.Serve(App(env), port = s.Port, host = s.Host, timeout = s.Timeout, maxBody = s.MaxBody, wrap = wrap, listener = listener,
+    http3 = h3, webtransport = not value.IsMissing(h3) and s.WebTransport == "on")
+end
+
+defn quicServer(s)
+  (** The listener of HTTP/3, beside TCP, on UDP Http3Port (the TCP port by default, as browsers find it). An OpenSSL
+      without QUIC's server (before 3.6, as the 3.0 of Ubuntu 22.04 and 24.04) or a port taken leaves TCP alone, with a
+      warning: HTTP/3 is a way more, never the only one. *)
+  made = quic.Open() then result.AndThen(q -> http3.Server(s.Cert, dict.Get("Key", s), q, port = if s.Http3Port == 0 s.Port else s.Http3Port end, host = s.Host))
+  if result.IsErr(made)
+    log.Warn("http3: off, TCP alone", {Error: made.Error.Message})
+    return missing
+  end
+  log.Info("http3", {Port: made.Value.Port, WebTransport: s.WebTransport})
+  made.Value
 end
