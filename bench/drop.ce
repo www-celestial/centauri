@@ -3,7 +3,8 @@
     the same changes pushed to a page that reads them as they come; (2) the memory an action takes while it waits in a
     page's outbox (Ceres's client, web.Act while the network is cut); (3) the time from the network back to every
     action waiting answered. Rounds alternate the order; one JSON line a measure:
-    cesia run --allow net,read=/proc/self/status bench/drop.ce [ROUNDS] [CHANGES] [ACTIONS] *)
+    cesia run --allow net,read=/proc/self/status bench/drop.ce [ROUNDS] [CHANGES] [ACTIONS], or bench/drop.ce memory N:
+    the bytes N actions waiting take in a fresh process. *)
 use deps/www-celestial/ceres/src/web
 use std/dict
 use std/fiber
@@ -128,6 +129,11 @@ end
 
 defn main()
   args = sys.Args
+  if value.Len(args) >= 2 and args[1] == "memory"
+    (* the memory of n actions waiting, in a fresh process: run with two n, the slope is the bytes of one *)
+    io.Print(json.Text({Name: "outbox memory", Actions: text.Number(args[2]), Bytes: outboxBytes(text.Number(args[2])) * text.Number(args[2])}))
+    sys.Exit(0)
+  end
   rounds = if value.Len(args) >= 1 text.Number(args[1]) else 21 end
   changes = if value.Len(args) >= 2 text.Number(args[2]) else 20000 end
   actions = if value.Len(args) >= 3 text.Number(args[3]) else 100 end

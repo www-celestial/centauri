@@ -111,4 +111,8 @@ the disk), read back whole in 51 ms [46, 56] (207 MB/s), and a range of 64 KiB i
 first number carries ten `fsync`s of the vault; Spring with S3 would carry the round trips to S3 instead (not measured
 here).
 
+An upload cut on the way goes on from the bytes the app holds, sent with an `Idempotency-Key` (the headers of the tus
+protocol, on this same endpoint), and a download cut goes on by `Range` and `If-Range`: [When the connection
+drops](connection.md#6-uploads-and-downloads-that-go-on).
+
 Next: [The unpaid invoices, live](live.md).

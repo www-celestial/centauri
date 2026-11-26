@@ -81,4 +81,8 @@ A write seen by a page on this machine, through the watch, `std/live` and a WebS
 of 20 writes, 21 runs, a fork in the program; `bench/month.ce`). Through a Cepheus server, add its `fsync` and the
 delivery of its watch (19 µs, measured by Cepheus).
 
-Next: [Tell a partner, and take his answers](partner.md).
+A break of the page's connection is no end of its screen: the app keeps it two minutes, the page comes back to it and
+gets every change of the break, once; past that it gets the answers again. What it takes is in
+[When the connection drops](connection.md).
+
+Next: [When the connection drops](connection.md).

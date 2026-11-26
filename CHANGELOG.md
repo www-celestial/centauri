@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+When the connection drops, a page carries on: a drop of seconds to minutes (a wifi lost, wifi to 4G, a laptop
+asleep, a restart or a deploy, a proxy that cuts idle connections) no longer shows, and nothing is lost or doubled.
+Nothing breaks: a request without an `Idempotency-Key` takes the path it took, every endpoint answers as it did, and a
+page of before still connects (std/live's version 1). What changes, each a setting with its old way kept: a key is the
+account's, not the session's (`APP_IDEMPOTENCY_SCOPE=session` for before); a page's actions asked while it is away wait
+and go once it is back (`APP_OUTBOX=off` for before, a refusal at once); an upload sent with an `Idempotency-Key`
+holds it (a cut keeps its parts, its final answer is kept). It needs Cesia's branch `offline` (std/live version 2,
+live.js, `websocket.Dial`'s `last`) and Ceres's (the page's client, `web.Connection`, `web.Conflicts`).
+
+- The live screen of a page is kept `APP_RESUME_TIME` seconds (120) and `APP_RESUME_BYTES` of frames (1 MiB) after
+  its connection breaks, for the page that comes back with the same account and the same shows, from any address: it
+  gets every change of the break, once. Past that, a new screen whose answers replace the rows, said in the page.
+- Each action of a page carries the key made when it was asked, its `Idempotency-Key`: sent again after a break, it
+  runs once, on the screen kept (`Heard`) or on a new one (its key). An action stamped with another account is
+  refused (403). The page's settings come with its screen: `APP_OUTBOX`, `APP_OUTBOX_COUNT`, `APP_OUTBOX_BYTES`,
+  `APP_OUTBOX_WAIT`, `APP_RECONNECT_FIRST`, `APP_RECONNECT_MAX`, `APP_PING_EVERY`, `APP_DEAD_AFTER`.
+- `app.Unchanged(kind, id, current, r)`: a change refused (a 409 whose `conflict` lists each field seen and now) when
+  what the page saw (`Centauri-Base`, `web.Act`'s `base`) changed meanwhile, else the `Expect`s of it for the same
+  write. `PATCH /admin/data/:kind/:id` checks what the admin saw.
+- `APP_IDEMPOTENCY_SCOPE` (`account`, `session`), `APP_IDEMPOTENCY_LEASE` (0: a key a stopped server left running is
+  refused until `APP_IDEMPOTENCY_TIME`; else let go after it).
+- Uploads go on after a cut, with the headers of tus 1.0 on the app's own endpoint: `HEAD` answers `Upload-Offset`,
+  a POST with `Upload-Offset` and `Upload-Length` sends the rest, a wrong offset gets a 409 with the right one; the
+  kind `centauri_upload`; a cut left alone is forgotten with its parts after `APP_IDEMPOTENCY_TIME`. Downloads have a
+  strong `ETag` and honour `If-Range`.
+- `src/client`: `Upload` and `Download`, which go on by themselves after a cut.
+- The admin pages: the band says the state of the connection (`web.Connection`), the conflicts with Keep mine and
+  Take theirs (`web.Conflicts`), a sign-in in the page when the session ended while away, the changes kept; a list
+  asked again keeps its rows until the new ones come.
+- The book: [When the connection drops](docs/book/connection.md), in English and in French, with its pictures taken
+  by `tools/drop-shots.sh`; Security's rows of these threats; Settings.
+- Tests: `tests/drop.test.ce` (10), the invoices' `tests/drop.test.ce` (4), the browser test `cesia do drop-shot`
+  (Chrome's offline mode, a proxy that drops TCP connections, a restart on the same database); `bench/drop.ce`,
+  `bench/storm.ce`.
+
 ## 0.4.0 (not released)
 
 The third batch, L3: signing in with a provider, passkeys and two-factor, keys of programs, languages, feature flags,

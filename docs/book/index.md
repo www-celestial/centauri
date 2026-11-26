@@ -29,29 +29,33 @@ Spring Boot beside, and ends on tests that pass. The whole app is in
    vault by parts, read back by ranges (`api.Upload`, `app.Store`, `app.Download`, `Range`).
 9. [The unpaid invoices, live](live.md): every page changes as the database does, from any server, without a broker
    (WebSocket, `cepheus.Watch`, the session and the rights, the endpoints as actions).
-10. [Tell a partner, and take his answers](partner.md): webhooks signed as Standard Webhooks, tried again, received once;
+10. [When the connection drops](connection.md): a page that stays usable through a break and carries on after it
+    without a reload: the line that says it, actions kept and run once (`Idempotency-Key`), live views that miss
+    nothing, a change over a change shown as a conflict (`app.Unchanged`), uploads and downloads that go on
+    (`client.Upload`, `client.Download`), with Socket.IO, SignalR, MQTT and Spring Boot beside.
+11. [Tell a partner, and take his answers](partner.md): webhooks signed as Standard Webhooks, tried again, received once;
     calls that never reach the app's own network (SSRF); `Idempotency-Key`.
-11. [Change the schema without a stop](schema.md): migrations run once whatever the processes, a field filled, expand then
+12. [Change the schema without a stop](schema.md): migrations run once whatever the processes, a field filled, expand then
     contract, and what waits for Cepheus's A2.
-12. [Sign in with Google](google.md): Google, Microsoft, Apple, GitHub or any provider of OpenID Connect, by the code
+13. [Sign in with Google](google.md): Google, Microsoft, Apple, GitHub or any provider of OpenID Connect, by the code
     and PKCE, the ID token checked by the provider's keys, an account linked by a verified address or made at the
     first sign-in (`SignInWith`, `OidcLink`, `OidcSignUp`, `apptest.Provider`).
-13. [Passkeys and two-factor](passkeys.md): passkeys of WebAuthn made and used, a sign-up without a password, TOTP
+14. [Passkeys and two-factor](passkeys.md): passkeys of WebAuthn made and used, a sign-up without a password, TOTP
     and recovery codes, the second step of a sign-in on every way in, asked of everyone or of some roles, and a lost
     device (`apptest.Device`, `t.SetUp`).
-14. [An API for a partner](partner-api.md): a key of a program with some of its maker's roles, shown once, sent as
+15. [An API for a partner](partner-api.md): a key of a program with some of its maker's roles, shown once, sent as
     `Authorization: Bearer`, limited apart, revoked; the OpenAPI document and a client generated from it.
-15. [Translate the app](languages.md): catalogues of messages shared with the pages, plurals of CLDR, the account's
+16. [Translate the app](languages.md): catalogues of messages shared with the pages, plurals of CLDR, the account's
     language then the browser's, the errors and the mails translated, French shipped (`i18n`, `Langs`).
-16. [Open a feature to one office](flags.md): feature flags for everyone, a share of the users, a tenant or a user,
+17. [Open a feature to one office](flags.md): feature flags for everyone, a share of the users, a tenant or a user,
     turned from the admin pages without a restart (`flags`).
-17. [Security](security.md): each threat of the OWASP Top 10, and the others, with Centauri's defense and its test.
-18. [The administration](administration.md): the endpoints of the super-admin pages, and what they show.
-19. [The admin pages](admin.md): the pages of the super-admin in the browser, in WebAssembly (a live dashboard, users,
+18. [Security](security.md): each threat of the OWASP Top 10, and the others, with Centauri's defense and its test.
+19. [The administration](administration.md): the endpoints of the super-admin pages, and what they show.
+20. [The admin pages](admin.md): the pages of the super-admin in the browser, in WebAssembly (a live dashboard, users,
     tenants, events, log, jobs, webhooks, files, settings, the data of every kind changed in place, the audit trail,
     the keys of programs, the feature flags, a user's second factors), and your own admin page for the invoices, with
     Django's admin beside.
-20. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
+21. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
     Spring Boot, where the time goes, and what the pieces of the first month cost.
 
 The reference of the packages, every public name with its parameters, is under [Reference](ref/index.html).
