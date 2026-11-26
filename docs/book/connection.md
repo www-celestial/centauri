@@ -38,9 +38,10 @@ key = "k"
 
 ## 1. The line that says it
 
-The band of the admin pages shows the state of the page's connection to its app, in words, at its right:
+The band of the admin pages shows the state of the page's connection to its app, in words, on a line of its own at
+its right:
 
-![The band of the admin pages: "Invoices — admin", the app's name and version, then "Live" in green, the e-mail of the super-admin and Sign out.](images/drop-live.png)
+![The band of the admin pages: "Invoices — admin", the app's name and version, the e-mail of the super-admin and Sign out, and under them, at the right, "Live" in green.](images/drop-live.png)
 
 The line is `web.Connection(p)`, a widget of Ceres any page can show; a page in JavaScript gets the same state from
 `live.onStatus`. It says, in this order of what matters:
@@ -67,7 +68,7 @@ other side still hears.
 The accountant keeps working: she changes the client's name on an invoice and saves, then marks it paid. The page
 shows what it showed before (a list asked again keeps its rows until the new ones come), and the two changes wait:
 
-![The band while the network is cut: "Offline, no network — 2 actions waiting · next try in 7 s" in amber, and the button Try now.](images/drop-offline.png)
+![The band while the network is cut: under its first line, "Offline, no network — 2 actions waiting · next try in 1 s" in amber, and the button Try now.](images/drop-offline.png)
 
 Each action waits **in order**, with an **Idempotency-Key** made when it was asked: a random name of 128 bits that
 the app keeps with the action's answer, so that the same action sent again gets the first answer instead of running
@@ -94,7 +95,7 @@ Then the two changes go, in order. The payment is made once. The change of the n
 office, renamed the client meanwhile. The page shows it, with the value seen, the value now and its own, and the two
 choices:
 
-![The band says "Live — back after a break, nothing missed"; under it, in a frame, "PATCH /admin/data/:kind/:id was refused: This changed meanwhile: see its values now.", the field BillTo, "seen Client 1", "now Changed by Bruno meanwhile" in red, "yours Renamed while away", and the buttons Keep mine and Take theirs.](images/drop-conflict.png)
+![The band says "Live — back after a break, nothing missed"; under the band, in a frame, "PATCH /admin/data/:kind/:id was refused: This changed meanwhile: see its values now.", the field BillTo, "seen Client 1", "now Changed by Bruno meanwhile" in red, "yours Renamed while away", and the buttons Keep mine and Take theirs.](images/drop-conflict.png)
 
 **Keep mine** sends the change again over the value now; **Take theirs** drops it. Nothing is written over in silence.
 

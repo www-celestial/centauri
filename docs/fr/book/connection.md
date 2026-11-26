@@ -42,10 +42,10 @@ key = "k"
 
 ## 1. La ligne qui le dit
 
-Le bandeau des pages d'admin montre, à sa droite et en mots, l'état de la connexion de la page à son app (ici les pages
-en français : chaque texte de la ligne passe par le catalogue, `pages.Words`) :
+Le bandeau des pages d'admin montre, en mots, sur une ligne à lui à sa droite, l'état de la connexion de la page à son
+app (ici les pages en français : chaque texte de la ligne passe par le catalogue, `pages.Words`) :
 
-![Le bandeau des pages d'admin : « Factures — administration », le nom et la version de l'app, puis « Direct » en vert, l'e-mail du super-admin et Se déconnecter.](images/drop-live.png)
+![Le bandeau des pages d'admin : « Factures — administration », le nom et la version de l'app, l'e-mail du super-admin et Se déconnecter, et dessous, à droite, « Direct » en vert.](images/drop-live.png)
 
 La ligne est `web.Connection(p)`, un *widget* de Ceres (un élément d'écran tout prêt) que toute page peut montrer ;
 une page en JavaScript reçoit le même état par `live.onStatus`. Elle dit, par ordre d'importance :
@@ -73,7 +73,7 @@ La comptable continue de travailler : elle change le nom du client sur une factu
 payée. La page montre ce qu'elle montrait avant (une liste demandée à nouveau garde ses lignes jusqu'à l'arrivée des
 nouvelles), et les deux changements attendent :
 
-![Le bandeau pendant la coupure du réseau : « Hors ligne, pas de réseau — 2 actions en attente · prochain essai dans 2 s » en orange, et le bouton Réessayer maintenant.](images/drop-offline.png)
+![Le bandeau pendant la coupure du réseau : sous sa première ligne, « Hors ligne, pas de réseau — 2 actions en attente · prochain essai dans 1 s » en orange, et le bouton Réessayer maintenant.](images/drop-offline.png)
 
 Chaque action attend **dans l'ordre**, avec une **Idempotency-Key** créée au moment où elle a été demandée : un nom
 tiré au hasard, de 128 bits, que l'app garde avec la réponse de l'action, pour que la même action envoyée à nouveau
@@ -103,7 +103,7 @@ Puis les deux changements partent, dans l'ordre. Le paiement est fait une fois. 
 Bruno, dans un autre bureau, a renommé le client entre-temps. La page le montre, avec la valeur vue, la valeur
 actuelle et la sienne, et les deux choix :
 
-![Le bandeau dit « Direct — de retour après une coupure, rien de manqué » ; dessous, dans un cadre, « PATCH /admin/data/:kind/:id a été refusée : Cela a changé entre-temps : voyez ses valeurs maintenant. », le champ BillTo, « vu Client 1 », « maintenant Changed by Bruno meanwhile » en rouge, « le vôtre Renamed while away », et les boutons Garder le mien et Prendre le leur.](images/drop-conflict.png)
+![Le bandeau dit « Direct — de retour après une coupure, rien de manqué » ; sous le bandeau, dans un cadre, « PATCH /admin/data/:kind/:id a été refusée : Cela a changé entre-temps : voyez ses valeurs maintenant. », le champ BillTo, « vu Client 1 », « maintenant Changed by Bruno meanwhile » en rouge, « le vôtre Renamed while away », et les boutons Garder le mien et Prendre le leur.](images/drop-conflict.png)
 
 **Garder le mien** renvoie le changement par-dessus la valeur actuelle ; **Prendre le leur** l'abandonne. Rien n'est
 écrasé en silence.
