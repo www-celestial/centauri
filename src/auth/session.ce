@@ -52,17 +52,20 @@ defn NewSession(user, member, tenant, req, env, thing = 1)
 end
 
 defn SessionKey(req, env)
-  (** What names the session of a request among those the state of the process keeps: the BLAKE2b of its key of a
-      program (Authorization: Bearer) or of its cookie, or missing for a request without either. A lookup by it tells
+  (** What names the session of a request among those the state of the process keeps: the BLAKE2b of its cookie, or
+      of its key of a program (Authorization: Bearer) when it has no cookie, or missing for a request without either. A lookup by it tells
       nothing of the secret by its time, and a cookie or a key made by hand names no session kept: it is checked by
       Who first. *)
-  bearer = BearerOf(req)
-  if not value.IsMissing(bearer)
-    return crypto.Blake2b("bearer $bearer", env.Keys)
-  end
   cookies = dict.Get("Cookies", req)
   raw = if value.IsDict(cookies) dict.Get(CookieName(env), cookies) else missing end
-  if value.IsText(raw) and text.ByteLength(raw) <= 100 crypto.Blake2b(raw, env.Keys) else missing end
+  if value.IsText(raw) and raw != ""
+    return if text.ByteLength(raw) <= 100 crypto.Blake2b(raw, env.Keys) else missing end
+  end
+  if not value.IsText(dict.Get("Auth", req))
+    return missing
+  end
+  bearer = BearerOf(req)
+  if value.IsMissing(bearer) missing else crypto.Blake2b("bearer $bearer", env.Keys) end
 end
 
 defn Who(req, env)
@@ -71,13 +74,14 @@ defn Who(req, env)
       with every role they include, Until the time the session ends unless it is seen again (its end, or its end of
       idleness), Lang his language when he chose one, or an Ok of missing for no session, an ended one, a disabled
       user, or a member taken out of his tenant. The time of the session is seen again at most every 5 minutes, by a
-      write in a fiber of its own. A request with Authorization: Bearer is a program's: its key decides (keys.ce),
-      and a cookie beside it is not read. *)
-  bearer = BearerOf(req)
-  if not value.IsMissing(bearer)
-    return keyWho(bearer, env)
+      write in a fiber of its own. A request without a cookie of a session but with Authorization: Bearer is a
+      program's: its key decides (keys.ce). A browser sends the cookie, a program the key: one way for each. *)
+  raw = dict.Get(CookieName(env), dict.GetOr("Cookies", {}, req))
+  if not value.IsText(raw) or raw == ""
+    bearer = if value.IsText(dict.Get("Auth", req)) BearerOf(req) else missing end
+    return if value.IsMissing(bearer) result.Ok(missing) else keyWho(bearer, env) end
   end
-  p = parts(dict.Get(CookieName(env), dict.GetOr("Cookies", {}, req)))
+  p = parts(raw)
   if value.IsMissing(p)
     return result.Ok(missing)
   end

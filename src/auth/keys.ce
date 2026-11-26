@@ -25,11 +25,11 @@ Key = app.Kind("centauri_key", {Tenant: cepheus.Link(), Name: cepheus.Text(), Ro
 
 defn BearerOf(req)
   (** The token of a request's Authorization: Bearer header (the scheme in any case, RFC 9110), or missing when it has
-      none or one longer than 200 bytes.
+      none or one longer than 200 bytes. The door read the header already, in its one pass (app.Asked: req.Auth).
 
         BearerOf({Headers: [{Name: "authorization", Value: "Bearer 12.ab"}]}) --> "12.ab"
         BearerOf({Headers: [{Name: "authorization", Value: "Basic eDp5"}]}) --> missing *)
-  h = http.HeaderValue("authorization", dict.GetOr("Headers", [], req))
+  h = if dict.Has("Auth", req) req.Auth else http.HeaderValue("authorization", dict.GetOr("Headers", [], req)) end
   if not value.IsText(h) or text.ByteLength(h) > 207 or text.ByteLength(h) < 8 or text.Lower(text.ByteSlice(1, 7, h)) != "bearer "
     return missing
   end

@@ -176,7 +176,7 @@ defn Start(a, s, db, readDb = missing, clock = missing)
       ends = dict.Get("Ends", m)
     end
   end
-  served = [rated(b) for b in list.Concat(adminOfApp(), a.Served)]
+  served = [rated(b, whoModule) for b in list.Concat(adminOfApp(), a.Served)]
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
   guards = Guards(s.Csp, text.StartsWith("https://", s.Origin))
   words = wordsOf(a, s)
@@ -189,18 +189,18 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s), SessionKeyOf: sessionKey,
     WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards),
-    KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]),
-    Catalog: words.Catalog, Langs: words.Langs, Lang: words.Lang, Translating: words.Translating}
+    KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]), Words: words}
   result.Ok(env)
 end
 
-defn rated(b)
+defn rated(b, whoModule)
   (** A route with what each of its requests needs of its endpoint, made once: the rate of its own limit as door counts
       it (or missing), the size of its page (or missing), its status and the labels of its metric, whether it takes an
-      input, and its output as a function (outOf). *)
+      input, whether it is one of the accounts' (which a key of a program may not call), and its output as a function
+      (outOf). *)
   e = b.Endpoint
   status = api.Done(e)
-  {Endpoint: e, Handler: b.Handler, Module: b.Module, Rate: if value.IsMissing(e.Limit) missing else dict.Put("Name", e.Name, rateOf(e.Limit, 60, e.Limit)) end,
+  {Endpoint: e, Handler: b.Handler, Module: b.Module, Accounts: b.Module == whoModule, WhyHead: "$(e.Name) #", Rate: if value.IsMissing(e.Limit) missing else dict.Put("Name", e.Name, rateOf(e.Limit, 60, e.Limit)) end,
     Size: if value.IsDict(e.Out) dict.Get("Size", e.Out) else missing end, Status: status, Labels: {route: e.Name, status: status},
     Takes: not value.IsMissing(e.In) or not value.IsMissing(e.Query), Upload: dict.Has("Types", e), Out: if value.IsDict(e.Out) and dict.Get("Kind", e.Out) != "file" outOf(e.Out) else missing end}
 end
@@ -209,13 +209,14 @@ defn App(env)
   (** The app as std/http serves it: its routes behind Centauri's door, its live screens at /live. *)
   routes = http.App()
   for b in env.Served
-    routes = http.Route(b.Endpoint.Method, b.Endpoint.Path, req -> answer(b, req, env), routes, stream = dict.Get("Most", b.Endpoint))
+    routes = http.Route(b.Endpoint.Method, b.Endpoint.Path, if env.Words.Translating (req -> answerIn(b, req, env)) else (req -> answer(b, req, env)) end, routes,
+      stream = dict.Get("Most", b.Endpoint))
   end
   if env.Profile.OpenApi
     routes = http.Get("/openapi.json", req -> openapi(env), routes)
   end
   if value.Len(env.App.Lives) > 0
-    handle = http.Handler(routes then http.Wrap((next, req) -> front(next, req, env)))
+    handle = http.Handler(routes then doorOf(env))
     routes = mounted(routes, env, handle)
   end
   for m in env.App.Modules
@@ -227,8 +228,12 @@ defn App(env)
   if not value.IsMissing(env.Pages)
     routes = http.Get("/*", req -> page(env.Pages, req.Params["*"]), routes)
   end
-  routes then http.Wrap((next, req) -> front(next, req, env))
+  routes then doorOf(env)
 end
+
+(* The door of an app: front, and for an app of several languages its Problem Details translated after it; an app of
+   English alone pays no test for it. *)
+doorOf(env, routes) = if env.Words.Translating http.Wrap((next, req) -> translated(front(next, req, env), req, env), routes) else http.Wrap((next, req) -> front(next, req, env), routes) end
 
 (** The function of a request that the app is: what http.Serve calls, and what a test calls without the network. *)
 Handler(env) = http.Handler(App(env))

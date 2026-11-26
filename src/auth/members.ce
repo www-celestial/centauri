@@ -71,8 +71,8 @@ defn inviteJob(job, env, texts)
   cepheus.Insert(Invite, fields, env.Db, why = env.Why)?
   who = if value.IsMissing(by) missing else cepheus.Get(User, by, env.Db)? end
   x = {Link: link(env, env.Settings.InvitePage, code), Tenant: dict.GetOr("Name", "", t), By: if value.IsDict(who) dict.GetOr("Name", "", who) else "" end,
-    App: env.App.Name, Days: math.Ceil(env.Settings.InviteTime / 86400), Email: job.Email, Lang: env.Lang}
-  x.Say = s -> app.SayIn(env, env.Lang, s, args = x)
+    App: env.App.Name, Days: math.Ceil(env.Settings.InviteTime / 86400), Email: job.Email, Lang: env.Words.Lang}
+  x.Say = s -> app.SayIn(env, env.Words.Lang, s, args = x)
   words = texts(x)
   m = {To: [job.Email], Subject: words.Subject, Text: words.Text}
   if dict.Has("Html", words)

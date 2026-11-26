@@ -40,13 +40,39 @@ defn block(ip)
   "$(text.Join(":", [text.Lower(g) for g in list.Take(4, groups)]))::/64"
 end
 
-defn Site(request, origin, cors)
-  (** Where a request comes from, for its rights: "same" (a page of the app, or no browser at all), "partner" (a page
-      of an origin of the setting Cors), or "other" (a page of any other site). The browser's Sec-Fetch-Site decides
-      when it is there, else Origin. A request of another site never reads the session of its cookie, whatever the
-      browser sent; one that changes something is refused, unless it comes from a partner, who has no session. *)
-  asked = http.HeaderValue("origin", request.Headers)
-  site = http.HeaderValue("sec-fetch-site", request.Headers)
+defn Asked(headers)
+  (** The headers of a request that the door reads, in one pass over them: {Origin, Fetch (Sec-Fetch-Site), Auth
+      (Authorization)}, each missing when the request has none.
+
+        Asked([{Name: "origin", Value: "https://app.example"}]).Origin --> "https://app.example" *)
+  origin = missing
+  fetch = missing
+  auth = missing
+  for h in headers
+    n = h.Name
+    if n == "origin"
+      origin = h.Value
+    else if n == "sec-fetch-site"
+      fetch = h.Value
+    else if n == "authorization"
+      auth = h.Value
+    end
+  end
+  if value.IsMissing(origin) and value.IsMissing(fetch) and value.IsMissing(auth) none else {Origin: origin, Fetch: fetch, Auth: auth} end
+end
+
+none = {Origin: missing, Fetch: missing, Auth: missing}   (* What Asked gives of a request with none of them, made once. *)
+
+(** Where a request comes from, for its rights: "same" (a page of the app, or no browser at all), "partner" (a page
+    of an origin of the setting Cors), or "other" (a page of any other site). The browser's Sec-Fetch-Site decides
+    when it is there, else Origin. A request of another site never reads the session of its cookie, whatever the
+    browser sent; one that changes something is refused, unless it comes from a partner, who has no session. *)
+Site(request, origin, cors) = siteOf(Asked(request.Headers), origin, cors)
+
+defn siteOf(a, origin, cors)
+  (** Site, of the headers that Asked read. *)
+  asked = a.Origin
+  site = a.Fetch
   if value.IsText(site) and site != "same-origin" and site != "none"
     return if value.IsText(asked) and asked in cors "partner" else "other" end
   end

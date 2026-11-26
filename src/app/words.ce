@@ -30,23 +30,23 @@ defn Lang(r)
   (** The language of a request, one of the app's (the setting Langs): the account's (its Lang), else the one its
       Accept-Language prefers, else the app's first. *)
   env = r.Env
-  if not env.Translating
-    return env.Lang
+  if not env.Words.Translating
+    return env.Words.Lang
   end
   mine = if value.IsDict(r.User) dict.Get("Lang", r.User) else missing end
-  if value.IsText(mine) and mine in env.Langs
+  if value.IsText(mine) and mine in env.Words.Langs
     return mine
   end
-  i18n.Best(http.HeaderValue("accept-language", r.Headers), env.Langs, env.Lang)
+  i18n.Best(http.HeaderValue("accept-language", r.Headers), env.Words.Langs, env.Words.Lang)
 end
 
 (** A message of the app in the language of a request, as i18n.Say gives it from the app's catalogue: with args, the
     values of its names; without, a message already filled in, read against the catalogue's templates. *)
-Say(r, message, args = missing) = i18n.Say(r.Env.Catalog, Lang(r), message, args = args)
+Say(r, message, args = missing) = i18n.Say(r.Env.Words.Catalog, Lang(r), message, args = args)
 
 (** A message in a language, as Say, for a job or a mail, where there is no request: lang one of the app's, or missing
     for its first. *)
-SayIn(env, lang, message, args = missing) = i18n.Say(env.Catalog, if value.IsText(lang) and lang in env.Langs lang else env.Lang end, message, args = args)
+SayIn(env, lang, message, args = missing) = i18n.Say(env.Words.Catalog, if value.IsText(lang) and lang in env.Words.Langs lang else env.Words.Lang end, message, args = args)
 
 defn isProblem(out)
   (** Is a response Problem Details, by its media type. *)
@@ -62,19 +62,19 @@ defn translated(out, req, env)
   (** A response of Problem Details in the language of its request: its title, its detail and the messages of its
       fields, and Content-Language. The language is the account's when the route knew it (out.Lang), else the one
       Accept-Language prefers among the app's: nothing of the header reaches the answer but one of them. *)
-  if not env.Translating or not isProblem(out) or not value.IsText(dict.Get("Body", out))
+  if not env.Words.Translating or not isProblem(out) or not value.IsText(dict.Get("Body", out))
     return out
   end
   lang = dict.Get("Lang", out)
-  if not (value.IsText(lang) and lang in env.Langs)
-    lang = i18n.Best(http.HeaderValue("accept-language", req.Headers), env.Langs, env.Lang)
+  if not (value.IsText(lang) and lang in env.Words.Langs)
+    lang = i18n.Best(http.HeaderValue("accept-language", req.Headers), env.Words.Langs, env.Words.Lang)
   end
   got = json.Parse(out.Body)
   if result.IsErr(got) or not value.IsDict(got.Value)
     return out
   end
   p = got.Value
-  c = env.Catalog
+  c = env.Words.Catalog
   for k in ["title", "detail"]
     if value.IsText(dict.Get(k, p))
       p[k] = i18n.Say(c, lang, p[k])

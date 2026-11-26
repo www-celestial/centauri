@@ -68,7 +68,8 @@ defn front(base, req, env)
     out = Preflight(req, env.Cors)
   end
   if value.IsMissing(out)
-    site = Site(req, s.Origin, env.Cors)
+    a = Asked(req.Headers)
+    site = siteOf(a, s.Origin, env.Cors)
     if site == "other" and Changes(req) and not (value.Len(env.Cross) > 0 and dict.Has(req.Path, env.Cross))
       metrics.Add("centauri_refused_total", labels = {reason: "origin"})
       noted(env, "origin", "ip:$ip", "A request that changes something came from another site.", missing, missing, ip, req.Method)
@@ -78,11 +79,12 @@ defn front(base, req, env)
          the two that std/http's routes give it, so that none is added to a copy: a record made at once costs a
          tenth of three fields added *)
       out = base({Method: req.Method, Path: req.Path, Query: req.Query, Headers: req.Headers, Body: req.Body, Peer: req.Peer, Id: rid, Ip: ip,
-        Site: site, Params: missing, Cookies: missing})
+        Site: site, Auth: a.Auth, Params: missing, Cookies: missing})
     else
       req.Id = rid
       req.Ip = ip
       req.Site = site
+      req.Auth = a.Auth
       out = base(req)
     end
   end
@@ -94,9 +96,6 @@ defn front(base, req, env)
     else if out.Status >= 400
       out = refuse(out.Status, if out.Status == 404 "There is no such address." else http.Reason(out.Status) end, rid, env)
     end
-  end
-  if env.Translating
-    out = translated(out, req, env)
   end
   if not dict.Has("Secured", out)
     out = Secure(out, env.Guards, names = env.GuardNames)
@@ -254,6 +253,20 @@ end
 
 tenantOf(user) = if value.IsMissing(user) 0 else dict.GetOr("Tenant", 0, user) end
 
+defn answerIn(b, req, env)
+  (** A request at its route in an app of several languages: answer, and for Problem Details the language of the
+      account of its session, when he chose one, for the door to translate them into (else his browser's). Only an
+      answer of an error reads the session again. *)
+  out = answer(b, req, env)
+  if not value.IsMissing(env.Who) and dict.Get("Site", req) == "same" and isProblem(out)
+    who = env.Who(req, env)
+    if result.IsOk(who) and value.IsDict(who.Value) and value.IsText(dict.Get("Lang", who.Value))
+      out.Lang = who.Value.Lang
+    end
+  end
+  out
+end
+
 defn answer(b, req, env)
   (** A request at its route, its Idempotency-Key honored. *)
   e = b.Endpoint
@@ -307,17 +320,8 @@ defn served(b, e, req, env, rid)
   if not d.Ok
     return limited(d, env, req.Ip, e.Name, rid)
   end
-  out = routed(b, e, req, env, rid, user, d)
-  if env.Translating and value.IsDict(user) and value.IsText(dict.Get("Lang", user))
-    out.Lang = user.Lang
-  end
-  out
-end
-
-defn routed(b, e, req, env, rid, user, d)
-  (** A request at its route once its user and its limits passed: its role, its input, its handler, its output. *)
   status = if e.Role == api.Public 0 else allowedRole(e.Role, user, env.Roles) end
-  if status == 0 and value.IsDict(user) and dict.Has("Key", user) and b.Module == env.WhoModule
+  if b.Accounts and status == 0 and value.IsDict(user) and dict.Has("Key", user)
     metrics.Add("centauri_refused_total", labels = {reason: "role"})
     return refuse(403, "A key of a program calls the app's endpoints, not those of the accounts.", rid, env)
   end
@@ -351,7 +355,7 @@ defn routed(b, e, req, env, rid, user, d)
     before = if s.GetDb == "fork" probe(db) else missing end
   end
   r = {Method: req.Method, Path: req.Path, Params: req.Params, Query: req.Query, Headers: req.Headers, Cookies: req.Cookies, Body: req.Body, Ip: req.Ip,
-    Id: rid, Route: e.Name, User: user, Db: db, Why: if value.IsDict(user) and dict.Has("Key", user) "$(e.Name) #$rid key $(user.Key)" else "$(e.Name) #$rid" end, Settings: s, Now: d.Now, Keys: env.Keys,
+    Id: rid, Route: e.Name, User: user, Db: db, Why: if value.IsDict(user) and dict.Has("Key", user) "$(b.WhyHead)$rid key $(user.Key)" else "$(b.WhyHead)$rid" end, Settings: s, Now: d.Now, Keys: env.Keys,
     Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
   got = missing
   if b.Upload

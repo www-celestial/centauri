@@ -131,6 +131,50 @@ back through their shape. Neither is on the path of a request. What was not meas
 Boot's `@Scheduled` with ShedLock, its JavaMailSender, its multipart uploads to S3, its STOMP with a broker; the
 numbers above are Centauri's alone.
 
+## The first quarter: what L3 adds, and what its pieces cost
+
+L3 must not make a request of L1 slower. Measured as before, `bench/micro.ce` in the program, 21 runs alternated
+between Centauri's main (0.3, fd982a9) and L3, both on the same build of Cesia (its branch of L3, so that only Centauri
+differs), on cores 0, 1, 4, 5 (2026-11-26, load 2.4 to 2.7), medians in µs with their [min, max]:
+
+| request | main | L3 |
+|---|---:|---:|
+| Centauri, public, a JSON of one field | 22.85 [21.06, 26.76] | 23.41 [22.69, 30.24] |
+| Centauri, signed in, a thing by its id (`app.Own`) | 41.23 [39.47, 60.99] | 42.35 [41.12, 45.35] |
+| Centauri, signed in, a page of 20 things | 145.91 [142.00, 158.99] | 148.74 [144.85, 174.57] |
+
+The ranges overlap; the medians are 0.6 to 2.8 µs (1.9 to 2.7 %) above main's. What L3 adds to every request: the
+door reads `Origin`, `Sec-Fetch-Site` and `Authorization` in one pass over the headers (L1 read the first two in two);
+a request without a cookie of a session looks for a key of a program; the history's `why` names the key of a program
+when there is one. A first version of L3 cost 3.7 µs more: its record `env`, which every request reads many times, had
+grown past 32 fields, where a dictionary of Cesia leaves its one block of keys for a table; the words of the
+languages went into one field of it (`env.Words`), and an app that speaks English alone tests nothing of them at a
+request (its door is chosen when the app starts).
+
+What the new pieces cost, in the program, 21 runs, the mean of 2,000 calls a run (20 for the sign-ins), on a fork of
+Cepheus (`bench/l3.ce`, 2026-11-26, load 1.6 to 2.3), medians [min, max]:
+
+| piece | cost |
+|---|---:|
+| a thing by its id, with a cookie / with a key of a program (`Authorization: Bearer`) | 47.8 [46.3, 70.4] / 48.2 [46.6, 53.4] µs |
+| an error of a field (422), in English / in French (its Problem Details read again and translated) | 96.9 [93.9, 98.5] / 121.0 [117.3, 162.9] µs |
+| `i18n.Say` of a message of std/check, read against Centauri's French templates | 7.6 [7.0, 14.3] µs |
+| `flags.On`, the table of the flags in the memory of the process | 3.45 [3.24, 6.61] µs |
+| a sign-in by password (Argon2id, 64 MiB) | 60.9 [60.2, 63.8] ms |
+| a sign-in by password, then the code of the app (TOTP, the second step) | 61.8 [61.1, 68.8] ms |
+| a sign-in by passkey: the options, the device's answer (its ES256 signature made in the same program), the check | 1.02 [0.98, 1.56] ms |
+| a sign-in by a provider of OpenID Connect on this machine, over https: start, the code at its token endpoint, the ID token checked, a session | 4.57 [4.43, 5.30] ms |
+
+What it says: a key of a program costs a request what a cookie does (both are a read by an id, a hash, a comparison);
+a second factor adds under a millisecond to a sign-in that Argon2id makes 60 ms long; a passkey signs in in a
+millisecond, sixty times faster than a password, since nothing is hashed slowly: the device's signature is checked
+(ES256 by OpenSSL, 145 µs of it). The sign-in by a provider is most of all the round trip to its token endpoint, here
+on this machine with a TLS handshake each time; across the Internet it adds the provider's own time and the round
+trips to it, not measured here. A translated error costs 24 µs more: errors only, and only in an app of several languages. Not measured beside
+the giants: Spring Security's `oauth2Login()`, its `webAuthn()` and its one-time tokens; the signatures beside Node's
+are in Cesia's book (Cryptography): RS256 76 µs where Node takes 64 µs with a key read each time and 37 with a key
+parsed once.
+
 ## The admin pages in a browser
 
 The pages of [the admin](admin.md), compiled from Cesia to WebAssembly, measured in chrome-headless-shell 153 (WebGL
@@ -182,6 +226,9 @@ without polling, a table of 100,000 rows that scrolls and sorts in a frame.
   near Spring Boot, which takes eleven times its memory. Go and std/http win by having nothing between the route and its
   answer; Spring Boot by its JIT, which compiles every layer, and by using three cores where Cesia uses one
   (`cesia run --workers 4` serves a port with four processes, not measured here).
+- L3 (keys of programs, second factors, passkeys, providers, languages, flags) costs a request of L1 1.9 to 2.7 %
+  (0.6 to 2.8 µs), within the noise of the ranges; a key of a program costs what a cookie does, a passkey signs in
+  sixty times faster than a password.
 - What would take it further needs Cesia: a table of the process shared without a fiber, for the limits and the
   sessions (the round trip, 6 µs of the 18), and `encode.Base64` as a native (a cursor's 24 µs), both in its core, which
   is at its ceiling of lines.

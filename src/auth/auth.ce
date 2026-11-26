@@ -225,8 +225,8 @@ end
 
 defn setLang(r, x)
   (** PUT /auth/lang: one of the app's languages, or "" for none (the browser's). *)
-  if x.Lang != "" and not (x.Lang in r.Env.Langs)
-    return app.Fail(422, "Check the fields.", fields = {Lang: "One of: $(text.Join(", ", r.Env.Langs))."})
+  if x.Lang != "" and not (x.Lang in r.Env.Words.Langs)
+    return app.Fail(422, "Check the fields.", fields = {Lang: "One of: $(text.Join(", ", r.Env.Words.Langs))."})
   end
   u = cepheus.Get(User, r.User.Id, r.Db)?
   ops = if value.IsText(dict.Get("Lang", u)) [cepheus.Retract(r.User.Id, User.Lang, u.Lang)] else [] end
@@ -394,8 +394,8 @@ defn newUser(email, name, hash, now, r)
   (** The fields of a new user: his language the one his browser prefers among the app's, when it speaks several and
       the browser names one of them (none else: his browser's, at each request). *)
   u = {Email: email, Name: name, Hash: hash, Super: false, Disabled: false, Created: now}
-  if r.Env.Translating
-    lang = i18n.Best(http.HeaderValue("accept-language", r.Headers), r.Env.Langs, missing)
+  if r.Env.Words.Translating
+    lang = i18n.Best(http.HeaderValue("accept-language", r.Headers), r.Env.Words.Langs, missing)
     if value.IsText(lang)
       u.Lang = lang
     end
@@ -638,7 +638,7 @@ defn mailed(user, kind, page, seconds, texts, env)
   cepheus.Write(c.Ops, env.Db, why = env.Why)?
   lang = dict.Get("Lang", u)
   x = {Link: link(env, page, c.Code), Name: dict.GetOr("Name", "", u), Email: u.Email, App: env.App.Name, Hours: math.Ceil(seconds / 3600)}
-  x.Lang = if value.IsText(lang) and lang in env.Langs lang else env.Lang end
+  x.Lang = if value.IsText(lang) and lang in env.Words.Langs lang else env.Words.Lang end
   x.Say = t -> app.SayIn(env, x.Lang, t, args = x)
   words = texts(x)
   m = {To: [u.Email], Subject: words.Subject, Text: words.Text}

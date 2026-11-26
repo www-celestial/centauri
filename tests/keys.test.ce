@@ -136,14 +136,16 @@ defn isKeyNeverInLogsNorEvents()
   not text.Contains(secret, lines) and not text.Contains(secret, events.Body) and text.Contains("Key $(made.Id) made", events.Body)
 end
 
-defn isKeyBeforeCookie()
+defn isCookieBeforeKey()
   t = apptest.Start(App)?
   a = t.SignUp(ana)?
   b = t.SignUp(bo)?
   made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
   a.Call(AddNote, {Text: "ana's"})?
-  out = t.Raw("GET", "/notes", headers = list.Append({Name: "cookie", Value: b.Cookie}, bearer(made.Key)))
-  out.Status == 200 and text.Contains("ana's", out.Body)
+  b.Call(AddNote, {Text: "bo's"})?
+  both = t.Raw("GET", "/notes", headers = list.Append({Name: "cookie", Value: b.Cookie}, bearer(made.Key)))
+  key = t.Raw("GET", "/notes", headers = list.Append({Name: "cookie", Value: "other=1"}, bearer(made.Key)))
+  text.Contains("bo's", both.Body) and not text.Contains("ana's", both.Body) and text.Contains("ana's", key.Body)
 end
 
 defn isOpenApiNamingKeys()

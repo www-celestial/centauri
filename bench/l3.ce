@@ -1,0 +1,128 @@
+(** What the pieces of L3 cost, in this program, without the network but for the provider of OpenID (a server of https
+    on this machine): a request with a key of a program beside the same with a cookie, a sign-in by password alone,
+    with TOTP's second step, with a passkey, with a provider; a feature flag asked; an error in French beside the same
+    in English, and a message of std/check translated. Each measure is the mean of its n calls (n/10 for the
+    sign-ins, whose Argon2id takes some 70 ms); rounds alternate the order; one JSON line a measure:
+    cesia run --allow native=cepheus,ffi=sodium,ffi=ssl,ffi=crypto,env,net,read,write,exec bench/l3.ce [ROUNDS] [N] *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/flags
+use src/i18n
+use std/check
+use std/crypto
+use std/io
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+One = api.Get("/notes/:id", out = NoteOut, role = "member")
+Add = api.Post("/notes", body = check.Record({Text: check.Text(1, 200)}), out = NoteOut, role = "member")
+
+defn add(r, x)
+  made = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Note, made, r)
+end
+
+App = app.Of([auth.Module(), flags.Module([flags.Flag("new-export")]), app.Module("notes", kinds = [Note], serve = [app.Serve(One, r -> app.Own(Note, r.Params.id, r)),
+  app.Serve(Add, add)])], name = "bench")
+
+defn dict1(a, b)
+  out = a
+  for k in ["SignInWith", "OidcIssuer", "OidcId", "OidcSecret", "CallAllow", "CallCa"]
+    out[k] = b[k]
+  end
+  out
+end
+
+args = sys.Args
+rounds = if value.Len(args) >= 1 text.Number(args[1]) else 21 end
+n = if value.Len(args) >= 2 text.Number(args[2]) else 2000 end
+few = list.Max([2, math.Div(n, 100)])
+
+base = {Profile: "prod", Origin: "https://notes.example", Secret: text.Repeat(40, "s"), CepheusUrl: "cepheus://none", LogRequests: false, LimitIp: 1000000,
+  LimitUser: 1000000, LimitTenant: 10000000, KeyLimit: 1000000, SignInPerIp: 100000, LockAfter: 1000, Langs: "en,fr", StepTime: 1800}
+first = result.Unwrap(apptest.Start(App, settings = base))
+p = result.Unwrap(apptest.Provider(first))
+t = result.Unwrap(apptest.Start(App, settings = dict1(base, p.Settings)))
+ana = result.Unwrap(t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}))
+note = result.Unwrap(ana.Call(Add, {Text: "a note"}))
+key = result.Unwrap(ana.Call(api.NewKey, {Name: "robot", Roles: ["member"]})).Key
+bo = result.Unwrap(t.SignUp({Email: "bo@example.com", Password: "correct horse 34", Name: "Bo"}))
+s = result.Unwrap(bo.Call(api.TotpStart))
+result.Unwrap(bo.Call(api.TotpConfirm, {Code: result.Unwrap(auth.TotpCode(s.Secret, t.Env.Now(), t.Env))}))
+device = result.Unwrap(apptest.Device(t))
+c = result.Unwrap(ana.Call(api.PasskeyNew))
+made = apptest.Made(device, c.Options, t)
+result.Unwrap(ana.Call(api.PasskeyAdd, {Ticket: c.Ticket, Credential: made.Credential}))
+warm = apptest.ProviderSignIn(t, p)
+flagged = {Env: t.Env, User: {Id: ana.User, Tenant: ana.Tenant}}
+
+head(extra) = list.Concat([{Name: "host", Value: "notes.example"}], extra)
+ask(method, path, h, body = "") = {Method: method, Path: path, Query: "", Headers: head(h), Body: body, Peer: "203.0.113.7"}
+
+counter = [1]   (* the counter of the passkey, which must grow at each sign-in *)
+
+defn passkeyIn(k)
+  (** A sign-in with the passkey, its k-th: the options, the device's answer, its check. *)
+  o = result.Unwrap(t.Anyone().Call(api.PasskeyStart))
+  got = t.Anyone().Call(api.PasskeySignIn, {Ticket: o.Ticket, Credential: apptest.Signed(made.Device, o.Options, t, count = k)})
+  if result.IsErr(got)
+    io.PrintError("passkey: $(got.Error)")
+    sys.Exit(1)
+  end
+end
+
+defn totpIn()
+  (** A sign-in of Bo, the password then the code of his app; the clock moves 30 seconds, so each code is a new one. *)
+  t.Advance(30)
+  out = t.Anyone().Send(api.SignIn, {Email: "bo@example.com", Password: "correct horse 34"})
+  ticket = json.Parse(out.Body)!.second.Ticket
+  got = t.Anyone().Call(api.Second, {Ticket: ticket, Code: result.Unwrap(auth.TotpCode(s.Secret, t.Env.Now(), t.Env))})
+  if result.IsErr(got)
+    io.PrintError("totp: $(got.Error)")
+    sys.Exit(1)
+  end
+end
+
+defn oidcIn()
+  out = apptest.ProviderSignIn(t, p)
+  if out.Status >= 300
+    io.PrintError("oidc: $(out.Status) $(out.Body)")
+    sys.Exit(1)
+  end
+end
+
+bad = json.Text({Text: ""})
+cases = [
+  {Name: "a thing by its id, a cookie", Times: n, Run: k -> t.Handle(ask("GET", "/notes/$(note.Id)", [{Name: "cookie", Value: ana.Cookie}]))},
+  {Name: "a thing by its id, a key of a program", Times: n, Run: k -> t.Handle(ask("GET", "/notes/$(note.Id)", [{Name: "authorization", Value: "Bearer $key"}]))},
+  {Name: "an error of a field, in English", Times: n, Run: k -> t.Handle(ask("POST", "/notes", [{Name: "cookie", Value: ana.Cookie}, {Name: "content-type", Value: "application/json"}], body = bad))},
+  {Name: "an error of a field, in French", Times: n, Run: k -> t.Handle(ask("POST", "/notes", [{Name: "cookie", Value: ana.Cookie}, {Name: "content-type", Value: "application/json"},
+    {Name: "accept-language", Value: "fr-FR,fr;q=0.9"}], body = bad))},
+  {Name: "i18n.Say of a message of std/check", Times: n, Run: k -> i18n.Say(t.Env.Words.Catalog, "fr", "Text of 1 to 200 bytes.")},
+  {Name: "flags.On", Times: n, Run: k -> flags.On("new-export", flagged)},
+  {Name: "sign-in, a password", Times: few, Run: k -> t.Anyone().Call(api.SignIn, {Email: "ana@example.com", Password: "correct horse 12"})!},
+  {Name: "sign-in, a password then TOTP", Times: few, Run: k -> totpIn()},
+  {Name: "sign-in, a passkey (the device's ES256 signature in it)", Times: few * 10, Run: k -> passkeyIn(k)},
+  {Name: "sign-in, a provider of OpenID over https on this machine", Times: few * 10, Run: k -> oidcIn()}]
+
+for round in 1..rounds
+  order = if math.Mod(round, 2) == 0 list.Reverse(cases) else cases end
+  for x in order
+    start = sys.Now()
+    for k in 1..x.Times
+      counter[1] = counter[1] + 1
+      x.Run(counter[1] + round * 100000)
+    end
+    io.Print(json.Text({Name: x.Name, Round: round, Us: (sys.Now() - start) / x.Times * 1000000}))
+  end
+end
