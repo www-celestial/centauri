@@ -247,6 +247,55 @@ et elle marche sans JavaScript. Les pages d'administration gagnent une fois char
 chaque page après la première sans aucun fichier, un tableau de bord poussé chaque seconde sans polling (sans
 redemander sans cesse au serveur), une table de 100 000 lignes qui défile et se trie en une frame.
 
+## Les pages d'administration en français
+
+Le français ne doit rien coûter à une requête de l'app, et peu à une page. Mesuré comme avant : `bench/micro.ce` dans le
+programme, 21 exécutions en alternance entre le main de Centauri (92151da) et cette version, toutes deux sur le même
+build de Cesia (main), sur les cœurs 0, 1, 4 et 5 (2026-11-26, charge de 3,2 à 15,7 : d'autres travaux tournaient ; une
+première série, à une charge de 4 à 40, a été jetée). Médianes en µs, avec leur [min ; max] :
+
+| requête | main | maintenant |
+|---|---:|---:|
+| Centauri, public, un JSON d'un champ | 25,75 [22,18 ; 146,99] | 26,17 [23,38 ; 147,41] |
+| Centauri, connecté, une chose par son id (`app.Own`) | 45,02 [41,44 ; 232,83] | 43,68 [40,38 ; 240,30] |
+| Centauri, connecté, une page de 20 choses | 163,89 [143,24 ; 929,87] | 171,25 [144,05 ; 541,78] |
+| std/http seul, un JSON d'un champ (le même code des deux côtés) | 3,73 [3,25 ; 20,71] | 4,26 [3,35 ; 23,44] |
+
+La porte (ce que Centauri vérifie à l'entrée de chaque requête) d'une app qui ne parle qu'anglais est le même code
+qu'avant : les écarts sont ceux de std/http seul, dont le code est le même, c'est-à-dire le bruit. Dans une app en
+anglais et en français, les mêmes 21 exécutions (`bench/l3.ce`, la moyenne de 2 000 appels par exécution) :
+
+| morceau | main | maintenant |
+|---|---:|---:|
+| une erreur d'un champ (422), en anglais | 107,11 [95,71 ; 254,02] | 104,92 [93,05 ; 257,16] |
+| une erreur d'un champ, en français (ses Problem Details relus et traduits) | 136,89 [116,67 ; 277,67] | 134,78 [118,04 ; 312,07] |
+| `i18n.Say` d'un message de std/check | 7,70 [7,08 ; 18,87] | 7,96 [7,04 ; 19,31] |
+
+Un texte dit par les pages (`bench/words.ce`, la moyenne de 20 000 appels par exécution, 21 exécutions) : en français
+0,77 µs [0,69 ; 2,56] ; un texte qui compte, `{N} rows`, 7,95 µs [7,21 ; 20,96] en français et 7,97 [6,97 ; 20,72] en
+anglais ; un message du serveur ou de l'écran relu d'après les modèles français, 29,3 µs [24,5 ; 67,4], sur une erreur
+seulement. Un texte anglais sans valeurs est montré tel quel, sans lire le catalogue. Une page dit de 60 à 250 textes
+quand elle se construit : moins de 0,3 ms en français.
+
+Dans chrome-headless-shell 1243 (SwiftShader, 1280 sur 900), les factures remplies d'un mois, un profil neuf à chaque
+exécution, 21 exécutions en alternance (charge de 2,5 à 6,1), médianes en ms [min ; max]. Le travail d'un changement de
+page est la somme du travail propre de ses frames (les images que la page dessine), que compte `Stats()` de `ceres.js` :
+
+| | maintenant, un navigateur en anglais | maintenant, en français | main, en anglais |
+|---|---:|---:|---:|
+| premier affichage de la connexion | 127,6 [121,4 ; 243,1] | 130,5 [121,5 ; 271,8] | 121,3 [112,0 ; 212,4] |
+| de la connexion au tableau de bord avec ses compteurs | 320 [235 ; 788] | 321 [264 ; 600] | 284 [236 ; 760] |
+| premier affichage du tableau de bord, une fois connecté | 94,8 [85,9 ; 349,1] | 94,4 [87,5 ; 214,1] | 89,3 [81,0 ; 243,7] |
+| vers Utilisateurs : le travail de ses frames | 8,2 [4,5 ; 17,9] | 8,0 [4,6 ; 17,4] | 10,4 [5,4 ; 20,1] |
+| vers Flags : le travail de ses frames | 4,8 [3,0 ; 11,7] | 6,0 [3,0 ; 14,0] | 9,6 [3,1 ; 15,4] |
+
+Le français ne coûte rien de mesurable à une page à côté de l'anglais : les médianes sont à moins d'une milliseconde
+l'une de l'autre, et les plages les mêmes. À côté de main, un premier affichage prend 6 à 7 ms de plus, pour un module
+qui a grandi du français : `page.wasm` fait 579 669 octets sur main, 653 014 maintenant (146 957 et 163 489 en
+brotli, 16,5 Ko de plus, une fois, puis depuis le cache) ; les changements de page coûtent ce qu'ils coûtaient. De la
+connexion aux compteurs, la médiane est 36 ms plus haute, mais dans ses plages : Argon2id et le rechargement de la page
+sont dedans.
+
 ## Ce que cela dit
 
 - Le démarrage reste instantané : 7 ms de plus que std/http et Cepheus, contre 3,4 s pour Spring Boot 4 sur cette
@@ -264,6 +313,8 @@ redemander sans cesse au serveur), une table de 100 000 lignes qui défile et se
 - L3 (clés de programme, seconds facteurs, passkeys, fournisseurs, langues, flags) coûte à une requête de L1 de 1,9 à
   2,7 % (0,6 à 2,8 µs), dans le bruit des intervalles ; une clé de programme coûte ce que coûte un cookie, une passkey
   connecte soixante fois plus vite qu'un mot de passe.
+- Les pages d'administration en français ne coûtent rien à une requête (la porte d'une app en anglais est le code
+  qu'elle était) et moins de 0,3 ms de textes dits à une page ; leur module a grandi de 16,5 Ko en brotli.
 - Ce qui irait plus loin demande Cesia : une table du processus partagée sans fiber, pour les limites et les sessions
   (l'aller-retour, 6 µs des 18), et `encode.Base64` en native (une fonction intégrée à l'interpréteur, pas écrite en
   Cesia ; les 24 µs d'un curseur). Les deux vont dans son cœur, qui est à son plafond de lignes.
