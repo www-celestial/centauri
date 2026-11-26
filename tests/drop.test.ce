@@ -1,0 +1,330 @@
+(** When the connection drops: an app served on a free port, its pages as live.js and Ceres's screen talk to it (std/live's
+    version 2 over a real WebSocket), the network a proxy of std/net that the test cuts. An action sent again after a
+    break runs once, whether its screen was kept (Heard) or not (its Idempotency-Key), even after a sign-in again;
+    what an attacker or a mistake tries: the token of another account's screen, an action stamped with another account,
+    a key reused for another body, a change over what someone changed meanwhile; an upload cut at 60 % goes on from the
+    bytes the app holds, a download cut goes on and never mixes two versions; a key left running by a server that
+    stopped, and the address of the page that changes (wifi to 4G). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/client
+use std/bug
+use std/check
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket as ws
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100)}), out = NoteOut, role = "member")
+EditNote = api.Put("/notes/:id", body = check.Record({Text: check.Text(1, 100)}), out = NoteOut, role = "member")
+Mine = api.Live("notes.mine", role = "member")
+Scans = app.Files("scan")
+Scan = api.Upload("/scans", ["application/pdf"], most = 5000000, out = check.Record({Id: check.Id(), Size: check.Int(0)}), role = "member")
+Fetch = api.Get("/scans/:id", out = api.File(), role = "member")
+
+defn add(r, x)
+  id = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  {Id: id, Text: x.Text}
+end
+
+defn edit(r, x)
+  (** PUT /notes/:id: a new text, refused when the page saw another one than the note has now (app.Unchanged). *)
+  n = app.Own(Note, r.Params.id, r)?
+  seen = app.Unchanged(Note, n.Id, n, r)?
+  cepheus.Write(list.Append(cepheus.Add(n.Id, Note.Text, x.Text), seen), r.Db, by = r.User.Id, why = r.Why)?
+  {Id: n.Id, Text: x.Text}
+end
+
+defn scan(r, file)
+  id = app.Store(Scans, file, r)?
+  {Id: id, Size: app.Own(Scans, id, r)?.Size}
+end
+
+mine(s, args) = cepheus.Watch(2, (n, t) -> {Where: [[n, Note.Tenant, s.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}}, s.Db, until = s.Ended)
+Notes = app.Module("notes", kinds = [Note, Scans], serve = [app.Serve(AddNote, add), app.Serve(EditNote, edit), app.Live(Mine, mine),
+  app.Serve(Scan, scan), app.Serve(Fetch, r -> app.Download(Scans, r.Params.id, r))])
+App = app.Of([auth.Module(), Notes], name = "notes")
+pdf(n) = "%PDF-1.7\n$(text.Repeat(n - 9, "x"))"   (* A file whose first bytes are those of a PDF, n bytes long. *)
+
+defn served(db, given = {})
+  (** The app served on a free port over a database: {Port, Env}. *)
+  l = net.Listen(0)!
+  s = app.Read(App.Fields, dict.Merge({Profile: "test", Origin: "http://localhost:$(net.Port(l))", Pow: "off", SessionCache: 0, UploadPart: 65536}, given), defaults = App.Defaults)!
+  env = app.Start(App, s, db)!
+  fiber.Spawn(() -> http.Serve(app.App(env), listener = l, timeout = 5, maxBody = 1048576))
+  {Port: net.Port(l), Env: env}
+end
+
+defn post(port, path, body, cookie = missing, key = missing, method = "POST", more = [])
+  (** A request of a page of the app: its answer. *)
+  headers = list.Concat([{Name: "host", Value: "localhost:$port"}, {Name: "content-type", Value: "application/json"}], more)
+  if not value.IsMissing(cookie)
+    headers = list.Append({Name: "cookie", Value: cookie}, headers)
+  end
+  if not value.IsMissing(key)
+    headers = list.Append({Name: "idempotency-key", Value: key}, headers)
+  end
+  http.Fetch("http://localhost:$port$path", method = method, body = json.Text(body), headers = headers)!
+end
+
+cookieOf(out) = text.Split(";", http.HeaderValue("set-cookie", out.Headers))[1]   (* The session's cookie of an answer. *)
+signUp(port, email) = cookieOf(post(port, "/auth/signup", {Email: email, Password: "correct horse 12", Name: "Ana"}))   (* A new account's cookie. *)
+signIn(port, email) = cookieOf(post(port, "/auth/signin", {Email: email, Password: "correct horse 12"}))   (* Another session of an account. *)
+
+defn notes(db)
+  (** The texts of the notes of the database. *)
+  [r.T for r in cepheus.Find(2, (n, t) -> {Where: [[n, Note.Text, t]], Give: {T: t}}, db)!]
+end
+
+defn screen(port, cookie, token = missing, got = 0, more = [])
+  (** A page's screen of version 2 at an address: an Ok of {Conn, Hello}, its first frame read. *)
+  q = encode.UrlEncode(json.Text([{Show: "notes.mine", Args: {}}]))
+  headers = list.Concat([{Name: "origin", Value: "http://localhost:$port"}, {Name: "cookie", Value: cookie}], more)
+  c = ws.Dial("ws://localhost:$port/live?shows=$q", headers = headers)?
+  ws.Send(json.Text(if value.IsMissing(token) {Hello: 2} else {Hello: 2, Token: token, Got: got} end), c)?
+  first = fiber.Receive(c.Messages, timeout = 3)?
+  result.Ok({Conn: c, Hello: json.Parse(first)![1]})
+end
+
+defn acks(c, n, seconds = 3)
+  (** The replies to n actions of a screen, as they came, the other messages left aside. *)
+  out = []
+  until = sys.Now() + seconds
+  while value.Len(out) < n and sys.Now() < until
+    got = fiber.Receive(c.Messages, timeout = until - sys.Now())
+    break if result.IsErr(got)
+    out = list.Concat(out, [m for m in json.Parse(got.Value)! if dict.Has("Ack", m)])
+  end
+  out
+end
+
+defn act(c, id, name, args, key = missing, base = missing, who = missing)
+  (** An action as a page of version 2 sends it. *)
+  m = {Act: name, Id: id, Args: args}
+  if value.IsSome(key)
+    m.Key = key
+  end
+  if value.IsSome(base)
+    m.Base = base
+  end
+  if value.IsSome(who)
+    m.Who = who
+  end
+  ws.Send(json.Text(m), c)!
+end
+
+defn isActionSentAgainRunOnce()
+  (** A note added by an action whose reply a break lost, sent again: to the screen the app kept (it heard it: Heard
+      says so, the page doesn't send it) and to a new screen with its key (the first answer, replayed); one note. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com")
+  s = screen(one.Port, ana)?
+  act(s.Conn, 1, "POST /notes", {Text: "milk"}, key = "k-milk")
+  sys.Sleep(0.3)
+  ws.Close(s.Conn)
+  back = screen(one.Port, ana, token = s.Hello.Token)?
+  bug.Assert(back.Hello.Resumed == true and back.Hello.Heard == 1, "the screen kept, the action heard: $(back.Hello)")
+  ws.Close(back.Conn)
+  fresh = screen(one.Port, ana)?
+  act(fresh.Conn, 1, "POST /notes", {Text: "milk"}, key = "k-milk")
+  again = acks(fresh.Conn, 1)
+  ws.Close(fresh.Conn)
+  value.Len(again) == 1 and again[1].Ok.Text == "milk" and value.Equal(notes(db), ["milk"])
+end
+
+defn isKeyOfTheAccountAfterASignInAgain()
+  (** A payment's request lost, its session ended, the account signed in again: the same key gets the first answer
+      (the key is the account's, IdempotencyScope "account"), not a second note; another account's same key is its
+      own; with IdempotencyScope "session", a new session runs it again, as before. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com")
+  first = post(one.Port, "/notes", {Text: "pay 12"}, cookie = ana, key = "k-pay")
+  _ = post(one.Port, "/auth/signout", {}, cookie = ana)
+  again = signIn(one.Port, "ana@example.com")
+  second = post(one.Port, "/notes", {Text: "pay 12"}, cookie = again, key = "k-pay")
+  bo = signUp(one.Port, "bo@example.com")
+  his = post(one.Port, "/notes", {Text: "pay 12"}, cookie = bo, key = "k-pay")
+  bug.Assert(first.Status == 201 and second.Status == 201 and second.Body == first.Body and http.HeaderValue("idempotent-replayed", second.Headers) == "true",
+    "the first answer again: $(second.Status) $(second.Body)")
+  bug.Assert(his.Status == 201 and his.Body != first.Body, "another account's key: $(his.Body)")
+  db2 = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  old = served(db2, given = {IdempotencyScope: "session"})
+  a1 = signUp(old.Port, "ana@example.com")
+  _ = post(old.Port, "/notes", {Text: "pay 12"}, cookie = a1, key = "k-pay")
+  a2 = signIn(old.Port, "ana@example.com")
+  _ = post(old.Port, "/notes", {Text: "pay 12"}, cookie = a2, key = "k-pay")
+  value.Len(notes(db)) == 2 and value.Len(notes(db2)) == 2
+end
+
+defn isKeyForAnotherBodyRefused()
+  (** The same key with another body: a 422, nothing written; the same body: the first answer. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com")
+  a = post(one.Port, "/notes", {Text: "milk"}, cookie = ana, key = "k1")
+  b = post(one.Port, "/notes", {Text: "eggs"}, cookie = ana, key = "k1")
+  a.Status == 201 and b.Status == 422 and value.Equal(notes(db), ["milk"])
+end
+
+defn isScreenOfAnotherAccountNotResumed()
+  (** Bo comes with the token of Ana's screen: he gets a screen of his own, Ana's goes on; an action stamped with Ana's
+      who on Bo's screen is refused (403), never run. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com")
+  bo = signUp(one.Port, "bo@example.com")
+  s = screen(one.Port, ana)?
+  ws.Close(s.Conn)
+  stolen = screen(one.Port, bo, token = s.Hello.Token)?
+  bug.Assert(stolen.Hello.Resumed == false and stolen.Hello.Token != s.Hello.Token and stolen.Hello.Who != s.Hello.Who, "his own screen: $(stolen.Hello)")
+  act(stolen.Conn, 1, "POST /notes", {Text: "ana's"}, key = "k-a", who = s.Hello.Who)
+  got = acks(stolen.Conn, 1)
+  ws.Close(stolen.Conn)
+  mine = screen(one.Port, ana, token = s.Hello.Token)?
+  ws.Close(mine.Conn)
+  got[1].Err.Status == 403 and value.Len(notes(db)) == 0 and mine.Hello.Resumed == true
+end
+
+defn isResumedFromANewAddress()
+  (** The page's address changes between two connections (wifi to 4G, behind a proxy the app trusts): the same
+      session, the same screen, resumed. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db, given = {TrustProxy: true})
+  ana = signUp(one.Port, "ana@example.com")
+  s = screen(one.Port, ana, more = [{Name: "x-forwarded-for", Value: "203.0.113.7"}])?
+  ws.Close(s.Conn)
+  back = screen(one.Port, ana, token = s.Hello.Token, more = [{Name: "x-forwarded-for", Value: "198.51.100.9"}])?
+  ws.Close(back.Conn)
+  back.Hello.Resumed == true
+end
+
+defn isChangeOverAChangeRefused()
+  (** A change queued while away, of a note someone changed meanwhile: refused, a conflict with the value seen and the
+      value now; sent again over the value now, it is made. Over HTTP with Centauri-Base too. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com")
+  made = json.Parse(post(one.Port, "/notes", {Text: "milk"}, cookie = ana).Body)!
+  _ = post(one.Port, "/notes/$(made.Id)", {Text: "milk and eggs"}, cookie = ana, method = "PUT")
+  s = screen(one.Port, ana)?
+  act(s.Conn, 1, "PUT /notes/:id", {id: made.Id, Text: "oat milk"}, key = "k-e1", base = {Text: "milk"})
+  refused = acks(s.Conn, 1)
+  act(s.Conn, 2, "PUT /notes/:id", {id: made.Id, Text: "oat milk"}, key = "k-e2", base = {Text: "milk and eggs"})
+  done = acks(s.Conn, 1)
+  ws.Close(s.Conn)
+  plain = post(one.Port, "/notes/$(made.Id)", {Text: "rice"}, cookie = ana, method = "PUT", more = [{Name: "centauri-base", Value: json.Text({Text: "milk"})}])
+  e = refused[1].Err
+  e.Kind == "conflict" and e.Status == 409 and value.Equal(e.Conflict, [{Field: "Text", Base: "milk", Now: "milk and eggs"}]) and
+    done[1].Ok.Text == "oat milk" and plain.Status == 409 and value.Equal(notes(db), ["oat milk"])
+end
+
+defn cutting(port, at)
+  (** A network to the app that cuts the first connection to carry at bytes towards the app, then carries all:
+      {Address, Sent}, host:port and a cell of the bytes it carried towards the app. *)
+  l = net.Listen(0)!
+  first = fiber.Channel(size = 1)
+  fiber.Send(true, first)
+  sent = fiber.Channel(size = 1)
+  fiber.Send(0, sent)
+  fiber.Spawn(defn ()
+    while true
+      page = net.Accept(l)!
+      to = net.Connect("127.0.0.1", port)!
+      cut = result.IsOk(fiber.Receive(first, timeout = 0))
+      fiber.Spawn(() -> pipe(page, to, if cut at else missing end, sent))
+      fiber.Spawn(() -> pipe(to, page, missing, missing))
+    end
+  end)
+  {Address: "localhost:$(net.Port(l))", Sent: sent}
+end
+
+defn pipe(from, to, left, sent)
+  (** Forwards the bytes of one side to the other, both closed after left bytes when given, counted in sent. *)
+  got = net.Read(from)
+  while result.IsOk(got) and got.Value != ""
+    if value.IsSome(sent)
+      fiber.Send(fiber.Receive(sent).Value + text.ByteLength(got.Value), sent)
+    end
+    if value.IsSome(left) and text.ByteLength(got.Value) >= left
+      _ = net.Write(to, text.ByteSlice(1, left, got.Value))
+      sys.Sleep(0.2)
+      net.Close(to)
+      net.Close(from)
+      return missing
+    end
+    left = if value.IsMissing(left) missing else left - text.ByteLength(got.Value) end
+    break if result.IsErr(net.Write(to, got.Value))
+    got = net.Read(from)
+  end
+  net.Close(to)
+  net.Close(from)
+end
+
+defn isUploadCutAtSixtyPercentResumed()
+  (** A file of 1,000,000 bytes whose upload the network cuts at 60 %: the client asks the bytes held (HEAD,
+      Upload-Offset, whole parts of 64 KiB), sends the rest, and the app makes one file, the same bytes, its parts
+      those of the first try and of the rest; a wrong offset gets a 409 that says the right one. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com")
+  body = pdf(1000000)
+  cut = cutting(one.Port, 600000)
+  h = [{Name: "host", Value: "localhost:$(one.Port)"}, {Name: "cookie", Value: ana}]
+  got = client.Upload("http://$(cut.Address)/scans?name=big.pdf", body, "application/pdf", key = "k-scan", headers = h)!
+  carried = fiber.Receive(cut.Sent).Value
+  bug.Assert(carried > 1000000 and carried < 1100000, "60 % then the rest from the parts held, not all again: $carried bytes")
+  bug.Assert(got.Status == 201, "made: $(got.Status) $(got.Body)")
+  id = json.Parse(got.Body)!.Id
+  f = cepheus.Get(Scans, id, db)!
+  back = client.Download("http://localhost:$(one.Port)/scans/$id", headers = h, part = 300000)!
+  wrong = http.Fetch("http://localhost:$(one.Port)/scans", method = "POST", body = "%PDF-", headers = list.Concat(h, [{Name: "content-type", Value: "application/pdf"},
+    {Name: "idempotency-key", Value: "k-other"}, {Name: "upload-offset", Value: "5"}, {Name: "upload-length", Value: "10"}]))!
+  files = cepheus.Find(1, x -> {Where: [[x, Scans.Size, 1000000]], Give: {X: x}}, db)!
+  f.Size == 1000000 and back.Body == body and value.Len(files) == 1 and wrong.Status == 409 and http.HeaderValue("upload-offset", wrong.Headers) == "0"
+end
+
+defn isDownloadNeverAMix()
+  (** A download that goes on with If-Range: the same version, the range; another (a stale ETag), the whole file. *)
+  t = apptest.Start(App)!
+  a = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})!
+  body = pdf(200000)
+  made = apptest.Answer(a.Raw("POST", "/scans?name=s.pdf", body = body, headers = [{Name: "content-type", Value: "application/pdf"}]))!
+  whole = a.Raw("GET", "/scans/$(made.Id)")
+  tag = http.HeaderValue("etag", whole.Headers)
+  same = a.Raw("GET", "/scans/$(made.Id)", headers = [{Name: "range", Value: "bytes=100-199"}, {Name: "if-range", Value: tag}])
+  other = a.Raw("GET", "/scans/$(made.Id)", headers = [{Name: "range", Value: "bytes=100-199"}, {Name: "if-range", Value: "\"1.2.3\""}])
+  same.Status == 206 and apptest.Drained(same) == text.ByteSlice(101, 200, body) and other.Status == 200 and apptest.Drained(other) == body
+end
+
+defn isKeyLeftRunningLetGoAfterItsLease()
+  (** A key that a server which stopped left running: 409 until IdempotencyTime by default; with IdempotencyLease, a
+      retry past it runs. *)
+  t = apptest.Start(App)!
+  a = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})!
+  first = a.Raw("POST", "/notes", body = json.Text({Text: "milk"}), headers = [{Name: "content-type", Value: "application/json"}, {Name: "idempotency-key", Value: "k-run"}])
+  rows = cepheus.Find(1, o -> {Where: [[o, app.Once.State, "done"]], Give: {Id: o}}, t.Db)!
+  _ = cepheus.Write([cepheus.Add(rows[1].Id, app.Once.State, "running"), cepheus.Add(rows[1].Id, app.Once.At, 1)], t.Db)!
+  stuck = a.Raw("POST", "/notes", body = json.Text({Text: "milk"}), headers = [{Name: "content-type", Value: "application/json"}, {Name: "idempotency-key", Value: "k-run"}])
+  l = apptest.Start(App, settings = {IdempotencyLease: 60})!
+  b = l.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})!
+  _ = b.Raw("POST", "/notes", body = json.Text({Text: "milk"}), headers = [{Name: "content-type", Value: "application/json"}, {Name: "idempotency-key", Value: "k-run"}])
+  held = cepheus.Find(1, o -> {Where: [[o, app.Once.State, "done"]], Give: {Id: o}}, l.Db)!
+  _ = cepheus.Write([cepheus.Add(held[1].Id, app.Once.State, "running"), cepheus.Add(held[1].Id, app.Once.At, 1)], l.Db)!
+  taken = b.Raw("POST", "/notes", body = json.Text({Text: "milk"}), headers = [{Name: "content-type", Value: "application/json"}, {Name: "idempotency-key", Value: "k-run"}])
+  first.Status == 201 and stuck.Status == 409 and taken.Status == 201
+end

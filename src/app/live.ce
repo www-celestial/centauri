@@ -4,10 +4,18 @@
    checked, its role and the shape of its arguments, and its handler writes the question itself (the page never sends
    one). A show is a cepheus.Watch: the writes are the events, from any process of any server, without a broker. The
    page's actions are the app's endpoints by their names, sent through the same door as over HTTP (one handler, two
-   transports). A sign-out, a session that ends, a role taken away end the screens of the session. *)
+   transports). A sign-out, a session that ends, a role taken away end the screens of the session.
+
+   A break of the connection is no end (std/live's version 2): the screen is kept ResumeTime seconds and ResumeBytes
+   of frames, for the page that comes back with its token, the same account and the same shows, from any address; each
+   action carries the key the page made when it was asked, the Idempotency-Key of its request, so that one sent again
+   after a break runs once, and the values the page saw (Base, the header Centauri-Base) for app.Unchanged; an action
+   stamped with another account (Who) is refused, so that the next user of a browser never sends the actions of the
+   one before. The page gets its settings (the outbox, the delays) with its screen. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use std/check
+use std/crypto
 use std/dict
 use std/encode
 use std/fiber
@@ -87,7 +95,7 @@ defn screen(s, env, lives)
   req = s.Request
   who = env.Who(req, env)
   if result.IsErr(who) or value.IsMissing(who.Value)
-    return refusedLive("Sign in first.")
+    return result.Err({Kind: "live", Status: 401, Message: "Sign in first."})
   end
   user = who.Value
   shows = asked(dict.Get("Query", req))?
@@ -189,6 +197,12 @@ defn act(e, handle, s, args)
   if value.IsText(cookie)
     headers = list.Append({Name: "cookie", Value: cookie}, headers)
   end
+  if value.IsText(dict.Get("Key", s))
+    headers = list.Append({Name: "idempotency-key", Value: s.Key}, headers)
+  end
+  if value.IsDict(dict.Get("Base", s))
+    headers = list.Append({Name: "centauri-base", Value: json.Text(s.Base)}, headers)
+  end
   out = handle({Method: q.Method, Path: parts[1], Query: if value.Len(parts) > 1 parts[2] else "" end, Headers: headers, Body: q.Body,
     Peer: dict.GetOr("Peer", "", r)})
   data = if out.Body == "" result.Ok(missing) else json.Parse(out.Body) end
@@ -202,6 +216,10 @@ defn act(e, handle, s, args)
   end
   if value.IsNumber(dict.Get("retry", p))
     e.Retry = p.retry
+  end
+  if value.IsArray(dict.Get("conflict", p))
+    e.Kind = "conflict"
+    e.Conflict = p.conflict
   end
   result.Err(e)
 end
@@ -224,5 +242,29 @@ defn mounted(routes, env, handle)
     return routes
   end
   lives = dict.Dict([{Key: b.Endpoint.Name, Value: b} for b in env.App.Lives])
-  live.Route("/live", s -> screen(s, env, lives), routes, actions = actions(env, handle))
+  st = env.Settings
+  client = {Outbox: st.Outbox, OutboxCount: st.OutboxCount, OutboxBytes: st.OutboxBytes, OutboxWait: st.OutboxWait,
+    ReconnectFirst: st.ReconnectFirst, ReconnectMax: st.ReconnectMax, PingEvery: st.PingEvery, DeadAfter: st.DeadAfter}
+  live.Route("/live", s -> screen(s, env, lives), routes, actions = actions(env, handle), resume = st.ResumeTime, buffer = st.ResumeBytes,
+    same = (old, new) -> sameScreen(old, new, env), who = s -> whoOf(s.Request, env), client = client)
+end
+
+defn userOf(req, env)
+  (** The account of a request's session, or missing. *)
+  who = env.Who(req, env)
+  if result.IsOk(who) and value.IsDict(who.Value) who.Value else missing end
+end
+
+defn sameScreen(old, new, env)
+  (** Is the page that comes back with a screen's token the screen's own: the same account, signed in still, and the
+      same shows? Its address may have changed (wifi to 4G), its cookie too. *)
+  a = userOf(old, env)
+  b = userOf(new, env)
+  value.IsSome(a) and value.IsSome(b) and a.Id == b.Id and value.Equal(dict.Get("shows", dict.GetOr("Query", {}, old)), dict.Get("shows", dict.GetOr("Query", {}, new)))
+end
+
+defn whoOf(req, env)
+  (** The account of a screen, as its page stamps its actions: a tag that tells two accounts apart and names neither. *)
+  u = userOf(req, env)
+  if value.IsMissing(u) missing else text.ByteSlice(1, 32, encode.Hex(crypto.Blake2b("centauri who\n$(u.Id)", env.Keys))) end
 end

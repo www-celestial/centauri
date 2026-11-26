@@ -271,7 +271,8 @@ defn answer(b, req, env)
   (** A request at its route, its Idempotency-Key honored. *)
   e = b.Endpoint
   rid = dict.GetOr("Id", "-", req)
-  claim = if e.Method != "GET" and env.Settings.IdempotencyKey != "ignored" and not b.Upload claimed(b, req, env, rid) else missing end
+  keyed = not b.Upload or value.IsText(http.HeaderValue("idempotency-key", req.Headers))
+  claim = if e.Method != "GET" and req.Method != "HEAD" and env.Settings.IdempotencyKey != "ignored" and keyed claimed(b, req, env, rid) else missing end
   if not value.IsMissing(claim) and dict.Has("Out", claim)
     return claim.Out
   end
@@ -358,7 +359,9 @@ defn served(b, e, req, env, rid)
     Id: rid, Route: e.Name, User: user, Db: db, Why: if value.IsDict(user) and dict.Has("Key", user) "$(b.WhyHead)$rid key $(user.Key)" else "$(b.WhyHead)$rid" end, Settings: s, Now: d.Now, Keys: env.Keys,
     Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
   got = missing
-  if b.Upload
+  if b.Upload and req.Method == "HEAD"
+    got = Offset(e, req, env)
+  else if b.Upload
     if not Take("upload", s.UploadsAtOnce, env.State)
       return failed({Kind: "api", Status: 503, Message: "Too many files are coming at once: send it again in a moment."}, rid, env, e)
     end

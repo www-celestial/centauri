@@ -2,10 +2,17 @@
    Cepheus's vault by parts of UploadPart bytes (each a Put: compressed, sealed under the key of its owner, the tenant,
    stored once), and read back by ranges (Range, 206). Cepheus has no Put of a file in pieces yet, so a file is its
    parts, joined by a thing of the app's kind of files; a fork holds no file, so in a test or in dev without a server
-   the parts are facts of the fork. *)
+   the parts are facts of the fork.
+
+   An upload goes on after a cut, with the headers of the tus protocol 1.0 on the app's own endpoint: sent with an
+   Idempotency-Key, a cut keeps its whole parts stored; HEAD of the same path, with the same key, answers Upload-Offset,
+   the bytes the server holds; the client sends the rest with Upload-Offset and Upload-Length, and a wrong offset gets
+   a 409 that says the right one. A download has a strong ETag and honours If-Range, so that a download cut goes on
+   from where it stopped (Chrome's own downloads do) and never mixes two versions of a file. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/dict
 use std/encode
+use std/crypto
 use std/fiber
 use std/http
 use std/list
@@ -114,22 +121,90 @@ defn whole(body)
   pieces(body, () -> result.Ok(""))
 end
 
+defn headerNumber(name, req)
+  (** A header of digits as a number, missing without it, -1 when it is no number. *)
+  v = http.HeaderValue(name, req.Headers)
+  if value.IsMissing(v)
+    return missing
+  end
+  if allDigits(text.Trim(v)) text.Number(text.Trim(v)) else -1 end
+end
+
+defn uploadKey(e, req, env, given)
+  (** The key of an upload that may go on, its caller's as an Idempotency-Key is (idem.ce). *)
+  encode.Hex(crypto.Blake2b("centauri upload\n$(keyScope(req, env))\n$(e.Name)\n$given", env.Keys))
+end
+
+defn uploading(key, env)
+  (** The upload of a key that went on so far, {Id, Parts, Held, Length, Type, Name, PartSize}, or missing. *)
+  rows = cepheus.Find(1, u -> {Where: [[u, Uploading.Key, key]], Give: {Id: u}}, env.Db)?
+  if value.Len(rows) == 0
+    return result.Ok(missing)
+  end
+  u = cepheus.Get(Uploading, rows[1].Id, env.Db)?
+  result.Ok(if value.IsMissing(u) missing else dict.Put("Id", rows[1].Id, u) end)
+end
+
+defn Offset(e, req, env)
+  (** The answer to HEAD of an upload endpoint with an Idempotency-Key: 204, Upload-Offset the bytes the server holds
+      of that upload (0 for none), Upload-Length its whole length when known. *)
+  given = http.HeaderValue("idempotency-key", req.Headers)
+  if not keyOk(given)
+    return Fail(400, "HEAD of an upload asks with the Idempotency-Key of the upload.")
+  end
+  u = uploading(uploadKey(e, req, env, given), env)?
+  headers = [{Name: "upload-offset", Value: "$(if value.IsMissing(u) 0 else u.Held end)"}, {Name: "cache-control", Value: "no-store"}]
+  if value.IsSome(u)
+    headers = list.Append({Name: "upload-length", Value: "$(u.Length)"}, headers)
+  end
+  result.Ok(Raw({Status: 204, Body: "", Headers: headers}))
+end
+
 defn upload(e, req, env)
-  (** The file of a request to an upload endpoint, checked: an Ok of {Name, Type, Size, Read}, Read giving its bytes
-      in pieces, or an Err: 415 for a type the endpoint doesn't take or that its first bytes contradict, 413 past its
-      most, 400 for a body cut short. *)
+  (** The file of a request to an upload endpoint, checked: an Ok of {Name, Type, Size, Read, Resume}, Read giving its
+      bytes in pieces, or an Err: 415 for a type the endpoint doesn't take or that its first bytes contradict, 413 past
+      its most, 400 for a body cut short. With an Idempotency-Key, Resume is what the server holds of it already: the
+      body is the rest, from Upload-Offset (0 by default) to Upload-Length (its whole length); an offset that isn't the
+      bytes held gets a 409 with the right one, as tus says; the first bytes are checked when they come. *)
   declared = baseType(http.HeaderValue("content-type", req.Headers))
   if not (declared in [baseType(t) for t in e.Types])
     return Fail(415, "This file is of a type the endpoint doesn't take: $(text.Join(", ", e.Types)).")
   end
   streamed = dict.Has("Read", req)
   size = if streamed req.Size else text.ByteLength(req.Body) end
-  if size > e.Most
+  offset = headerNumber("upload-offset", req)
+  length = headerNumber("upload-length", req)
+  if offset == -1 or length == -1
+    return Fail(400, "Upload-Offset and Upload-Length are numbers of bytes.")
+  end
+  offset = if value.IsMissing(offset) 0 else offset end
+  length = if value.IsMissing(length) offset + size else length end
+  if length > e.Most
     return Fail(413, "This file is larger than $(e.Most) bytes.")
+  end
+  if offset + size != length
+    return Fail(400, "This body is $size bytes: from Upload-Offset $offset, Upload-Length $length needs $(length - offset).")
+  end
+  given = http.HeaderValue("idempotency-key", req.Headers)
+  resume = missing
+  if keyOk(given)
+    key = uploadKey(e, req, env, given)
+    u = uploading(key, env)?
+    held = if value.IsMissing(u) 0 else u.Held end
+    if offset != held
+      return result.Err({Kind: "api", Status: 409, Message: "The server holds $held bytes of this upload: go on from there.", Offset: held})
+    end
+    if value.IsSome(u) and (u.Type != declared or u.Length != length)
+      return Fail(422, "This upload began as $(u.Length) bytes of $(u.Type): go on with the same, or begin another with a new key.")
+    end
+    resume = {Key: key, Id: if value.IsMissing(u) missing else u.Id end, Ids: if value.IsMissing(u) [] else [text.Number(x) for x in text.Split(" ", u.Parts) if x != ""] end,
+      Held: held, Name: if value.IsMissing(u) missing else u.Name end, At: if value.IsMissing(u) env.Now() else u.At end}
+  else if offset > 0
+    return Fail(400, "An upload that goes on from an Upload-Offset needs its Idempotency-Key.")
   end
   read = if streamed req.Read else whole(req.Body) end
   first = ""
-  while text.ByteLength(first) < 4096 and text.ByteLength(first) < size
+  while offset == 0 and text.ByteLength(first) < 4096 and text.ByteLength(first) < size
     p = read()
     if result.IsErr(p)
       return Fail(400, "The file was cut short.")
@@ -139,11 +214,13 @@ defn upload(e, req, env)
     end
     first = "$first$(p.Value)"
   end
-  if size > 0 and not Sniffed(declared, first)
+  if offset == 0 and size > 0 and not Sniffed(declared, first)
     return Fail(415, "This file is no $declared: its first bytes say otherwise.")
   end
   q = req.Query
-  result.Ok({Name: FileName(if value.IsDict(q) dict.Get("name", q) else missing end), Type: declared, Size: size, Read: pieces(first, read)})
+  name = FileName(if value.IsDict(q) dict.Get("name", q) else missing end)
+  name = if value.IsSome(resume) and value.IsText(resume.Name) resume.Name else name end
+  result.Ok({Name: name, Type: declared, Size: length, Read: pieces(first, read), Resume: resume})
 end
 
 defn putPart(bytes, n, owner, r)
@@ -159,13 +236,14 @@ defn Store(kind, file, r, owner = missing, fields = {})
       tenant of who asks, sealed under the key of owner (the tenant unless given), with more fields of the kind if
       given: an Ok of its id. The file is never whole in memory: one part at most. A file cut short, or a part the
       database refuses, leaves no file (its parts written are deleted). *)
-  size = r.Settings.UploadPart
+  resume = dict.Get("Resume", file)
+  size = if value.IsSome(resume) and value.Len(resume.Ids) > 0 partSizeOf(resume, r) else r.Settings.UploadPart end
   key = if value.IsMissing(owner) dict.GetOr("Tenant", 0, if value.IsMissing(r.User) {} else r.User end) else owner end
   key = if value.IsMissing(key) 0 else key end
-  ids = []
+  ids = if value.IsSome(resume) resume.Ids else [] end
   held = []
   heldBytes = 0
-  total = 0
+  total = if value.IsSome(resume) resume.Held else 0 end
   failed = missing
   while value.IsMissing(failed)
     p = file.Read()
@@ -205,8 +283,12 @@ defn Store(kind, file, r, owner = missing, fields = {})
   if value.IsMissing(failed) and total != file.Size
     failed = Fail(400, "The file was cut short: $total of its $(file.Size) bytes came.")
   end
+  if not value.IsMissing(failed) and value.IsSome(resume) and value.IsDict(failed.Error) and dict.Get("Status", failed.Error) == 400
+    return heldOn(resume, ids, size, file, r)
+  end
   if not value.IsMissing(failed)
     dropParts(ids, r)
+    forgetUpload(resume, r)
     return failed
   end
   data = dict.Merge(fields, {Tenant: dict.Get("Tenant", if value.IsMissing(r.User) {} else r.User end), Name: file.Name, Size: total, Type: file.Type,
@@ -216,7 +298,39 @@ defn Store(kind, file, r, owner = missing, fields = {})
   if result.IsErr(made)
     dropParts(ids, r)
   end
+  forgetUpload(resume, r)
   made
+end
+
+defn partSizeOf(resume, r)
+  (** The size of the parts of an upload that goes on: that of its first parts, whatever UploadPart says now. *)
+  rows = cepheus.Find(1, u -> {Where: [[u, Uploading.Key, resume.Key]], Give: {Id: u}}, r.Db)
+  u = if result.IsOk(rows) and value.Len(rows.Value) > 0 cepheus.Get(Uploading, rows.Value[1].Id, r.Db) else result.Ok(missing) end
+  if result.IsOk(u) and value.IsDict(u.Value) u.Value.PartSize else r.Settings.UploadPart end
+end
+
+defn heldOn(resume, ids, size, file, r)
+  (** An upload cut short that may go on: its whole parts kept with its key, and the Err of the cut, a 400 whose
+      Upload-Offset says where to go on from. *)
+  held = value.Len(ids) * size
+  data = {Key: resume.Key, Parts: text.Join(" ", ["$i" for i in ids]), Held: held, Length: file.Size, Type: file.Type, Name: file.Name, PartSize: size, At: resume.At}
+  wrote = if value.IsMissing(resume.Id) cepheus.Write(Facts(Uploading, cepheus.New(1), data), r.Db, why = r.Why)
+    else cepheus.Write([cepheus.Add(resume.Id, Uploading.Parts, data.Parts), cepheus.Add(resume.Id, Uploading.Held, held)], r.Db, why = r.Why) end
+  if result.IsErr(wrote)
+    dropParts(ids, r)
+    return wrote
+  end
+  result.Err({Kind: "api", Status: 400, Message: "The file was cut short: the server holds $held of its $(file.Size) bytes, send the rest from there.", Offset: held})
+end
+
+defn forgetUpload(resume, r)
+  (** The record of an upload that went on, forgotten once its file is made or refused. *)
+  if value.IsSome(resume) and value.IsSome(resume.Id)
+    ops = Gone(Uploading, resume.Id, r.Db)
+    if result.IsOk(ops) and value.Len(ops.Value) > 0
+      _ = cepheus.Write(ops.Value, r.Db, why = r.Why)
+    end
+  end
 end
 
 defn dropParts(ids, r)
@@ -294,15 +408,21 @@ end
 
 defn Download(kind, id, r)
   (** The answer that sends a file of a kind of Files of the tenant of who asks, or the range its Range header asks
-      (206), read part by part as it goes: never whole in memory. It is an attachment (no page opens it in the app's
+      (206), read part by part as it goes: never whole in memory; its strong ETag lets a download cut go on with Range
+      and If-Range, and If-Range of another version gets the whole file. It is an attachment (no page opens it in the app's
       origin), its type never sniffed by the browser, under a policy that forbids scripts if it is opened anyway. An
       Ok of the answer, or a 404 for another tenant's file. *)
   f = Own(kind, id, r)?
   size = f.Size
+  tag = "\"$id.$size.$(math.Div(math.Round(dict.GetOr("Created", 0, f) * 1000), 1))\""
   asked = Range(http.HeaderValue("range", r.Headers), size)
+  given = http.HeaderValue("if-range", r.Headers)
+  if value.IsSome(asked) and value.IsText(given) and given != tag
+    asked = missing   (* a resume of another version of the file: the whole of this one, never a mix (RFC 9110 13.1.5) *)
+  end
   headers = [{Name: "content-type", Value: f.Type}, {Name: "content-disposition", Value: disposition(f.Name)},
     {Name: "x-content-type-options", Value: "nosniff"}, {Name: "content-security-policy", Value: "sandbox; default-src 'none'"},
-    {Name: "accept-ranges", Value: "bytes"}, {Name: "cache-control", Value: "private, no-store"}]
+    {Name: "accept-ranges", Value: "bytes"}, {Name: "cache-control", Value: "private, no-store"}, {Name: "etag", Value: tag}]
   if not value.IsMissing(asked) and dict.Has("Unsatisfied", asked)
     return result.Ok(Raw({Status: 416, Body: "", Headers: list.Append({Name: "content-range", Value: "bytes */$size"}, headers)}))
   end

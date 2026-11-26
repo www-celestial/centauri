@@ -58,7 +58,7 @@ defn Problem(e, id, detailed = false)
   if value.IsDict(fields) and value.Len(fields) > 0
     body.errors = fields
   end
-  for extra in ["Challenge", "Retry", "Second"]
+  for extra in ["Challenge", "Retry", "Second", "Conflict", "Offset"]
     if value.IsDict(e) and dict.Has(extra, e)
       body[text.Lower(extra)] = e[extra]
     end
@@ -67,10 +67,14 @@ defn Problem(e, id, detailed = false)
 end
 
 defn Answer(p)
-  (** The HTTP response of a Problem: application/problem+json, and Retry-After for a 429 or a 503 that knows it. *)
+  (** The HTTP response of a Problem: application/problem+json, Retry-After for a 429 or a 503 that knows it, and
+      Upload-Offset for an upload cut short or sent from another offset, the bytes the server holds of it. *)
   out = {Status: p.Status, Body: json.Text(p.Body), Headers: [{Name: "content-type", Value: "application/problem+json"}]}
   if dict.Has("retry", p.Body)
     out = http.WithHeader("retry-after", "$(p.Body.retry)", out)
+  end
+  if dict.Has("offset", p.Body)
+    out = http.WithHeader("upload-offset", "$(p.Body.offset)", out)
   end
   out
 end

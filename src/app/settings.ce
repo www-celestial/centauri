@@ -44,6 +44,18 @@ Core = {
   CallCa: check.Text(1, 1000, optional = true),
   IdempotencyKey: check.OneOf(["honored", "required", "ignored"], optional = true, default = "honored"),
   IdempotencyTime: check.Int(60, 31536000, optional = true, default = 86400),
+  IdempotencyScope: check.OneOf(["account", "session"], optional = true, default = "account"),
+  IdempotencyLease: check.Int(0, 31536000, optional = true, default = 0),
+  Outbox: check.OneOf(["on", "off"], optional = true, default = "on"),
+  OutboxCount: check.Int(1, 100000, optional = true, default = 100),
+  OutboxBytes: check.Int(1024, 1073741824, optional = true, default = 1048576),
+  OutboxWait: check.Int(1, 31536000, optional = true, default = 3600),
+  ReconnectFirst: check.Int(10, 600000, optional = true, default = 500),
+  ReconnectMax: check.Int(100, 3600000, optional = true, default = 30000),
+  PingEvery: check.Int(1, 3600, optional = true, default = 15),
+  DeadAfter: check.Int(2, 7200, optional = true, default = 30),
+  ResumeTime: check.Int(0, 86400, optional = true, default = 120),
+  ResumeBytes: check.Int(1024, 1073741824, optional = true, default = 1048576),
   Langs: check.Text(2, 400, optional = true, default = "en"),
   Csp: check.Text(1, 2000, optional = true, default = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
 }
@@ -116,6 +128,12 @@ defn Read(fields, given, defaults = {})
   end
   if value.IsMissing(dict.Get("GetDb", s))
     s.GetDb = if s.Profile == "prod" and not value.IsMissing(dict.Get("CepheusReadToken", s)) "read" else Profiles[s.Profile].GetDb end
+  end
+  if s.DeadAfter <= s.PingEvery
+    wrong = list.Append("APP_DEAD_AFTER: more seconds than APP_PING_EVERY are needed, or a page would count each wait between two pings a break.", wrong)
+  end
+  if s.ReconnectMax < s.ReconnectFirst
+    wrong = list.Append("APP_RECONNECT_MAX: at least APP_RECONNECT_FIRST milliseconds.", wrong)
   end
   if s.GetDb == "read" and value.IsMissing(dict.Get("CepheusReadToken", s))
     wrong = list.Append("APP_GET_DB: read needs APP_CEPHEUS_READ_TOKEN, a token of Cepheus that reads only.", wrong)

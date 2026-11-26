@@ -2,7 +2,11 @@
    header (the IETF's draft-ietf-httpapi-idempotency-key-header), gets the answer of the first, which ran once. The
    key is kept unique in Cepheus with its request's hash, so that two processes, two servers, never both run it: a
    second at the same moment gets a 409, the same key with another request a 422. A key belongs to its caller (his
-   session, or his address without one) and its endpoint; it is kept IdempotencyTime seconds. *)
+   account, so that a page signed in again after its session ended gets the first answer; his session with
+   IdempotencyScope "session"; his address without one) and its endpoint; it is kept IdempotencyTime seconds. An upload
+   holds a key too: its hash is its length and type, the body comes in pieces, and a cut lets the key go, its parts
+   kept for the rest (files.ce). A key a stopped server left running is refused (409) until IdempotencyTime, or let go
+   after IdempotencyLease seconds when the setting gives some. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/crypto
 use std/dict
@@ -38,10 +42,8 @@ defn claimed(b, req, env, rid)
   if not keyOk(given)
     return {Out: refusal(400, "An Idempotency-Key is 1 to 255 printable characters.", rid, env)}
   end
-  session = if value.IsMissing(env.SessionKeyOf) missing else env.SessionKeyOf(req, env) end
-  scope = if value.IsMissing(session) "ip:$(dict.GetOr("Ip", "", req))" else "s:$(encode.Hex(session))" end
-  key = encode.Hex(crypto.Blake2b("centauri once\n$scope\n$(e.Name)\n$given", env.Keys))
-  hash = encode.Hex(crypto.Blake2b("$(req.Method)\n$(req.Path)\n$(req.Query)\n$(req.Body)", env.Keys))
+  key = encode.Hex(crypto.Blake2b("centauri once\n$(keyScope(req, env))\n$(e.Name)\n$given", env.Keys))
+  hash = encode.Hex(crypto.Blake2b(if b.Upload uploadHash(req) else "$(req.Method)\n$(req.Path)\n$(req.Query)\n$(req.Body)" end, env.Keys))
   rows = cepheus.Find(1, o -> {Where: [[o, Once.Key, key]], Give: {Id: o}}, env.Db)
   if result.IsErr(rows)
     return {Out: Answer(Problem(rows.Error, rid))}
@@ -54,6 +56,14 @@ defn claimed(b, req, env, rid)
     kept = o.Value
     if kept.Hash != hash
       return {Out: refusal(422, "This Idempotency-Key was used for another request.", rid, env)}
+    end
+    lease = env.Settings.IdempotencyLease
+    if kept.State != "done" and lease > 0 and env.Now() - kept.At > lease
+      held = rows.Value[1].Id
+      took = cepheus.Write([cepheus.Expect(held, Once.At, kept.At), cepheus.Add(held, Once.At, env.Now())], env.Db, why = "idempotency key taken over")
+      if result.IsOk(took)
+        return {Id: held}
+      end
     end
     if kept.State != "done"
       return {Out: refusal(409, "A request with this Idempotency-Key is being answered: send it again in a moment.", rid, env)}
@@ -69,11 +79,31 @@ defn claimed(b, req, env, rid)
   {Id: made.Value.Things[1]}
 end
 
+defn keyScope(req, env)
+  (** Whose a key is: the account of who asks (IdempotencyScope "account", the default: the same after a sign-in
+      again, from any address), his session ("session"), or his address when no one is signed in. *)
+  session = if value.IsMissing(env.SessionKeyOf) missing else env.SessionKeyOf(req, env) end
+  if env.Settings.IdempotencyScope == "account" and not value.IsMissing(env.Who) and (not value.IsMissing(session) or not value.IsMissing(http.HeaderValue("authorization", req.Headers)))
+    who = env.Who(req, env)
+    if result.IsOk(who) and value.IsDict(who.Value) and dict.Has("Id", who.Value)
+      return "u:$(who.Value.Id)"
+    end
+  end
+  if value.IsMissing(session) "ip:$(dict.GetOr("Ip", "", req))" else "s:$(encode.Hex(session))" end
+end
+
+defn uploadHash(req)
+  (** What an upload's key holds of it, its body coming in pieces: its endpoint, its query, its length and its type. *)
+  "$(req.Method)\n$(req.Path)\n$(req.Query)\nupload $(http.HeaderValue("upload-length", req.Headers)) $(http.HeaderValue("content-type", req.Headers))"
+end
+
 defn settled(claim, out, env)
   (** The answer of a request that held a key, kept to be given again; or the key let go, for an answer that a retry
-      should not get again: a refusal of the door (401, 403, 409, 429), an error of the server (5xx), a stream. *)
+      should not get again: a refusal of the door (401, 403, 409, 429), an error of the server (5xx), a stream, an
+      upload cut short (its answer says the Upload-Offset to go on from). *)
   id = claim.Id
-  if out.Status >= 500 or out.Status in [401, 403, 409, 429] or dict.Has("Stream", out) or not value.IsText(out.Body) or text.ByteLength(out.Body) > 1048576
+  cut = value.IsText(http.HeaderValue("upload-offset", dict.GetOr("Headers", [], out)))
+  if cut or out.Status >= 500 or out.Status in [401, 403, 409, 429] or dict.Has("Stream", out) or not value.IsText(out.Body) or text.ByteLength(out.Body) > 1048576
     ops = Gone(Once, id, env.Db)
     if result.IsOk(ops) and value.Len(ops.Value) > 0
       _ = cepheus.Write(ops.Value, env.Db, why = "idempotency key let go")

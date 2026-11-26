@@ -211,6 +211,10 @@ defn App(env)
   for b in env.Served
     routes = http.Route(b.Endpoint.Method, b.Endpoint.Path, if env.Words.Translating (req -> answerIn(b, req, env)) else (req -> answer(b, req, env)) end, routes,
       stream = dict.Get("Most", b.Endpoint))
+    if b.Upload
+      (* HEAD of an upload: the bytes the server holds of one cut short, through the same door *)
+      routes = http.Route("HEAD", b.Endpoint.Path, req -> answer(b, req, env), routes)
+    end
   end
   if env.Profile.OpenApi
     routes = http.Get("/openapi.json", req -> openapi(env), routes)

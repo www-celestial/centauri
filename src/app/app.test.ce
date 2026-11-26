@@ -235,6 +235,6 @@ defn isAdminOfTheApp()
   logs = data(ask(a, "GET", "/admin/logs?Search=POST", as = "super"))
   ends = data(ask(a, "GET", "/admin/endpoints", as = "super"))
   bug.Assert(secret.Value == "(secret)" and secret.Env == "APP_SECRET", "masked: $secret")
-  bug.Assert(value.Equal([k.Name for k in kinds], ["centauri_event", "centauri_counter", "centauri_part", "centauri_bytes", "centauri_migration", "centauri_idempotency", "note"]), "kinds")
+  bug.Assert(value.Equal([k.Name for k in kinds], ["centauri_event", "centauri_counter", "centauri_part", "centauri_bytes", "centauri_migration", "centauri_idempotency", "centauri_upload", "note"]), "kinds")
   value.Len(things.Rows) == 1 and text.Contains("milk", things.Rows[1].Fields) and value.Len(logs) >= 1 and list.Any([e.Name == "POST /notes" for e in ends])
 end

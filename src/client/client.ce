@@ -1,0 +1,123 @@
+(** Centauri's client, for a program or a page compiled to WebAssembly: an upload that goes on where a cut left it,
+    and a download that goes on where it stopped, each try after a wait drawn at random up to a bound that doubles
+    (full jitter), as the live screens of the pages come back. An upload is sent with an Idempotency-Key made once, so
+    that the app makes one file of it whatever the cuts; after a cut, HEAD asks the app the bytes it holds (its
+    Upload-Offset) and the rest goes from there, as with the tus protocol. A download is asked by parts (Range), each
+    checked against the first's ETag (If-Range): a file changed meanwhile starts again, never a mix of two. *)
+use std/encode
+use std/http
+use std/list
+use std/math
+use std/random
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(* A key of 128 random bits, as hex: what the app knows an upload by. *)
+newKey() = encode.Hex(text.FromBytes([math.Div(math.Floor(random.Float() * 256), 1) for k in 1..16]))
+
+defn pause(bound)
+  (** Waits a time drawn at random up to bound seconds (full jitter): the next bound, doubled. *)
+  sys.Sleep(random.Float() * bound)
+  bound * 2
+end
+
+defn numberOf(v)
+  (** A header's number, or missing. *)
+  if not value.IsText(v)
+    return missing
+  end
+  n = text.Number(text.Trim(v))
+  if value.IsNumber(n) n else missing end
+end
+
+defn Upload(url, bytes, type, key = missing, headers = [], tries = 30, first = 0.25, most = 8)
+  (** Sends a file, its bytes and its media type, to an upload endpoint of a Centauri app (api.Upload): an Ok of the
+      app's answer, {Status, Headers, Body}, once it made the file (the same answer again if a reply was lost), or the
+      last answer or Err after tries. headers go with each request, as the cookie of a session or the Bearer key of a
+      program; key, the upload's Idempotency-Key, is made here unless given. A cut, an error of the server or a 429
+      waits (full jitter, first to most seconds), asks HEAD the bytes held, and sends the rest; any other answer is
+      the app's word, given back.
+
+        Upload("http://127.0.0.1:1/x", "%PDF-1", "application/pdf", tries = 1) then result.IsErr() --> true *)
+  k = if value.IsMissing(key) newKey() else key end
+  length = text.ByteLength(bytes)
+  offset = 0
+  bound = first
+  last = result.Err({Kind: "http", Message: "No try was made."})
+  for attempt in 1..tries
+    own = [{Name: "idempotency-key", Value: k}, {Name: "content-type", Value: type}, {Name: "upload-length", Value: "$length"}, {Name: "upload-offset", Value: "$offset"}]
+    body = if offset >= length "" else text.ByteSlice(offset + 1, length, bytes) end
+    sent = http.Fetch(url, method = "POST", body = body, headers = list.Concat(headers, own), timeout = 60)
+    last = sent
+    at = if result.IsOk(sent) numberOf(http.HeaderValue("upload-offset", sent.Value.Headers)) else missing end
+    status = if result.IsOk(sent) sent.Value.Status else 0 end
+    if status >= 200 and status < 300
+      return sent
+    end
+    if status == 409 and value.IsNumber(at)
+      offset = at   (* the app holds other bytes than this try said: from there, at once *)
+    else if status == 0 or status >= 500 or status == 429 or status == 409 or (status == 400 and value.IsNumber(at))
+      bound = list.Min([most, pause(bound)])
+      asked = http.Fetch(url, method = "HEAD", headers = list.Concat(headers, [{Name: "idempotency-key", Value: k}]), timeout = 30)
+      held = if result.IsOk(asked) numberOf(http.HeaderValue("upload-offset", asked.Value.Headers)) else missing end
+      offset = if value.IsNumber(held) held else if value.IsNumber(at) at else offset end
+    else
+      return sent
+    end
+  end
+  last
+end
+
+defn Download(url, headers = [], part = 1048576, tries = 30, first = 0.25, most = 8)
+  (** Reads a file of a Centauri app (app.Download) by parts of part bytes: an Ok of {Status: 200, Headers, Body}, its
+      whole bytes, or the last answer or Err after tries. A part cut goes again after a wait (full jitter); every part
+      after the first asks If-Range with the first's ETag, so that a file changed meanwhile is read again from its
+      start. *)
+  got = ""
+  tag = missing
+  size = missing
+  bound = first
+  answer = missing
+  last = result.Err({Kind: "http", Message: "No try was made."})
+  k = 0
+  while k < tries
+    from = text.ByteLength(got)
+    if value.IsNumber(size) and from >= size
+      return result.Ok({Status: 200, Headers: answer.Headers, Body: got})
+    end
+    own = [{Name: "range", Value: "bytes=$from-$(from + part - 1)"}]
+    if value.IsText(tag)
+      own = list.Append({Name: "if-range", Value: tag}, own)
+    end
+    r = http.Fetch(url, headers = list.Concat(headers, own), timeout = 60)
+    last = r
+    status = if result.IsOk(r) r.Value.Status else 0 end
+    if status == 206 or status == 200
+      etag = http.HeaderValue("etag", r.Value.Headers)
+      if status == 200 or (value.IsText(tag) and etag != tag)
+        got = ""   (* the whole file, or another version of it: from its start *)
+      end
+      if status == 200
+        return result.Ok({Status: 200, Headers: r.Value.Headers, Body: r.Value.Body})
+      end
+      tag = etag
+      answer = r.Value
+      range = http.HeaderValue("content-range", r.Value.Headers)
+      whole = if value.IsText(range) text.Split("/", range) else [] end
+      size = if value.Len(whole) == 2 numberOf(whole[2]) else size end
+      if r.Value.Body == ""
+        k += 1
+      end
+      got = "$got$(r.Value.Body)"
+      bound = first
+    else if status == 0 or status >= 500 or status == 429
+      bound = list.Min([most, pause(bound)])
+      k += 1
+    else
+      return r
+    end
+  end
+  last
+end

@@ -4,6 +4,8 @@ use deps/www-celestial/cepheus/cesia/cepheus
 use std/bug
 use std/list
 use std/dict
+use std/http
+use std/json
 use std/result
 use std/text
 use std/value
@@ -34,8 +36,14 @@ MigrationRun = Kind("centauri_migration", {Name: cepheus.Text(unique = true), St
 Once = Kind("centauri_idempotency", {Key: cepheus.Text(unique = true), Hash: cepheus.Text(), State: cepheus.Text(), Status: cepheus.Int(),
   Body: cepheus.Text(), Type: cepheus.Text(), At: cepheus.Date()})
 
+(** An upload cut short that its client may go on with (files.ce): Key, unique, as Once's; the parts stored so far,
+    their ids in order, and the bytes they hold; the file's whole length, its type and name (its first bytes checked
+    when they came), its parts' size, and when it began. *)
+Uploading = Kind("centauri_upload", {Key: cepheus.Text(unique = true), Parts: cepheus.Text(), Held: cepheus.Int(), Length: cepheus.Int(),
+  Type: cepheus.Text(), Name: cepheus.Text(), PartSize: cepheus.Int(), At: cepheus.Date()})
+
 (** The kinds of package app. *)
-Kinds = [Event, Counter, Parts, Bytes, MigrationRun, Once]
+Kinds = [Event, Counter, Parts, Bytes, MigrationRun, Once, Uploading]
 
 defn IdOf(x)
   (** An id from outside, as a parameter of a path: an Int above 0 from a whole number or its digits, else missing.
@@ -148,4 +156,54 @@ defn Gone(kind, id, db)
     end
   end
   result.Ok(ops)
+end
+
+defn Unchanged(kind, id, current, r)
+  (** The check of a change against what the page saw before it asked for it, its base (the header Centauri-Base, a
+      JSON object of fields, which a live action sets from web.Act's base): an Ok of the Expects of each field, to
+      write with the change, so that Cepheus refuses it if one changes before the write; or the Err of a conflict, a
+      409 whose Conflict lists each field that changed already, its value seen and its value now, for the page to show
+      beside its own. current is the thing as the page reads it, the values compared; id is the thing's. Without a
+      base, an Ok of none: the change is made as before. An action queued while the page was away never overwrites in
+      silence what someone changed meanwhile.
+
+        Unchanged(Event, 7, {Kind: "b"}, {Headers: []}) --> result.Ok([])
+        seen = {Headers: [{Name: "centauri-base", Value: "{\"Kind\":\"a\"}"}]}
+        Unchanged(Event, 7, {Kind: "b"}, seen).Error.Conflict[1] --> {Field: "Kind", Base: "a", Now: "b"} *)
+  raw = http.HeaderValue("centauri-base", dict.GetOr("Headers", [], r))
+  if not value.IsText(raw)
+    return result.Ok([])
+  end
+  base = if text.ByteLength(raw) > 8192 result.Err(missing) else json.Parse(raw) end
+  if result.IsErr(base) or not value.IsDict(base.Value)
+    return Fail(400, "A Centauri-Base is a JSON object of the fields seen, 8 KiB at most.")
+  end
+  fields = dict.GetOr("fields", {}, kind)
+  conflict = []
+  for p in dict.Pairs(base.Value)
+    if not dict.Has(p.Key, fields)
+      return Fail(422, "Check the fields seen.", fields = dict.Put(p.Key, "No field of this kind.", {}))
+    end
+    now = dict.Get(p.Key, current)
+    if not sameValue(now, p.Value)
+      conflict = list.Append({Field: p.Key, Base: p.Value, Now: now}, conflict)
+    end
+  end
+  if value.Len(conflict) > 0
+    return result.Err({Kind: "api", Status: 409, Message: "This changed meanwhile: see its values now.", Conflict: conflict})
+  end
+  if not dict.Has("Db", r)
+    return result.Ok([])
+  end
+  held = cepheus.Get(kind, id, r.Db)?
+  held = if value.IsMissing(held) {} else held end
+  result.Ok([cepheus.Expect(id, kind[f], dict.Get(f, held)) for f in dict.Keys(base.Value)])
+end
+
+defn sameValue(a, b)
+  (** Do two values of a field say the same: numbers by their value (120 and 120.0), the others as they are. *)
+  if value.IsNumber(a) and value.IsNumber(b)
+    return a == b
+  end
+  value.Equal(a, b)
 end
