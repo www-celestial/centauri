@@ -55,11 +55,14 @@ window.adminPlay = (() => {
     return n
   }
   const press = async (role, name) => { let n = await node(role, name); if (!n) return false; n = await inSight(n); click(n); await wait(400); return true }
+  // a field's text replaced as a person does, its old text emptied first (End, then Backspace), then the new one typed
   const type = async (name, text) => {
     const f = await node('textbox', name); if (!f) return false
     click(await inSight(f))
     await until(async () => { const n = find(await tree(), named('textbox', name)); return n && n.Focused })
     const i = document.querySelector('input[aria-label="' + say(name) + '"]')
+    for (const key of ['End', ...Array(80).fill('Backspace')]) i.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+    await wait(100)
     i.value = text
     i.dispatchEvent(new InputEvent('input', { data: text, inputType: 'insertText' }))
     await wait(200)
