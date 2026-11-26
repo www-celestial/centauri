@@ -1,7 +1,7 @@
 (* The words of the admin pages in French: each text they show, as Say gives it, and those of the live screen and of
    Ceres (its band of keys, its page of no route, its errors of the screen) that reach them. An app's own words come
-   after them (Run's words). tests/words.test.ce walks the pages for each Say and checks it has its French here, with
-   the names of its values. *)
+   after them (Run's words). tests/translated.test.ce walks the pages for each Say and checks it has its French here,
+   with the names of its values. The English has its own forms where a text counts: 1 row, 2 rows. *)
 use src/i18n
 
 (** The catalogue of the admin pages, in French.
@@ -9,7 +9,7 @@ use src/i18n
       i18n.Say(Words, "fr", "Sign out") --> "Se déconnecter"
       i18n.Say(Words, "fr", "{N} members", {N: 1}) --> "1 membre"
       i18n.Say(Words, "fr", "{N} members", {N: 0}) --> "0 membre" *)
-Words = i18n.Catalog("fr", [
+Words = i18n.Of([i18n.Catalog("fr", [
   ["Admin", "Administration"],
   ["Sign out", "Se déconnecter"],
   ["{Name} {Version} · {Profile} · up {Up} · {Modules}", "{Name} {Version} · {Profile} · en marche depuis {Up} · {Modules}"],
@@ -264,4 +264,19 @@ Words = i18n.Catalog("fr", [
   ["click a title", "clic sur un titre"],
   ["sort", "trier"],
   ["next field", "champ suivant"],
-])
+]),
+  (* the English of one, where the pages count *)
+  i18n.Catalog("en", [
+    ["{N} rows, loading…", {one: "{N} row, loading…", other: "{N} rows, loading…"}],
+    ["{N} rows.", {one: "{N} row.", other: "{N} rows."}],
+    ["{N} rows, the next page asked…", {one: "{N} row, the next page asked…", other: "{N} rows, the next page asked…"}],
+    ["{N} rows, more after.", {one: "{N} row, more after.", other: "{N} rows, more after."}],
+    ["{N} rows, all of them.", {one: "{N} row, all of them.", other: "{N} rows, all of them."}],
+    ["{N} events in the last hour.", {one: "{N} event in the last hour.", other: "{N} events in the last hour."}],
+    ["{N} lines of this process (each server keeps its own).", {one: "{N} line of this process (each server keeps its own).", other: "{N} lines of this process (each server keeps its own)."}],
+    ["{N} changes (the last 50 of each kind).", {one: "{N} change (the last 50 of each kind).", other: "{N} changes (the last 50 of each kind)."}],
+    ["{N} jobs (200 at most).", {one: "{N} job (200 at most).", other: "{N} jobs (200 at most)."}],
+    ["TOTP on, {N} recovery codes left", {one: "TOTP on, {N} recovery code left", other: "TOTP on, {N} recovery codes left"}],
+    ["{N} passkeys", {one: "{N} passkey", other: "{N} passkeys"}],
+    ["{N} members", {one: "{N} member", other: "{N} members"}],
+  ])])

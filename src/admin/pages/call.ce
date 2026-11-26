@@ -54,6 +54,9 @@ defn Say(message, args = missing)
         Say("Users") --> "Users"
         Say("{N} rows, all of them.", {N: 3}) --> "3 rows, all of them." *)
   w = peek(spoken)
+  if w.Lang == "en" and value.IsMissing(args)
+    return message   (* an English text without values is shown as it is: nothing to read *)
+  end
   i18n.Say(if value.IsMissing(w.Catalog) Words else w.Catalog end, w.Lang, message, args = args)
 end
 

@@ -1,7 +1,7 @@
 (* The admin pages in a language, without a browser: their texts said, the numbers and times written as France writes
    them, the plurals of CLDR (0 and 1 are "one" in French), a text the catalogue lacks shown in English, never empty,
    the app's words after Centauri's, and a page drawn in French, the band of keys of Ceres too; a translation with
-   markup stays a text. English, as before. *)
+   markup stays a text. English as before, but for the forms of one (1 row). *)
 use deps/www-celestial/ceres/src/web
 use src/i18n
 use std/bug
@@ -41,9 +41,9 @@ defn isFrench()
   Problem({Status: 422, Message: "Vérifiez les champs.", Fields: {Text: "Un texte de 1 à 100 octets."}}) == "422 Vérifiez les champs. (Text: Un texte de 1 à 100 octets.)"
 end
 
-defn isEnglishAsBefore()
+defn isEnglish()
   speak(missing, missing)
-  bug.Assert(Say("Sign out") == "Sign out" and Say("{N} rows, all of them.", {N: Num(1)}) == "1 rows, all of them.", "said")
+  bug.Assert(Say("Sign out") == "Sign out" and Say("{N} rows, all of them.", {N: Num(1)}) == "1 row, all of them." and Say("{N} rows, all of them.", {N: Num(0)}) == "0 rows, all of them.", "said")
   bug.Assert(Num(12345.5) == "12345.5" and Cell(true) == "yes" and Cell(1.5) == 1.5 and Local(1794528000) == "2026-11-13" and Span(200000) == "2 d", "formats")
   Problem({Status: 429, Message: "Sign in first.", Instance: "a7", Retry: 3}) == "429 Sign in first. — request a7 — wait 3 s"
 end
