@@ -103,6 +103,8 @@ everyone", "on for 30% of the users", "the code's default: off"), what is set fo
 On for everyone, Off for everyone, a share and On for this share, Back to the default; an id, and On, Off or Clear for
 the tenant or for the user.
 
+![The page Flags: export.country, "The CSV export of the invoices with the country of the client.", "on for everyone" after a click on On for everyone, the line "Tenants: 65541 on", the buttons for a share, for the default, for a tenant or a user by its id, and "Done.".](images/admin-flags-on.png)
+
 ```java
 // Spring Boot: Togglz's console (togglz-console) sets a feature on or off, or by a strategy: a share of the users
 // (GradualActivationStrategy), some users by name (UsernameActivationStrategy); a tenant is a strategy of your own

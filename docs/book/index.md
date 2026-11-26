@@ -42,15 +42,16 @@ Spring Boot beside, and ends on tests that pass. The whole app is in
 14. [An API for a partner](partner-api.md): a key of a program with some of its maker's roles, shown once, sent as
     `Authorization: Bearer`, limited apart, revoked; the OpenAPI document and a client generated from it.
 15. [Translate the app](languages.md): catalogues of messages shared with the pages, plurals of CLDR, the account's
-    language then the browser's, the errors and the mails translated, French shipped (`i18n`, `Langs`).
+    language then the browser's, the errors and the mails translated, French shipped, the admin pages in French too
+    (`i18n`, `Langs`).
 16. [Open a feature to one office](flags.md): feature flags for everyone, a share of the users, a tenant or a user,
     turned from the admin pages without a restart (`flags`).
 17. [Security](security.md): each threat of the OWASP Top 10, and the others, with Centauri's defense and its test.
 18. [The administration](administration.md): the endpoints of the super-admin pages, and what they show.
 19. [The admin pages](admin.md): the pages of the super-admin in the browser, in WebAssembly (a live dashboard, users,
     tenants, events, log, jobs, webhooks, files, settings, the data of every kind changed in place, the audit trail,
-    the keys of programs, the feature flags, a user's second factors), and your own admin page for the invoices, with
-    Django's admin beside.
+    the keys of programs, the feature flags, a user's second factors), a picture at each step, your own admin page for
+    the invoices, and the pages in French, with Django's admin beside.
 20. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
     Spring Boot, where the time goes, and what the pieces of the first month cost.
 

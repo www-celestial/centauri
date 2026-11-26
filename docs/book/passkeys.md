@@ -196,6 +196,8 @@ an address (`isPasskeyAndTwoFactor`), a new password by the link of a mail (`isA
 (`POST /auth/tenant`), an invitation taken (`POST /auth/join`). Only a passkey verified by its device skips it. The
 admin pages ask it too, at their sign-in ([the admin pages](admin.md)).
 
+![The sign-in of the admin pages at its second step: the e-mail and the password typed, then the field "Code of your app" and Send.](images/admin-second-step.png)
+
 ```java
 // Spring Boot: TOTP by a library (java-totp, googleauth), its secret on the user by hand, and the state between
 // the two steps in the HTTP session; Spring Security 7's multi-factor authentication asks each factor as an authority
@@ -213,6 +215,8 @@ admin pages ask it too, at their sign-in ([the admin pages](admin.md)).
   second factor of him, he sets a new one up at that sign-in. An event `factors-reset` names it
   (`isFactorsShownAndReset`). How the super-admin makes sure who asks is the platform's to decide: Centauri trusts
   the role super.
+
+![The page of a user in the admin: "TOTP on, 10 recovery codes left", "1 passkey", the passkey "Bruno's phone", and the buttons "Take away the TOTP and the recovery codes of bruno@example.com" and "Take away the passkeys of bruno@example.com".](images/admin-user-factors.png)
 
 ## 7. Its test
 

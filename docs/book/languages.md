@@ -185,8 +185,15 @@ c = i18n.Of([i18n.Centauri, words.Words])
 said = i18n.Say(c, lang, "{N} unpaid invoices", {N: n})
 ```
 
-`lang` is the `Lang` of the `Account` that the sign-in gave, else `i18n.Best` of the browser's languages. A form checked
-by a shape in the page gets its errors in English; `i18n.Say(c, lang, message)` gives them in French, as the door does.
+`lang` is the one the server chose, which a page reads in the `Content-Language` of the answer to `GET /auth/me` (an
+app of several languages sends it, signed in or not): the account's language, else the browser's, among the app's. A
+form checked by a shape in the page gets its errors in English; `i18n.Say(c, lang, message)` gives them in French, as
+the door does. The actions of a page's live screen carry the browser's language, so their errors come in it too.
+
+Centauri's admin pages work so: every text through their catalogue, numbers and times as French writes them, and an
+app's own admin pages with its words ([the admin pages](admin.md), step 4).
+
+![The admin pages in French: the dashboard "Tableau de bord", its boxes Utilisateurs, Tenants, Sessions, Requêtes, Refusées and "Connexions échouées/min", the line "Dernière seconde : …" and the graphs "Requêtes par seconde" and "Durée d'une requête (ms)".](images/admin-dashboard-fr.png)
 
 ## 7. Plurals
 

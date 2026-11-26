@@ -104,6 +104,16 @@ each with its test in `tests/oidc.test.ce` (oidc), `tests/passkeys.test.ce` (pas
 | a second factor skipped by another way in | the step after a password, a provider, a passkey its device didn't verify, the link of a check, a new password, a tenant entered, an invitation taken | second `isAskedOnEveryWayIn`; oidc `isSecondFactorAfterTheProvider`; passkeys `isVerificationAsked`; l3 `isPasskeyAndTwoFactor` |
 | the code of an invitation read in an answer or the database | with `Mail`, a job makes it and mails it; its hash kept | people `isTenantAdminInvitingByMail`, `isInvitedByMail` |
 
+The threats of the pages in French, each with its test in `tests/translated.test.ce` (translated),
+`src/admin/pages/pages.test.ce` (pages), `examples/invoices/tests/l3.test.ce` (l3), and the browser test with
+`LANG=fr`:
+
+| threat | defense | test |
+|---|---|---|
+| markup in a translation, or in a text typed or kept, made into HTML in a page | a translation is a text: the canvas draws it, the hidden DOM gets it as text (`textContent`, `aria-label`); the door sends it inside JSON of `application/problem+json`, with nosniff | translated `isATranslationATextNotMarkup`; pages `isATranslationATextNotMarkup`; the browser test's step `markup` (no element made of `<b>` or `<img onerror>`) |
+| a text without its translation, or with an empty one, shown empty or in a broken sentence | a text the catalogue lacks, or whose translation is empty, shows in English; a test walks the pages for each text said and fails on one without French, a name of a value lost (`{N}`), a value written into a text | pages `isMissingEnglishNeverEmpty`; translated `isEveryTextOfTheAdminInFrench`, `isCentaurisCatalogueWhole`, `isAnUntranslatedTextFound`; l3 `isAdminInFrench` |
+| a header `Accept-Language` made to inject, sent to a page or to its live screen | read as tags only (400 bytes, 20 languages); the answer the same but its `Content-Language`, one of `Langs`; an action of the screen gets the header of its opening, read the same way | translated `isBadAcceptLanguageOnlyTheLanguage`, `isActInTheBrowsersLanguage` |
+
 What Centauri does not do yet: the third wall, a token of Cepheus per role that reads only its kinds (G16), for roles
 that must never see some kinds (an outside accountant); checking a new password against the lists of leaked ones. The
 neutral answer of a sign-up came with L2 (`SignUpAnswer`, with mail); multi-factor and passkeys (L3) are done now:

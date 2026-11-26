@@ -67,6 +67,11 @@ nothing), no broker between the servers, no message lost or doubled when a conne
 its last group): the test pays an invoice through a second server of the same database, and the first server's page
 sees the row go (`isShownAsWritesComeAcrossServers`, `isUnpaidLiveOnEveryPage`).
 
+The admin pages are made so too: their page Events, with Live pressed, is the show `admin.events` on the screen of the
+page, the events of the last hour, each new one at the top as it is written, by any server.
+
+![The page Events of the admin with Live pressed: "live: the last hour, as it comes", and the table of the events, the newest first, each with its time, kind, user, tenant, address, route and what happened.](images/admin-events-live.png)
+
 ## 3. Actions: the endpoints, through the same door
 
 A page's action is an endpoint of the app by its name, `{"Act": "POST /invoices/:id/pay", "Id": 7, "Args": {"id":

@@ -38,6 +38,15 @@ event (`data-edited`, `job-retried`, `job-cancelled`), and so are a session ende
 (`factors-reset`), an invitation (`invite`), a key revoked (`key-revoked`) and a flag set (`flag`), with the others:
 [the admin pages](admin.md) show them as the audit trail.
 
+A user's page in the admin shows `GET /admin/users/:id`, his factors with the buttons of
+`POST /admin/users/:id/factors/reset`, and his sessions, one ended by `DELETE /admin/sessions/:id`:
+
+![The page of a user in the admin: his ways of signing in (TOTP on, the recovery codes left, a passkey), the buttons that take them away, his sessions, one chosen, and the question "End session …?".](images/admin-user-factors.png)
+
+A tenant's page shows `GET /admin/tenants/:id` and sends `POST /admin/tenants/:id/invites`:
+
+![The page of a tenant: its members and their roles, and an invitation by mail sent to cleo@example.com as accountant: "Done.".](images/admin-tenant-invite.png)
+
 ```cesia norun hide=code
 (* For the check of this page: the packages its code uses, and the names it takes from the invoices of
    examples/invoices, unknown here. *)

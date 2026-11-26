@@ -5,9 +5,11 @@ of what a platform needs: a dashboard of the last minutes (requests, failures, t
 the signs of bots, jobs), the users, the tenants and their roles changed in place, the events and the log as they
 come, the jobs and the webhooks run again, the files, the settings, the data of every kind changed through its
 checks, the trail of what the admins changed, the keys of programs and the feature flags, and a user's second factors
-taken away when he lost his device. And the app adds its own pages, columns and actions in a few lines.
+taken away when he lost his device. And the app adds its own pages, columns and actions in a few lines. The pages
+speak English or French, the language the server speaks to the super-admin.
 The code is `src/admin/admin.ce` (the module) and `src/admin/pages/` (the pages); the tests are `tests/admin.test.ce`
-and, in a browser, `examples/invoices/tools/admin-shot.sh`.
+and, in a browser, `examples/invoices/tools/admin-shot.sh`. The pictures of this chapter are the pages of the invoices
+filled with a month, taken by `tools/shots.sh` (the same steps, played by Chrome without a window).
 
 What it uses: pages of [Ceres](https://www-celestial.github.io/ceres/) written in Cesia and compiled to WebAssembly
 (`cesia build --target wasm`), the endpoints of the role super of [the administration](administration.md), the live
@@ -20,13 +22,17 @@ screen of [chapter 9](live.md), and nothing else: no new way into the app.
    examples/invoices, unknown here. *)
 use deps/www-celestial/centauri/src/api
 use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
 use deps/www-celestial/centauri/src/auth
 use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/i18n
 use deps/www-celestial/centauri/src/jobs
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/bug
 use std/check
 use std/dict
 use std/result
+use std/text
 use std/value
 use std/json
 Invoice = json.Parse("{}")!
@@ -36,6 +42,7 @@ Statuses = json.Parse("{}")!
 byOffice = json.Parse("{}")!
 e = json.Parse("{}")!
 paying = json.Parse("{}")!
+words = json.Parse("{}")!
 ```
 
 ```cesia norun
@@ -75,6 +82,12 @@ again, checks the role `super` of each show, and runs each action, an endpoint b
 over HTTP: the session, the role, the limits of the user, the shapes, the log, the metrics. A page in the browser is
 never trusted: it holds nothing the server would not give any program with the same cookie.
 
+![The sign-in of the admin pages: the title "Invoices — admin", the line "Sign in with the account of a super-admin of the platform.", the fields E-mail and Password, the password a row of dots, and the button Sign in.](images/admin-signin.png)
+
+With a second factor on, a right password opens the second step: the field of the code of his app, and Send.
+
+![The second step of a sign-in: under the e-mail and the password, the field "Code of your app" and the button Send.](images/admin-second-step.png)
+
 ```python
 # Django: the admin is an app of the project, its pages made on the server from the models
 INSTALLED_APPS = ["django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes", "django.contrib.sessions", ...]
@@ -105,6 +118,66 @@ Every time is shown on the viewer's clock (a day that Cepheus keeps at 00:00 UTC
 status, its message, the fields that are wrong and the number of its request to quote (`urn:request:...`), and the
 seconds to wait on a 429. Every list is a table of Ceres: only the rows in sight are drawn, so 100,000 rows scroll as
 50 do (Speed).
+
+Each task, as the page shows it:
+
+**See the platform.** The Dashboard: the counts at the top, then the requests and their time, a point each second,
+live.
+
+![The dashboard: six boxes of counts (users, tenants, sessions, requests, refused, failed sign-ins a minute), the line of the last second, and the graphs "Requests a second" and "Time of a request (ms)".](images/admin-dashboard.png)
+
+**Disable a user.** Users, a click on his row, then Disable: the page asks first, Yes does it, and the table is read
+again. Enable, Sign out everywhere and Make a super-admin work the same way.
+
+![The users: the table of their ids, e-mails, names and dates, ada@example.com chosen, her buttons Open, Disable, Sign out everywhere and Make a super-admin, and the question "Disable ada@example.com?" with Yes and No.](images/admin-users-disable.png)
+
+**A user lost his phone; end one of his sessions.** Users, his row, Open: his tenants and roles, his ways of signing
+in (password, TOTP and the recovery codes left, each passkey), Take away the TOTP or the passkeys; under them his
+sessions: a click on one, End session, Yes.
+
+![The page of a user: his roles in each tenant with Save, his ways of signing in ("TOTP on, 10 recovery codes left", "1 passkeys", the passkey "Bruno's phone"), the buttons that take away the TOTP and the passkeys, his sessions, one chosen, and the question "End session …?".](images/admin-user-factors.png)
+
+**Invite someone to a tenant.** Tenants, its row, Open: its members and their roles; type the e-mail and the roles,
+then Invite by mail. The invitation goes by mail; its code is never shown.
+
+![The page of a tenant: its members with their roles in a field and Save, the rows "Add user id" and "Invite e-mail" with cleo@example.com typed, and "Done." under them.](images/admin-tenant-invite.png)
+
+**Find what happened.** Events: a kind, a user, a tenant, a route, a time range, then Search; or Live, the last hour as
+it is written. The Log is the same for the lines of this process.
+
+![The events: the fields Kind, User id, Tenant id, Route, From and to, the buttons Search and Live, and the table of the events, each with its time, kind, user, tenant, address, route and what happened.](images/admin-events.png)
+
+![The log: the level and the text it holds, Search and Live, and the lines of the process with their time, level, message and fields.](images/admin-log.png)
+
+**Run a job again.** Jobs shows the dead ones first: a click on one, Run job … again, Yes. A waiting one is cancelled
+the same way. Webhooks shows the deliveries (jobs `centauri.hook`), run again the same way, and their endpoints.
+
+![The jobs: State dead, the table with the dead mail job "centauri.mail" and its error "550 mailbox unavailable", the job chosen, the question "Run job … again?" with Yes and No.](images/admin-jobs-retry.png)
+
+![The webhooks: their deliveries in the table of the jobs, then their endpoints, whose secrets stay on the server.](images/admin-webhooks.png)
+
+**See the files and the settings.** Files lists each kind of files and its things; Settings each setting, its
+variable, its value (a secret is `(secret)`) and where it came from.
+
+![The files: the kind of the scans of the invoices and its things, their names, types and sizes.](images/admin-files.png)
+
+![The settings: their names, variables, values (secrets masked) and where each came from: env, code or default.](images/admin-settings.png)
+
+**Change a thing in place.** Data, the kind, a click on the thing: each field in its input; change one, then Save. A
+value of the wrong type is refused with its field, and the change is in the Audit.
+
+![The data browser on the invoices: the table of their number, client, status and total, the first chosen, and under it the editor of its fields (Tenant, Number, Client, BillTo changed, Search, Date, Due, Status, Total), each with its type, and Save.](images/admin-data-edit.png)
+
+![The audit trail: each change of a super-admin, when, which change, by whom, from which address and route, and what.](images/admin-audit.png)
+
+**Revoke a key of a program.** Keys, its row, Revoke key …, Yes: the key is refused at its next request.
+
+![The keys of programs: the table of their tenant, name, roles and dates, the "Accounting robot" key chosen, and the question "Revoke key … (Accounting robot)?" with Yes and No.](images/admin-keys-revoke.png)
+
+**Turn a feature on.** Flags: each flag with what it is for and its state; On for everyone, a share, or a tenant or a
+user by its id.
+
+![The feature flags: export.country, its text, "on for everyone" after the click, the buttons On and Off for everyone, the share, Back to the default, and the buttons for a tenant or a user by its id, then "Done.".](images/admin-flags-on.png)
 
 A thing's fields are changed through the shape of their type in Cepheus (a text, a whole number, a number, an amount
 of its scale, true or false, a day or an instant, a link), each wrong one named; Cepheus then checks its unique values
@@ -154,12 +227,12 @@ defn unpaid(p)
   rows = pages.ListRows(l)
   asking = web.Signal(missing)
   said = web.Signal(missing)
-  table = web.Table(rows, [web.Column("Office", i -> i.Tenant, sort = "Tenant", width = 90), web.Column("Number", i -> i.Number, sort = "Number", width = 90),
-    web.Column("Bill to", i -> i.BillTo, sort = "BillTo"), web.Column("Due", i -> i.Due, sort = "Due", width = 120),
-    web.Column("Total", i -> web.Money(i.Total), sort = "Total", width = 140)], height = 340, label = "Unpaid invoices")
+  table = web.Table(rows, [web.Column(pages.Say("Office"), i -> i.Tenant, sort = "Tenant", width = 90), web.Column(pages.Say("Number"), i -> i.Number, sort = "Number", width = 90),
+    web.Column(pages.Say("Bill to"), i -> i.BillTo, sort = "BillTo"), web.Column(pages.Say("Due"), i -> pages.Local(i.Due), sort = "Due", width = 120),
+    web.Column(pages.Say("Total"), i -> web.Money(i.Total), sort = "Total", width = 140)], height = 340, label = pages.Say("Unpaid invoices"))
   web.Stack([
-    web.Title("Unpaid invoices"),
-    web.Plot(() -> byOffice(web.Get(rows)), height = 200, width = 640, label = "Unpaid by office"),
+    web.Title(pages.Say("Unpaid invoices")),
+    web.Plot(() -> byOffice(web.Get(rows)), height = 200, width = 640, label = pages.Say("Unpaid by office")),
     table,
     pages.ListState(l, rows),
     () -> paying(pages.Chosen(table, rows), p, l, asking, said),   (* Mark paid, asked first *)
@@ -167,13 +240,14 @@ defn unpaid(p)
   ], gap = 8)
 end
 
-pages.Run(title = "Invoices — admin",
+pages.Run(title = "Invoices — admin", words = words.Words,
   kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number"), pages.Column("BillTo", title = "Bill to"), pages.Column("Status"),
-    pages.Column("Total", show = v -> "$v €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
+    pages.Column("Total", show = v -> "$(pages.Num(v)) €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])
 ```
 
-The whole file is `examples/invoices/admin/page.ce` (with `byOffice` and `paying`). What it gives:
+The whole file is `examples/invoices/admin/page.ce` (with `byOffice` and `paying`). Each text goes through
+`pages.Say`, so that the page speaks French too (step 4). What it gives:
 
 - `pages.Page(title, path, view)`: a page in the menu after Centauri's; `view(p)` gives its widgets, and calls the
   app's endpoints by `pages.Call(endpoint, args, p)`, or reads one of pages by `pages.Lister`.
@@ -186,6 +260,8 @@ The whole file is `examples/invoices/admin/page.ce` (with `byOffice` and `paying
 
 An action of the app is an endpoint of the role super: the page never writes past the server's checks, and the
 support's payment is the office's payment of chapter 3 (once, with `Expect`; the partner told in the same group).
+
+![The page Unpaid of the invoices: the bars of the unpaid sum by office, the table of the unpaid invoices, one chosen, and the question "Mark invoice … of office … paid?" with Yes and No.](images/admin-unpaid-pay.png)
 
 ```python
 # Django: the same with the admin of the model, made on the server
@@ -207,9 +283,59 @@ the same in Firefox): sign in (the password a field of dots, a password input fo
 a user chosen and disabled once asked, the table read again; an invoice's name changed in place and a total that is no
 number refused with its field; Mark paid on the Unpaid page; each change in the Audit; on Keys, the accounting robot's
 key chosen and revoked once asked (the step `revoke`); on Flags, the flag `export.country` and its office, then on for
-everyone (the step `flag`); sign out.
+everyone (the step `flag`); sign out. Each page visited fits the window, no button over another, and markup typed into
+a field (`<b>`, `<img onerror>`) stays a text: no element is made of it.
 
-## 4. Its tests
+## 4. In French
+
+The pages speak the language the server speaks to the super-admin: they ask `GET /auth/me` first, and its
+`Content-Language` says it, chosen as for every request of the app (chapter 15): his account's language, else the
+one his browser prefers, among the app's languages (`APP_LANGS`); English when the app speaks English alone. The
+actions of the live screen carry the browser's language too, so the server's errors come in it. Centauri's texts in
+French come with the pages (`pages.Words`, 254 of them, the band of keys of Ceres and the errors of the screen too):
+titles, the menu, buttons, columns, help lines, empty lists, questions. Numbers are written as French writes them
+(`12 345,5`, the thousands apart by a narrow space that no line breaks), times day first (`26/11/2026 09:22:01`),
+plurals by CLDR (`0 ligne`, `1 ligne`, `2 lignes`). A text with no French shows in English, never empty. The data stay
+as written: names, the details of the events and the lines of the log, the names of the fields. The fields of the
+editor keep the point of numbers (a list in them is cut at its commas); a time is typed either way, `25/11/2026 08:00`
+or `2026-11-25 08:00`.
+
+An app's own page says each of its texts by `pages.Say(text, args)`, values in `args` (`{Number}`, `{N}`), never
+written into the text; the titles given to `pages.Page`, `Kind`, `Column`, `Action` and `Run` are said where they
+show. Its French is a catalogue of i18n, given to `pages.Run(words = ...)`, after Centauri's, so that the app's wins
+for a text in both; the invoices give the one their server speaks (`src/invoices/words/words.ce`):
+
+```cesia norun
+(* src/invoices/words/words.ce: what the admin page says, beside the errors of the server *)
+Words = i18n.Catalog("fr", [
+  (* ... *)
+  ["Unpaid invoices", "Factures impayées"],
+  ["Mark invoice {Number} of office {Office} paid", "Marquer payée la facture {Number} du cabinet {Office}"],
+])
+
+(* tests/l3.test.ce: each text of the page has its French, with the names of its values *)
+defn isAdminInFrench()
+  wrong = apptest.Untranslated(["admin/page.ce"], i18n.Of([pages.Words, words.Words]), "fr")
+  bug.Assert(value.Len(wrong) == 0, text.Join("\n", wrong))
+  (* ... *)
+end
+```
+
+`apptest.Untranslated(paths, words, lang)` reads the pages' files: each text said (`Say("…")`, a title of a page, a
+kind, a column, an action) must be in the catalogue, not empty, with the names of its values in each form; a text
+given straight to a widget of Ceres (`web.Text("…")`, `label = "…"`) shows in English in every language, and is named
+with its line. Centauri's own pages pass the same check (`tests/translated.test.ce`).
+
+![The dashboard in French: "Tableau de bord", the boxes Utilisateurs, Tenants, Sessions, Requêtes, Refusées and "Connexions échouées/min", the line "Dernière seconde : …", the graphs "Requêtes par seconde" and "Durée d'une requête (ms)", the menu in French and the band of keys "premier champ", "faire défiler la page".](images/admin-dashboard-fr.png)
+
+```python
+# Django: {% translate %} in the templates and gettext in the code, makemessages then compilemessages,
+# LocaleMiddleware for the language of the request; the admin's own texts come translated with Django.
+MIDDLEWARE = [..., "django.middleware.locale.LocaleMiddleware", ...]
+LANGUAGES = [("en", "English"), ("fr", "French")]
+```
+
+## 5. Its tests
 
 `tests/admin.test.ce`: the files served with their type, ETag, 304 and brotli, no script of its own in the page, no
 source and nothing outside the folder (`isPagesServedWithTheirHeaders`); off by its setting (`isTurnedOffBySetting`);
@@ -221,5 +347,10 @@ audit naming fields only (`isEditCheckedByTheKind`); a job cancelled, not while 
 refused (`isCrossSiteRefused`); the log read once a line (`isLogTailedOnce`); the three shows for the role super only,
 over a real WebSocket (`isLiveForSuperOnly`). `tests/people.test.ce`: the endpoints of the pages Keys and a user's
 factors, sessions and invitations ([the administration](administration.md)); `tests/flags.test.ce`: those of Flags; `isEveryEndpointForSuperOnly` lists `AdminFlags` and `AdminFlag` too.
+In French: `tests/translated.test.ce` (each text of the pages said and in French, Centauri's catalogue whole, the walk
+catching a text unsaid; `/auth/me` in the language of the account, then of the browser; a header made to inject; a
+translation with markup; an action of the screen in the browser's language), `src/admin/pages/pages.test.ce` (numbers,
+times, plurals, a text without French in English, the sign-in drawn in French with Ceres's band), and the browser
+test with `LANG=fr` (`examples/invoices/tools/admin-shot.ce`), which plays every step in French.
 
 Next: [Speed](speed.md), where the pages' size, first paint and frames are measured.
