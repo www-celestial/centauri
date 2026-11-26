@@ -1,4 +1,4 @@
-(** cesia do new-module NAME [KIND]: writes a new module of the app (src/NAME/api/api.ce, src/NAME/kinds.ce,
+(** cesia do new-module NAME, or NAME KIND: writes a new module of the app (src/NAME/api/api.ce, src/NAME/kinds.ce,
     src/NAME/NAME.ce) and its test (tests/NAME.test.ce), which passes, never over a file. An app's cesia.toml runs it
     as a task, from Centauri in deps/:
 

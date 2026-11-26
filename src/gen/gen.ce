@@ -195,7 +195,7 @@ defn Write(name, root = ".", kind = missing)
 end
 
 defn Main(args)
-  (** cesia do new-module NAME [KIND]: the files written, and the lines to add to the app, or what is wrong. *)
+  (** cesia do new-module NAME, or NAME KIND: the files written, and the lines to add to the app, or what is wrong. *)
   if value.Len(args) < 1 or value.Len(args) > 2
     io.PrintError("cesia do new-module NAME [KIND]: a module NAME (as tickets), its kind KIND (as ticket; NAME without its last s by default).")
     sys.Exit(2)

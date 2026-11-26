@@ -64,7 +64,7 @@ defn KeyOf(jwk)
   result.Err({Kind: "jwt", Message: "No key of a type this app checks."})
 end
 
-(** The keys of a set (its JSON object {keys: [...]}) that serve to check signatures, as KeyOf reads them. *)
+(** The keys of a set (its JSON object, whose field keys is the list of the keys) that serve to check signatures, as KeyOf reads them. *)
 KeysOf(set) = if value.IsDict(set) and value.IsArray(dict.Get("keys", set)) [k.Value for k in [KeyOf(j) for j in set["keys"]] if result.IsOk(k)] else [] end
 
 (* The type of key of each algorithm. *)

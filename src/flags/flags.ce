@@ -8,7 +8,7 @@
 
       Export = Flag("new-export", about = "The CSV export of 2027.")
       Export.Default --> false
-      Module([Export]).Name --> "flags" *)
+      Module([Export, Flag("dark", default = true)]).Name --> "flags" *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use src/app
