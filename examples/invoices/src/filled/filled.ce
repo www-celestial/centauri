@@ -10,15 +10,17 @@ use deps/www-celestial/centauri/src/auth
 use deps/www-celestial/centauri/src/jobs
 use src/invoices
 use src/invoices/endpoints as e
+use std/dict
 use std/list
 use std/math
 use std/result
 use std/sys
 use std/value
 
-defn App(port, rows = 0)
-  (** The app in memory, its data made, ready to serve on port: an Ok of its test t. *)
-  t = apptest.Start(invoices.App, settings = {Origin: "http://127.0.0.1:$port", AdminPath: "/admin", LogRequests: "false"}, now = missing)?
+defn App(port, rows = 0, more = {})
+  (** The app in memory, its data made, ready to serve on port: an Ok of its test t. more adds settings, as those of
+      TLS and HTTP/3 of tools/quic-check.ce. *)
+  t = apptest.Start(invoices.App, settings = dict.Merge({Origin: "http://127.0.0.1:$port", AdminPath: "/admin", LogRequests: "false"}, more), now = missing)?
   boss = t.Super()?
   offices = [["ada@example.com", "Ada", "Martin & Co"], ["bruno@example.com", "Bruno", "Bruno Conseil"], ["chloe@example.com", "Chloé", "Atelier Chloé"],
     ["dan@example.com", "Dan", "Dan & Fils"], ["eva@example.com", "Eva", "Eva Studio"]]

@@ -1,0 +1,135 @@
+(** The admin pages over HTTP/3 in Chrome without a window (CHROME, a Chrome or a chrome-headless-shell): the invoices
+    filled with a month, served with TLS, APP_HTTP3=on and APP_WEBTRANSPORT=on on a free port; the page's live channel
+    races WebTransport against WebSocket, takes WebTransport, and its screen shows (a frame comes over the session).
+    The certificate is one of 13 days, made here, that the page trusts by its hash as browsers allow for WebTransport
+    (serverCertificateHashes); the session of the super-admin is given to Chrome as a cookie. Lines of what was seen,
+    and an exit of 1 if WebTransport didn't win; with OUT, a picture of the page in OUT/quic-check.png. *)
+use deps/www-celestial/centauri/src/app
+use src/filled
+use std/crypto
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket
+
+defn env(name, default)
+  v = sys.Env(name)
+  if value.IsText(v) and v != "" v else default end
+end
+
+defn ask(conn, id, method, params, events)
+  (** A command of the DevTools protocol and its result; the events that come before it go to events. *)
+  _ = websocket.Send(json.Text({id: id, method: method, params: params}), conn)
+  while true
+    m = json.Parse(fiber.Receive(conn.Messages, timeout = 30)?)?
+    if value.IsDict(m) and "id" in m and m["id"] == id
+      return if "error" in m result.Err({Kind: "cdp", Message: json.Text(m["error"])}) else result.Ok(m["result"]) end
+    end
+    fiber.Send(m, events)
+  end
+end
+
+defn certificate(dir)
+  (** A certificate of 13 days for localhost, and the base64 of its SHA-256: an Ok of {Cert, Key, Hash}. *)
+  steps = [["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost",
+    "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-days", "13", "-keyout", "$dir/key.pem", "-out", "$dir/cert.pem"],
+    ["x509", "-in", "$dir/cert.pem", "-outform", "der", "-out", "$dir/cert.der"]]
+  for args in steps
+    p = sys.Start("openssl", args = args)?
+    _ = sys.ReadOutput(p)
+    if sys.WaitExit(p) != 0
+      return result.Err({Kind: "quic-check", Message: "openssl $(args[1]) failed"})
+    end
+  end
+  der = sys.Read("$dir/cert.der")?
+  result.Ok({Cert: "$dir/cert.pem", Key: "$dir/key.pem", Hash: encode.Base64(crypto.Sha256(der, crypto.Open()?))})
+end
+
+defn main()
+  profile = env("PROFILE", "/tmp/centauri-quic-check")
+  _ = sys.Mkdir(profile)
+  c = certificate(profile)?
+  l = net.Listen(0, host = "127.0.0.1")?
+  port = net.Port(l)
+  (* 127.0.0.1, not localhost: Chrome tries ::1 first for QUIC, and the app listens on IPv4. *)
+  url = "https://127.0.0.1:$port"
+  t = filled.App(port, more = {Origin: url, Port: port, Cert: c.Cert, Key: c.Key, Http3: "on", WebTransport: "on", LogRequests: env("LOG", "false")})?
+  boss = t.Super()?
+  fiber.Spawn(() -> app.Listen(t.Env, listener = l))
+  _ = sys.Remove("$profile/DevToolsActivePort")
+  proc = sys.Start(env("CHROME", "chrome"), args = ["--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+    "--ignore-certificate-errors", "--remote-debugging-port=0", "--user-data-dir=$profile", "about:blank"])?
+  start = sys.Now()
+  while not sys.Exists("$profile/DevToolsActivePort") and sys.Now() - start < 20
+    sys.Sleep(0.05)
+  end
+  debug = text.Split("\n", sys.Read("$profile/DevToolsActivePort")?)[1]
+  targets = json.Parse(http.Fetch("http://127.0.0.1:$debug/json")?.Body)?
+  page = [x for x in targets if x["type"] == "page"][1]
+  conn = websocket.Dial(page["webSocketDebuggerUrl"])?
+  events = fiber.Channel()
+  done = fiber.Wait(fiber.Spawn(() -> watched(conn, events, url, c.Hash, boss.Cookie)))
+  sys.Stop(proc)
+  done?
+end
+
+defn watched(conn, events, url, hash, cookie)
+  (** The page opened, and what its transports did in 8 seconds. *)
+  ask(conn, 1, "Network.enable", {}, events)?
+  ask(conn, 5, "Page.enable", {}, events)?
+  ask(conn, 2, "Page.addScriptToEvaluateOnNewDocument", {source: "globalThis.cesia = {certificateHashes: ['$hash']}"}, events)?
+  pair = text.Split("=", text.Split(";", cookie)[1])
+  ask(conn, 3, "Network.setCookie", {name: pair[1], value: text.Join("=", list.Skip(1, pair)), url: url, secure: true, httpOnly: true}, events)?
+  ask(conn, 4, "Page.navigate", {url: "$url/admin"}, events)?
+  seen = {webtransport: 0, established: 0, websocket: 0, closed: 0, frames: 0}
+  until = sys.Now() + 8
+  while sys.Now() < until
+    got = fiber.Receive(events, timeout = 0.05)
+    m = if result.IsOk(got) got.Value else fiber.Receive(conn.Messages, timeout = 0.2) then result.AndThen(json.Parse) then result.UnwrapOr(missing) end
+    if value.IsDict(m) and "method" in m
+      method = m["method"]
+      if method == "Network.webTransportCreated" and text.EndsWith("/live", m["params"]["url"])
+        seen.webtransport += 1
+      else if method == "Network.webTransportConnectionEstablished"
+        seen.established += 1
+      else if method == "Network.webSocketCreated" and text.Contains("/live", m["params"]["url"])
+        seen.websocket += 1
+      else if method == "Network.webSocketClosed"
+        seen.closed += 1
+      else if method == "Network.webSocketFrameReceived"
+        seen.frames += 1
+      end
+    end
+  end
+  (* A picture of the page as it stands, with OUT: the dashboard, live. *)
+  out = env("OUT", "")
+  if out != ""
+    shot = ask(conn, 10, "Page.captureScreenshot", {format: "png"}, events)?
+    sys.Write("$out/quic-check.png", encode.Unbase64(shot["data"])?)?
+  end
+  lines = ["WebTransport sessions established: $(seen.established)",
+    "WebSockets opened: $(seen.websocket), closed: $(seen.closed), frames over WebSocket: $(seen.frames)"]
+  if seen.established >= 1 and seen.frames == 0
+    result.Ok(list.Append("the live channel went over WebTransport", lines))
+  else
+    result.Err({Kind: "quic-check", Message: text.Join("; ", lines)})
+  end
+end
+
+got = main()
+if result.IsErr(got)
+  io.PrintError("quic-check: $(got.Error)")
+  sys.Exit(1)
+end
+for l in got.Value
+  io.Print(l)
+end
