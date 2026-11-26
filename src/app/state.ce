@@ -1,9 +1,10 @@
 (* What the requests of a process share. In Cesia a function never changes a variable of its module, so this state
-   lives in one fiber that owns it, and a request asks it by a message: a round trip costs about 0.8 µs (measured,
-   20,000 trips). It holds the rate limits, the sessions it read last (for SessionCache seconds), the slots of the
-   password hashes, the last lines of the log, the events already written, the failed sign-ins of the last minutes, and
-   the clock of a test. A request at a route asks it once (door): its session and all its limits in one round trip.
-   Each process of cesia run --workers has its own: a limit of 600 a minute is then 600 a minute in each worker. *)
+   lives in one fiber that owns it, and a request asks it by a message, and in three tables of std/fiber, which every
+   fiber reads and writes at once without one: the rate limits, the sessions it read last (for SessionCache seconds) and
+   the values it remembers. A request at a route reads its session and counts all its limits there (door), with no
+   message. The fiber holds the slots of the password hashes, the last lines of the log, the events already written,
+   the failed sign-ins of the last minutes, and the clock of a test. Each process of cesia run --workers has its own: a
+   limit of 600 a minute is then 600 a minute in each worker. *)
 use std/dict
 use std/fiber
 use std/list
@@ -13,35 +14,43 @@ use std/sys
 use std/value
 
 defn State(slots = 2, waiting = 64, kept = 500, keys = 100000, clock = missing, rates = missing)
-  (** A new state, an Ok of the channel to ask it: slots, the password hashes that run at once (each takes 64 MiB);
-      waiting, the hashes that wait at most for each slot, past which a sign-in gets a 503; kept, the lines of the log
-      it keeps; keys, the most keys of the rate limits it holds, past which the oldest are dropped, and the most
-      sessions it keeps; clock, the time of a test, which Advance moves, else the time of the system; rates, the limits
+  (** A new state, in an Ok: slots, the password hashes that run at once (each takes 64 MiB); waiting, the hashes that
+      wait at most for each slot, past which a sign-in gets a 503; kept, the lines of the log it keeps; keys, the most
+      keys of the rate limits it holds, and the most sessions and values it keeps, past which those whose time passed
+      go, then those due soonest (fiber.Table); clock, the time of a test, which Advance moves, else the time of the system; rates, the limits
       of an address, a user and a tenant that door counts, as {Ip, User, Tenant} of rateOf (600, 1,200 and 6,000 a
       minute unless given). *)
   ch = fiber.Channel(size = 4096)
   r = if value.IsMissing(rates) {Ip: rateOf(600, 60, 150), User: rateOf(1200, 60, 300), Tenant: rateOf(6000, 60, 1500)} else rates end
-  fiber.Spawn(() -> own(ch, slots, slots * waiting, kept, keys, clock, r))
-  result.Ok(ch)
+  st = {Ch: ch, Clock: missing, Rates: r, Nobody: limitsOf(missing, r), Limits: fiber.Table(keys), Sessions: fiber.Table(keys), Memo: fiber.Table(keys)}
+  if not value.IsMissing(clock)
+    st.Clock = fiber.Table(1)
+    fiber.Remember("now", clock, 1e300, st.Clock)
+  end
+  fiber.Spawn(() -> own(ch, slots, slots * waiting, kept, keys, st))
+  result.Ok(st)
 end
 
-(* A rate of door: per requests every period seconds and burst at once, as Limit, its gap and the tolerance of GCRA
-   computed once: a request passes when its key's next due time is no later than now plus Tol. *)
-rateOf(per, period, burst) = {Gap: period / per, Tol: period / per * burst - period / per}
+(** A rate of door: per requests every period seconds and burst at once, as Limit and fiber.Admit take it. *)
+rateOf(per, period, burst) = {Per: per, Period: period, Burst: burst}
 
 defn ask(state, message)
-  (** The answer of the state to a message. *)
+  (** The answer of the state's fiber to a message. *)
   reply = fiber.Channel(size = 1)
   message.Reply = reply
-  fiber.Send(message, state)
+  fiber.Send(message, state.Ch)
   fiber.Receive(reply).Value
 end
 
-(** The time of the state: the system's, or the test's clock. *)
-Now(state) = ask(state, {Op: "now"})
+(** The time of the state: the system's, or the test's clock, kept in a table of one key. *)
+Now(state) = if value.IsMissing(state.Clock) sys.Now() else fiber.Recall("now", 0, state.Clock) end
 
-(** Moves the clock of a test forward by seconds. *)
-Advance(seconds, state) = ask(state, {Op: "advance", By: seconds})
+defn Advance(seconds, state)
+  (** Moves the clock of a test forward by seconds. *)
+  t = Now(state) + seconds
+  fiber.Remember("now", t, 1e300, state.Clock)
+  t
+end
 
 (** A rate limit of the state: a key, as "ip:203.0.113.7", that may make per requests every period seconds, and burst
     at once. GCRA (the generic cell rate algorithm of ATM networks, ITU-T I.371) keeps one number a key, the time its
@@ -52,28 +61,28 @@ Limit(key, per, period, burst) = {Key: key, Per: per, Period: period, Burst: bur
 
 (** Do requests of these limits pass now, all of them: an answer {Ok, Retry, Key}, Retry the seconds to wait when one
     doesn't, Key the one that refused. A refused request counts in none of them. *)
-Allow(limits, state) = ask(state, {Op: "limit", Limits: limits})
+Allow(limits, state) = fiber.Admit([l.Key for l in limits], limits, Now(state), state.Limits)
 
 (** Takes a slot of the password hashes: true once one is free, false when too many wait already. *)
 Slot(state) = ask(state, {Op: "slot"})
 
 (** Gives back a slot of the password hashes. *)
-Free(state) = fiber.Send({Op: "free"}, state)
+Free(state) = fiber.Send({Op: "free"}, state.Ch)
 
 (** Takes one of most places of a name, as the uploads that run at once: true when one was free, false else. *)
 Take(name, most, state) = ask(state, {Op: "take", Name: name, Most: most})
 
 (** Gives back a place of a name that Take gave. *)
-Give(name, state) = fiber.Send({Op: "give", Name: name}, state)
+Give(name, state) = fiber.Send({Op: "give", Name: name}, state.Ch)
 
 (** Keeps a mail of a test, sent by the transport test: of mail (the box holds the last 1,000). *)
-KeepMail(m, state) = fiber.Send({Op: "mail", Mail: m}, state)
+KeepMail(m, state) = fiber.Send({Op: "mail", Mail: m}, state.Ch)
 
 (** The mails of a test, the oldest first. *)
 Mails(state) = ask(state, {Op: "mails"})
 
 (** Keeps a line of the log, a map. *)
-Keep(line, state) = fiber.Send({Op: "line", Line: line}, state)
+Keep(line, state) = fiber.Send({Op: "line", Line: line}, state.Ch)
 
 (** The lines the state keeps, the oldest first. *)
 Lines(state) = ask(state, {Op: "lines"})
@@ -84,41 +93,75 @@ Fresh(key, seconds, state) = ask(state, {Op: "fresh", Key: key, Every: seconds})
 
 (** Keeps a value under a key until a time (in seconds since 1970, the state's clock), for what a process reads often
     and changes seldom: the keys of an OpenID provider, the table of the feature flags. The state holds as many of
-    them as the keys of its limits at most; past that, those whose time passed go, and if it is still full, all of
-    them: each is read again at its next use. *)
-Remember(key, v, until, state) = fiber.Send({Op: "remember", Key: key, Value: v, Until: until}, state)
+    them as the keys of its limits at most; past that, those whose time passed go, then those due soonest: each is read
+    again at its next use. *)
+Remember(key, v, until, state) = fiber.Remember(key, v, until, state.Memo)
 
 (** The value kept under a key, or missing when there is none or its time passed. *)
-Recall(key, state) = ask(state, {Op: "recall", Key: key})
+Recall(key, state) = fiber.Recall(key, Now(state), state.Memo)
 
 (** Forgets the value kept under a key: the next Recall gives missing. *)
-Forget(key, state) = fiber.Send({Op: "forget-one", Key: key}, state)
+Forget(key, state) = fiber.Forget(key, state.Memo)
 
 (** Counts a failed sign-in in the failures of the last minute. *)
-Failed(state) = fiber.Send({Op: "failed"}, state)
+Failed(state) = fiber.Send({Op: "failed"}, state.Ch)
 
 (** The failed sign-ins of the last minute (between 60 and 120 seconds of them, by whole minutes). *)
 Failures(state) = ask(state, {Op: "failures"})
 
 defn door(ip, state, session, store, user, endpoint, gen)
-  (** The one round trip of a request at its route: {Ok, Retry, Key, User, Hit, Gen, Now}. session, the key of its
-      session (a hash of its cookie), is looked up among those the state keeps: when it is there and fresh, Hit is
-      true and User the user it names (missing for a cookie that names nobody); when it is not, Hit is false, Gen the
-      generation of the kept sessions, and nothing is counted: the request reads its session, and comes back with it,
-      store = {User, Until}, kept until Until if no session was forgotten since Gen. Then the limits of its address,
-      of its user (of its key, for a program's: user.Key, at user.Rate) and his tenant (user, without a session to
-      look up), and of its endpoint ({Name, Gap, Tol}), all of
-      them or none, as Allow counts them. Now is the time of the state, a test's clock too. The arguments that don't
-      apply are missing, gen 0. *)
-  reply = fiber.Channel(size = 1)
-  fiber.Send({Op: "door", Ip: ip, Session: session, Store: store, User: user, Endpoint: endpoint, Gen: gen, Reply: reply}, state)
-  fiber.Receive(reply).Value
+  (** What a request at its route asks the state, with no message: {Ok, Retry, Key, User, Hit, Gen, Now}. session, the
+      key of its session (a hash of its cookie), is looked up among those the state keeps: when it is there and fresh,
+      Hit is true and User the user it names (missing for a cookie that names nobody); when it is not, Hit is false, Gen
+      the epoch of the kept sessions, and nothing is counted: the request reads its session, and comes back with it,
+      store = {User, Until}, kept until Until if no session was forgotten since Gen. Then the limits of its address, of
+      its user (of its key, for a program's: user.Key, at user.Rate) and his tenant (user, without a session to look
+      up), and of its endpoint ({Name, Per, Period, Burst}), all of them or none, as Allow counts them. Now is the time
+      of the state, a test's clock too. The arguments that don't apply are missing, gen 0. *)
+  now = Now(state)
+  c = missing
+  if value.IsMissing(session)
+    c = if value.IsMissing(user) state.Nobody else limitsOf(user, state.Rates) end
+  else if value.IsMissing(store)
+    c = fiber.Recall(session, now, state.Sessions)
+    if value.IsMissing(c)
+      return {Ok: true, Hit: false, Gen: fiber.Epoch(state.Sessions), Now: now}
+    end
+  else
+    c = limitsOf(store.User, state.Rates)
+    fiber.Remember(session, c, store.Until, state.Sessions, epoch = gen)
+  end
+  keys = list.Concat(["ip:$ip"], c.Keys)
+  rates = c.Rates
+  if not value.IsMissing(endpoint)
+    keys = list.Append("e:$(endpoint.Name) $(if value.IsMissing(c.User) ip else c.User.Id end)", keys)
+    rates = list.Append(endpoint, rates)
+  end
+  a = fiber.Admit(keys, rates, now, state.Limits)
+  {Ok: a.Ok, Retry: a.Retry, Key: a.Key, User: c.User, Hit: true, Gen: gen, Now: now}
+end
+
+defn limitsOf(user, rates)
+  (** A user and his limits past those of an address, made once for each session the state keeps: {User, Keys, Rates},
+      Rates beginning with the address's. *)
+  if value.IsMissing(user)
+    return {User: missing, Keys: [], Rates: [rates.Ip]}
+  end
+  program = dict.Get("Key", user)
+  tenant = dict.Get("Tenant", user)
+  ku = if value.IsMissing(program) "u:$(user.Id)" else "k:$program" end
+  ru = if value.IsMissing(program) rates.User else user.Rate end
+  if value.IsMissing(tenant)
+    {User: user, Keys: [ku], Rates: [rates.Ip, ru]}
+  else
+    {User: user, Keys: [ku, "t:$tenant"], Rates: [rates.Ip, ru, rates.Tenant]}
+  end
 end
 
 (** Keeps the line of a request, as Keep, its fields given one by one: its time, number, method, route, status, ms,
     address and user (or missing). *)
 kept(at, id, method, route, status, ms, ip, user, state) = fiber.Send({Op: "request", At: at, Id: id, Method: method, Route: route, Status: status,
-  Ms: ms, Ip: ip, User: user}, state)
+  Ms: ms, Ip: ip, User: user}, state.Ch)
 
 (** The lines kept since the line numbered after (0: all that are kept), the oldest first: {Seq, Lines}, Seq the number
     of the last line kept, to give as after the next time, so that a live tail of the log reads each line once. *)
@@ -126,17 +169,14 @@ Tail(after, state) = ask(state, {Op: "tail", After: after})
 
 (** Forgets every session the state keeps: a sign-out, a role changed, a user disabled are then read again from the
     database at their next request. *)
-forget(state) = fiber.Send({Op: "forget"}, state)
+forget(state) = fiber.Empty(state.Sessions)
 
 (** Forgets every session the state of this process keeps, as forget: what a handler calls when it ends sessions
     without a signed-in user, as a new password set by the link of a mail. *)
 ForgetSessions(state) = forget(state)
 
-defn own(ch, slots, most, kept, keys, clock, rates)
+defn own(ch, slots, most, kept, keys, st)
   (** The fiber of the state: it answers its messages one after the other, so no two requests change it at once. *)
-  due = dict.Dict()
-  sessions = dict.Dict()
-  gen = 0
   free = slots
   queue = []
   lines = list.Fill(missing, kept)
@@ -145,10 +185,8 @@ defn own(ch, slots, most, kept, keys, clock, rates)
   seen = dict.Dict()
   minute = 0
   fails = [0, 0]
-  served = 0
   box = []
   places = dict.Dict()
-  memo = dict.Dict()
   while true
     got = fiber.Receive(ch)
     if result.IsErr(got)
@@ -156,139 +194,8 @@ defn own(ch, slots, most, kept, keys, clock, rates)
     end
     m = got.Value
     op = m.Op
-    now = if value.IsMissing(clock) sys.Now() else clock end
-    if op == "door"
-      user = m.User
-      hit = true
-      if not value.IsMissing(m.Session)
-        if value.IsMissing(m.Store)
-          c = dict.Get(m.Session, sessions)
-          if value.IsMissing(c) or now >= c.Until
-            hit = false
-          else
-            user = c.User
-          end
-        else
-          user = m.Store.User
-          if m.Gen == gen
-            if value.Len(sessions) >= keys
-              (* the ended ones go; if three quarters are still fresh, all of them, so that the next pruning waits
-                 for a quarter of keys more, and none comes at every request *)
-              sessions = dict.Dict([p for p in dict.Pairs(sessions) if p.Value.Until > now])
-              if 4 * value.Len(sessions) > 3 * keys
-                sessions = dict.Dict()
-              end
-            end
-            sessions[m.Session] = m.Store
-          end
-        end
-      end
-      if not hit
-        fiber.Send({Ok: true, Hit: false, Gen: gen, Now: now}, m.Reply)
-      else if value.IsMissing(user) and value.IsMissing(m.Endpoint)
-        (* the request of nobody: the limit of its address alone *)
-        k = "ip:$(m.Ip)"
-        t = dict.GetOr(k, now, due)
-        if t < now
-          t = now
-        end
-        if t - now > rates.Ip.Tol
-          fiber.Send({Ok: false, Retry: math.Ceil(t - now - rates.Ip.Tol), Key: k, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
-        else
-          due[k] = t + rates.Ip.Gap
-          served += 1
-          if math.Mod(served, 10000) == 0 or value.Len(due) > keys
-            due = pruned(due, now, keys)
-          end
-          fiber.Send({Ok: true, Retry: 0, Key: missing, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
-        end
-      else if value.IsMissing(m.Endpoint)
-        (* the request of a user: the limits of his address, of himself and of his tenant, all or none *)
-        k1 = "ip:$(m.Ip)"
-        program = dict.Get("Key", user)
-        k2 = if value.IsMissing(program) "u:$(user.Id)" else "k:$program" end
-        r2 = if value.IsMissing(program) rates.User else user.Rate end
-        tenant = dict.Get("Tenant", user)
-        k3 = if value.IsMissing(tenant) missing else "t:$tenant" end
-        t1 = dict.GetOr(k1, now, due)
-        t1 = if t1 < now now else t1 end
-        t2 = dict.GetOr(k2, now, due)
-        t2 = if t2 < now now else t2 end
-        t3 = if value.IsMissing(k3) now else dict.GetOr(k3, now, due) end
-        t3 = if t3 < now now else t3 end
-        late = t1 - now - rates.Ip.Tol
-        refused = if late > 0 k1 else missing end
-        if value.IsMissing(refused) and t2 - now - r2.Tol > 0
-          late = t2 - now - r2.Tol
-          refused = k2
-        end
-        if value.IsMissing(refused) and not value.IsMissing(k3) and t3 - now - rates.Tenant.Tol > 0
-          late = t3 - now - rates.Tenant.Tol
-          refused = k3
-        end
-        if value.IsMissing(refused)
-          due[k1] = t1 + rates.Ip.Gap
-          due[k2] = t2 + r2.Gap
-          if not value.IsMissing(k3)
-            due[k3] = t3 + rates.Tenant.Gap
-          end
-          served += 1
-          if math.Mod(served, 10000) == 0 or value.Len(due) > keys
-            due = pruned(due, now, keys)
-          end
-          fiber.Send({Ok: true, Retry: 0, Key: missing, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
-        else
-          fiber.Send({Ok: false, Retry: math.Ceil(late), Key: refused, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
-        end
-      else
-        ks = ["ip:$(m.Ip)"]
-        rs = [rates.Ip]
-        if not value.IsMissing(user)
-          program = dict.Get("Key", user)
-          ku = if value.IsMissing(program) "u:$(user.Id)" else "k:$program" end
-          ru = if value.IsMissing(program) rates.User else user.Rate end
-          if value.IsMissing(dict.Get("Tenant", user))
-            ks = ["ip:$(m.Ip)", ku]
-            rs = [rates.Ip, ru]
-          else
-            ks = ["ip:$(m.Ip)", ku, "t:$(user.Tenant)"]
-            rs = [rates.Ip, ru, rates.Tenant]
-          end
-        end
-        e = m.Endpoint
-        if not value.IsMissing(e)
-          ks = list.Append("e:$(e.Name) $(if value.IsMissing(user) m.Ip else user.Id end)", ks)
-          rs = list.Append(e, rs)
-        end
-        ok = true
-        retry = 0
-        refused = missing
-        n = value.Len(ks)
-        times = list.Fill(0, n)
-        for k in 1..n
-          t = dict.GetOr(ks[k], now, due)
-          if t < now
-            t = now
-          end
-          if ok and t - now > rs[k].Tol
-            ok = false
-            retry = math.Ceil(t - now - rs[k].Tol)
-            refused = ks[k]
-          end
-          times[k] = t + rs[k].Gap
-        end
-        if ok
-          for k in 1..n
-            due[ks[k]] = times[k]
-          end
-          served += 1
-          if math.Mod(served, 10000) == 0 or value.Len(due) > keys
-            due = pruned(due, now, keys)
-          end
-        end
-        fiber.Send({Ok: ok, Retry: retry, Key: refused, User: user, Hit: true, Gen: gen, Now: now}, m.Reply)
-      end
-    else if op == "request"
+    now = Now(st)
+    if op == "request"
       at = math.Mod(at, kept) + 1
       lines[at] = m
       seq += 1
@@ -299,30 +206,6 @@ defn own(ch, slots, most, kept, keys, clock, rates)
     else if op == "tail"
       n = list.Min([list.Max([seq - m.After, 0]), kept, seq])
       fiber.Send({Seq: seq, Lines: [shown(lines[math.Mod(at - n + k - 1 + kept, kept) + 1]) for k in 1..n]}, m.Reply)
-    else if op == "forget"
-      sessions = dict.Dict()
-      gen += 1
-    else if op == "limit"
-      out = {Ok: true, Retry: 0, Key: missing}
-      times = []
-      for l in m.Limits
-        gap = l.Period / l.Per
-        t = list.Max([dict.GetOr(l.Key, now, due), now])
-        if t - now > gap * l.Burst - gap
-          out = {Ok: false, Retry: math.Ceil(t - now - gap * l.Burst + gap), Key: l.Key}
-        end
-        times = list.Append(t + gap, times)
-      end
-      if out.Ok
-        for k in 1..value.Len(m.Limits)
-          due[m.Limits[k].Key] = times[k]
-        end
-        served += 1
-        if math.Mod(served, 10000) == 0 or value.Len(due) > keys
-          due = pruned(due, now, keys)
-        end
-      end
-      fiber.Send(out, m.Reply)
     else if op == "slot"
       if free > 0
         free -= 1
@@ -374,24 +257,6 @@ defn own(ch, slots, most, kept, keys, clock, rates)
       box = list.Append(m.Mail, if value.Len(box) >= 1000 list.Skip(1, box) else box end)
     else if op == "mails"
       fiber.Send(box, m.Reply)
-    else if op == "recall"
-      kept1 = dict.Get(m.Key, memo)
-      fiber.Send(if value.IsMissing(kept1) or now >= kept1.Until missing else kept1.Value end, m.Reply)
-    else if op == "remember"
-      if value.Len(memo) >= keys and not dict.Has(m.Key, memo)
-        memo = dict.Dict([p for p in dict.Pairs(memo) if p.Value.Until > now])
-        if value.Len(memo) >= keys
-          memo = dict.Dict()
-        end
-      end
-      memo[m.Key] = {Value: m.Value, Until: m.Until}
-    else if op == "forget-one"
-      memo = dict.Drop(m.Key, memo)
-    else if op == "now"
-      fiber.Send(now, m.Reply)
-    else if op == "advance"
-      clock = now + m.By
-      fiber.Send(clock, m.Reply)
     end
   end
 end
@@ -406,22 +271,4 @@ defn shown(x)
     fields.User = x.User
   end
   {At: x.At, Level: if x.Status >= 500 "error" else "info" end, Message: "request", Fields: fields}
-end
-
-defn pruned(due, now, keys)
-  (** The limits whose next request is still due later: a key past its time is as a key never seen. Past keys of them,
-      the ones due soonest go too, down to three quarters of keys: the next pruning then waits for a quarter of keys
-      more, so that a flood of new addresses never makes one at every request. *)
-  kept = dict.Dict()
-  for p in dict.Pairs(due)
-    if p.Value > now
-      kept[p.Key] = p.Value
-    end
-  end
-  if value.Len(kept) <= keys
-    return kept
-  end
-  pairs = dict.Pairs(kept)
-  order = list.Order([p.Value for p in pairs])
-  dict.Dict([pairs[k] for k in list.Skip(value.Len(pairs) - math.Floor(3 * keys / 4), order)])
 end

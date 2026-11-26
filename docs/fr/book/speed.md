@@ -105,6 +105,52 @@ qu'elle attend l'état ; et le collector (le ramasse-miettes, qui libère la mé
 huitième du temps du serveur dans un profilage par échantillons (où l'on note à intervalles réguliers ce que fait le
 programme), en déplace et en marque davantage.
 
+## L'état sans message, dans les tables de Cesia
+
+L'état de Centauri était une fiber, que chaque requête interrogeait par un message : un aller-retour de deux
+changements de fiber pour sa session et ses limites. Ses limites, les sessions qu'il garde et les valeurs qu'il retient
+vivent maintenant dans des tables de `std/fiber` (la branche `natives` de Cesia), qu'une requête lit et compte sur
+place : `fiber.Recall` pour sa session, `fiber.Admit` pour ses limites, GCRA comme avant, toutes ou aucune. Les mêmes
+limites, les mêmes bornes (au-delà de `keys`, celles dont l'heure est passée partent, puis celles qui échoient le plus
+tôt), et une session lue dans la base avant une déconnexion reste dehors (`isSessionReadBeforeAForgetKeptOut`) ; une
+session que l'état garde porte les limites de son utilisateur, faites une fois. La fiber garde le reste : les dernières
+lignes du log, les places des hash, les événements déjà écrits. Le même binaire de Cesia écrit aussi `encode.Base64` en
+natif, et fait tourner les appels lents des hash sur un pool de domains.
+
+`bench/micro.ce`, 21 exécutions alternées entre le main de Centauri (92151da sur le main de Cesia) et ceci (sur la
+branche `natives` de Cesia), le 2026-11-26, charge de 3,6 à 6,4, médianes en µs avec leurs [min ; max] :
+
+| requête | main | tables |
+|---|---:|---:|
+| Centauri, public, un JSON d'un champ | 24,94 [22,60 ; 48,83] | 22,45 [20,02 ; 38,97] |
+| Centauri, connecté, une chose par son id (`app.Own`) | 44,76 [41,05 ; 100,77] | 37,98 [35,10 ; 59,04] |
+| Centauri, connecté, une page de 20 choses | 157,79 [143,75 ; 376,58] | 142,07 [126,65 ; 305,04] |
+| std/http, un JSON d'un champ | 3,59 [3,34 ; 108,97] | 3,52 [3,28 ; 44,69] |
+
+La porte seule, celle de l'état de main à côté de la nouvelle dans un même programme, 20 000 appels par exécution, 21
+exécutions (charge de 6,4 à 6,9) : publique 3,30 µs [1,94 ; 16,25] puis 2,04 [1,22 ; 4,04] ; connectée 4,42 [3,11 ;
+12,98] puis 2,61 [1,60 ; 11,94]. Dans une requête, cela vaut deux ou trois fois plus, car les changements de fiber vident
+aussi les caches de l'interpréteur : 6,8 µs d'une requête connectée. Une page gagne aussi le Base64 de son curseur,
+26,8 µs [23,8 ; 51,8] par la boucle de Cesia, 2,1 [1,8 ; 4,9] en natif. Une connexion par mot de passe (Argon2id, 64 MiB,
+10 par exécution, 21 exécutions, charge de 7,0 à 7,6) prend 86,3 ms [80,7 ; 163,1] au lieu de 93,0 [81,7 ; 124,1] : le
+hash en est le tout. Un démarrage jusqu'au premier 200 de `bench/serve.ce`, 51,8 ms [49,6 ; 100,9] au lieu de 59,2
+[55,1 ; 134,3] (charge de 2,4 à 4,3), 31 MB au repos au lieu de 33 : les intervalles se chevauchent.
+
+Sous charge, /hello comme plus haut (256 connexions gardées, 4 threads ; les serveurs sur les cœurs 0, 1, 4, 5, la
+charge sur les 4 autres ; 2 s par mesure après 1 s de chauffe, les quatre serveurs à tour de rôle, 21 tours ; charge de
+6,1 à 11,2, d'autres travaux tournaient) :
+
+| serveur | requêtes/s | p99 | mémoire |
+|---|---:|---:|---:|
+| std/http | 23 124 [12 186 ; 30 214] | 19,5 ms | 44 MB |
+| Centauri, main | 10 661 [3 655 ; 13 597] | 41,1 ms | 58 MB |
+| Centauri, tables | 11 327 [1 565 ; 12 698] | 34,8 ms | 47 MB |
+| Go 1.26 net/http | 61 819 [17 369 ; 90 961] | 19,8 ms | 21 MB |
+
+Aucune requête n'a échoué. Les intervalles se chevauchent : sous charge, ce qu'une requête gagne dans le programme est
+petit à côté de sa part du collector. Ce que les tables y changent, c'est la mémoire, 11 MB de moins : sans doute les
+messages et les réponses des 256 requêtes en vol, qui n'attendent plus dans le channel de l'état (pas mesuré à part).
+
 ## Le premier mois : ce qu'ajoute L2, et ce que coûtent ses morceaux
 
 L2 ne doit pas rendre plus lente une requête de L1. Mesuré comme L1 l'a été : `bench/micro.ce` dans le programme,
@@ -315,6 +361,7 @@ sont dedans.
   connecte soixante fois plus vite qu'un mot de passe.
 - Les pages d'administration en français ne coûtent rien à une requête (la porte d'une app en anglais est le code
   qu'elle était) et moins de 0,3 ms de textes dits à une page ; leur module a grandi de 16,5 Ko en brotli.
-- Ce qui irait plus loin demande Cesia : une table du processus partagée sans fiber, pour les limites et les sessions
-  (l'aller-retour, 6 µs des 18), et `encode.Base64` en native (une fonction intégrée à l'interpréteur, pas écrite en
-  Cesia ; les 24 µs d'un curseur). Les deux vont dans son cœur, qui est à son plafond de lignes.
+- Les tables de Cesia ont retiré de chaque requête l'aller-retour vers l'état (une requête connectée 6,8 µs plus vite),
+  et son Base64 natif (une fonction intégrée à l'interpréteur, pas écrite en Cesia) les 25 µs d'une page
+  ([L'état sans message](#létat-sans-message-dans-les-tables-de-cesia)). Ce qui reste de la porte de Centauri est du
+  Cesia interprété : la ligne du log, la métrique, la forme de la sortie.

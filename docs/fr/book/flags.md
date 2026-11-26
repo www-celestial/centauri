@@ -135,8 +135,8 @@ nomme aucun), une part est éteinte.
 
 Ce qui est réglé, ce sont des faits dans Cepheus (`centauri_flag`) : chaque processus de chaque serveur le voit donc.
 Chaque processus les lit dans sa mémoire au plus toutes les `FlagsRefresh` secondes (1 par défaut ; 0 les lit à chaque
-question), et ses propres changements tout de suite. Demander un flag coûte un aller-retour vers l'état du processus,
-pas une lecture de la base de données. Un changement fait sur un serveur est vu sur un autre en moins de
+question), et ses propres changements tout de suite. Demander un flag coûte une lecture d'une table du processus,
+celles de std/fiber, pas une lecture de la base de données. Un changement fait sur un serveur est vu sur un autre en moins de
 `FlagsRefresh` secondes, sans redémarrage (`isChangeSeenByAnotherProcess`).
 
 ## 5. La page demande

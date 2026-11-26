@@ -103,8 +103,8 @@ mesure du temps pourrait apprendre.
 
 Chaque processus garde ensuite ce qu'il a lu, pendant `APP_SESSION_CACHE` secondes (2 par défaut, jusqu'à 60 ; 0 ne
 garde rien), dans l'état qui compte aussi ses limites. Les requêtes suivantes de cette session, pendant ces secondes, ne
-lisent rien dans la base, et leur session et toutes leurs limites coûtent un seul aller-retour vers cet état
-([Vitesse](speed.md)). La clé sous laquelle c'est gardé est le BLAKE2b du cookie entier : une recherche par cette clé
+lisent rien dans la base, et leur session et toutes leurs limites sont lues et comptées dans des tables du processus,
+celles de std/fiber, sans message à son état ([Vitesse](speed.md)). La clé sous laquelle c'est gardé est le BLAKE2b du cookie entier : une recherche par cette clé
 ne dit donc rien du secret par son temps. Un cookie fait à la main, ou un id volé avec un autre secret, est un cookie
 jamais vu : il est lu dans la base comme avant, et refusé (`isForgedCookieNobodyBesideAKeptOne`). Un cookie qui ne
 nomme personne est gardé comme « personne » : un navigateur qui continue d'envoyer une session terminée ne coûte pas

@@ -79,7 +79,8 @@ search by the secret's value, which a measure of time could learn.
 
 Each process then keeps what it read, for `APP_SESSION_CACHE` seconds (2 by default, up to 60; 0 keeps nothing), in
 the state that also counts its limits: the next requests of that session in those seconds read nothing from the
-database, and their session and all their limits take one round trip to that state ([Speed](speed.md)). What it is
+database, and their session and all their limits are read and counted in tables of the process, std/fiber's, with no
+message to its state ([Speed](speed.md)). What it is
 kept under is the BLAKE2b of the whole cookie: a lookup by it tells nothing of the secret by its time, and a cookie
 made by hand, or a stolen id with another secret, is a cookie never seen, read from the database as before and
 refused (`isForgedCookieNobodyBesideAKeptOne`). A cookie that names nobody is kept as nobody, so a browser that keeps

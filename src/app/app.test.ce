@@ -211,6 +211,34 @@ defn isFloodOfSessionsBounded()
   not first.Hit and last.Hit and last.User.Id == 5
 end
 
+defn isSessionAtItsEndReadAgain()
+  (* a session kept until a time is read again from the database at that time: never trusted past it *)
+  st = State(clock = 1794528000)?
+  door("1.2.3.4", st, "s1", {User: {Id: 1, Roles: []}, Until: 1794528002}, missing, missing, 0)
+  before = door("1.2.3.4", st, "s1", missing, missing, missing, 0)
+  Advance(2, st)
+  at = door("1.2.3.4", st, "s1", missing, missing, missing, 0)
+  before.Hit and before.User.Id == 1 and not at.Hit
+end
+
+defn isSessionReadBeforeAForgetKeptOut()
+  (* a session read from the database before a sign-out forgot them all comes back after it: it is not kept *)
+  st = State(clock = 1794528000)?
+  miss = door("1.2.3.4", st, "s1", missing, missing, missing, 0)
+  ForgetSessions(st)
+  door("1.2.3.4", st, "s1", {User: {Id: 1, Roles: []}, Until: 1794528002}, missing, missing, miss.Gen)
+  again = door("1.2.3.4", st, "s1", missing, missing, missing, 0)
+  not miss.Hit and not again.Hit
+end
+
+defn isForgedSessionKeyNobody()
+  (* the key of a session is a whole text: one byte changed, more or less, finds nothing kept *)
+  st = State(clock = 1794528000)?
+  door("1.2.3.4", st, "5f2a9c", {User: {Id: 1, Roles: []}, Until: 1794528060}, missing, missing, 0)
+  forged = [door("1.2.3.4", st, k, missing, missing, missing, 0) for k in ["5f2a9d", "5f2a9", "5f2a9c0", "", "5F2A9C"]]
+  list.All([not d.Hit for d in forged]) and door("1.2.3.4", st, "5f2a9c", missing, missing, missing, 0).Hit
+end
+
 defn isNotFoundAProblem()
   a = app()?
   out = ask(a, "GET", "/nowhere")
