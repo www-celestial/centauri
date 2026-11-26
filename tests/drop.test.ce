@@ -328,3 +328,24 @@ defn isKeyLeftRunningLetGoAfterItsLease()
   taken = b.Raw("POST", "/notes", body = json.Text({Text: "milk"}), headers = [{Name: "content-type", Value: "application/json"}, {Name: "idempotency-key", Value: "k-run"}])
   first.Status == 201 and stuck.Status == 409 and taken.Status == 201
 end
+
+defn isUploadLeftCutForgotten()
+  (** An upload cut that no client goes on with: its whole parts are kept IdempotencyTime, then the keeper deletes them
+      with its record. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  ana = signUp(one.Port, "ana@example.com")
+  c = net.Connect("127.0.0.1", one.Port)!
+  net.Write(c, "POST /scans?name=left.pdf HTTP/1.1\r\nHost: localhost:$(one.Port)\r\nCookie: $ana\r\nContent-Type: application/pdf\r\nIdempotency-Key: k-left\r\nUpload-Length: 500000\r\nContent-Length: 500000\r\n\r\n")!
+  net.Write(c, text.ByteSlice(1, 200000, pdf(500000)))!
+  sys.Sleep(0.5)
+  net.Close(c)
+  sys.Sleep(0.5)
+  held = cepheus.Find(2, (u, h) -> {Where: [[u, app.Uploading.Held, h]], Give: {H: h}}, db)!
+  later = one.Env
+  later.Now = () -> sys.Now() + 86401
+  app.ForgetKeys(later)!
+  after = cepheus.Find(2, (u, h) -> {Where: [[u, app.Uploading.Held, h]], Give: {H: h}}, db)!
+  parts = cepheus.Find(2, (p, b) -> {Where: [[p, app.Bytes.Bytes, b]], Give: {P: p}}, db)!
+  value.Len(held) == 1 and held[1].H == 196608 and value.Len(after) == 0 and value.Len(parts) == 0
+end

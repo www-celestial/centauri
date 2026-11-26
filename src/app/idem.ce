@@ -116,7 +116,8 @@ defn settled(claim, out, env)
 end
 
 defn ForgetKeys(env)
-  (** The keys older than IdempotencyTime forgotten, 500 a round: an Ok of how many. *)
+  (** The keys older than IdempotencyTime forgotten, 500 a round, and the uploads cut short that no client went on
+      with in that time, 100 a round, their parts deleted: an Ok of how many keys. *)
   old = env.Now() - env.Settings.IdempotencyTime
   rows = cepheus.Find(2, (o, a) -> {Where: [[o, Once.At, a], cepheus.Below(a, old)], Give: {Id: o}, Limit: 500}, env.Db)?
   ops = []
@@ -125,6 +126,15 @@ defn ForgetKeys(env)
   end
   if value.Len(ops) > 0
     cepheus.Write(ops, env.Db, why = "idempotency keys forgotten")?
+  end
+  ups = cepheus.Find(2, (u, a) -> {Where: [[u, Uploading.At, a], cepheus.Below(a, old)], Give: {Id: u}, Limit: 100}, env.Db)?
+  r = {Env: env, Db: env.Db, Why: "uploads cut short forgotten"}
+  for row in ups
+    u = cepheus.Get(Uploading, row.Id, env.Db)?
+    if value.IsSome(u)
+      dropParts([text.Number(x) for x in text.Split(" ", dict.GetOr("Parts", "", u)) if x != ""], r)
+      forgetUpload({Id: row.Id}, r)
+    end
   end
   result.Ok(value.Len(rows))
 end
