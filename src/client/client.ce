@@ -40,7 +40,7 @@ defn Upload(url, bytes, type, key = missing, headers = [], tries = 30, first = 0
       waits (full jitter, first to most seconds), asks HEAD the bytes held, and sends the rest; any other answer is
       the app's word, given back.
 
-        Upload("http://127.0.0.1:1/x", "%PDF-1", "application/pdf", tries = 1) then result.IsErr() --> true *)
+        Upload("ftp://example.com/x", "%PDF-1", "application/pdf", tries = 1) then result.IsErr() --> true *)
   k = if value.IsMissing(key) newKey() else key end
   length = text.ByteLength(bytes)
   offset = 0
