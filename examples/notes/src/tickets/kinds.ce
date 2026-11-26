@@ -1,0 +1,6 @@
+(* What the database keeps of the tickets. Made by cesia do new-module tickets. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+
+(** A ticket, of its tenant: its name, a note, when it was made. *)
+Ticket = app.Kind("ticket", {Tenant: cepheus.Link(), Name: cepheus.Text(), Note: cepheus.Text(), Created: cepheus.Date()})

@@ -8,9 +8,11 @@ use std/dict
 Password = check.Secret(12, 128)
 
 (** Who is signed in, as the account endpoints give it: the user, the tenant of the session and the user's roles in it
-    (each role with the roles it includes), and Super for an administrator of the whole platform. *)
+    (each role with the roles it includes), Super for an administrator of the whole platform, and Lang, the language
+    he chose (one of the app's, the setting Langs), absent until he does: his browser's then. *)
 Account = check.Record({User: check.Id(), Email: check.Email(), Name: check.Text(0, 120), Tenant: check.Id(),
-  TenantName: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40), Super: check.Bool(), Checked: check.Bool(optional = true)})
+  TenantName: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40), Super: check.Bool(), Checked: check.Bool(optional = true),
+  Lang: check.Text(1, 35, optional = true)})
 
 (** The fields of signing up. Tenant is the name of a new tenant (multi-tenant apps; the user's name else); Invite the
     code of an invitation, to join its tenant; Proof the answer to a challenge of proof of work, when the server asks
@@ -111,6 +113,11 @@ Forgot = Post("/auth/forgot", body = check.Record({Email: check.Email()}), role 
 Reset = Post("/auth/reset", body = check.Record({Code: check.Text(1, 200), Password: Password}), out = Account, role = Public,
   about = "Sets a new password by the code of its mail, ends every session, and signs in.")
 
+(** The language of the user: one of the app's (the setting Langs), which his mails, the errors of the server and
+    the pages then speak; "" goes back to his browser's. *)
+SetLang = Put("/auth/lang", body = check.Record({Lang: check.Text(0, 35)}), out = Account, role = Signed,
+  about = "Sets the language of the user.")
+
 (** The endpoints of the accounts, in their order. *)
 Accounts = [SignUp, SignIn, SignOut, SignOutAll, Me, Sessions, EndSession, ChangePassword, Challenge, Members, Invite,
-  Join, SetRoles, RemoveMember, MyTenants, SwitchTenant, CheckEmail, SendCheck, Forgot, Reset]
+  Join, SetRoles, RemoveMember, MyTenants, SwitchTenant, CheckEmail, SendCheck, Forgot, Reset, SetLang]

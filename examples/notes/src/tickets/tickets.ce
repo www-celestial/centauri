@@ -1,0 +1,47 @@
+(** The tickets: the handlers of their endpoints, and the module an app lists in app.Of([auth.Module(), tickets.Module]).
+    Each handler writes with r.User.Tenant and reads a ticket named from outside through app.Own, which answers 404
+    for another tenant's. Made by cesia do new-module tickets. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+use src/tickets/api as e
+use std/dict
+use std/result
+
+defn shown(id, t)
+  (** A ticket as TicketOut gives it. *)
+  {Id: id, Name: t.Name, Note: dict.GetOr("Note", "", t), Created: t.Created}
+end
+
+defn add(r, x)
+  (** POST /tickets. *)
+  id = cepheus.Insert(Ticket, {Tenant: r.User.Tenant, Name: x.Name, Note: x.Note, Created: r.Now}, r.Db, by = r.User.Id, why = r.Why)?
+  shown(id, app.Own(Ticket, id, r)?)
+end
+
+(* GET /tickets: a page, the newest first. *)
+listed(r) = cepheus.Find(4, (t, n, o, c) -> {Where: [[t, Ticket.Tenant, r.User.Tenant], [t, Ticket.Name, n], [t, Ticket.Note, o], [t, Ticket.Created, c]],
+  Give: {Id: t, Name: n, Note: o, Created: c}, Sort: [cepheus.Desc(c), cepheus.Desc(t)], Limit: r.Limit, After: r.After}, r.Db)
+
+defn one(r)
+  (** GET /tickets/:id. *)
+  t = app.Own(Ticket, r.Params.id, r)?
+  shown(t.Id, t)
+end
+
+defn edit(r, x)
+  (** PUT /tickets/:id. *)
+  t = app.Own(Ticket, r.Params.id, r)?
+  cepheus.Update(Ticket, t.Id, {Name: x.Name, Note: x.Note}, r.Db, by = r.User.Id, why = r.Why)?
+  shown(t.Id, app.Own(Ticket, t.Id, r)?)
+end
+
+defn remove(r)
+  (** DELETE /tickets/:id. *)
+  t = app.Own(Ticket, r.Params.id, r)?
+  cepheus.Write(app.Gone(Ticket, t.Id, r.Db)?, r.Db, by = r.User.Id, why = r.Why)?
+  result.Ok(missing)
+end
+
+(** The module of the tickets. *)
+Module = app.Module("tickets", kinds = [Ticket], serve = [app.Serve(e.AddTicket, add), app.Serve(e.Tickets, listed), app.Serve(e.Ticket, one),
+  app.Serve(e.EditTicket, edit), app.Serve(e.DeleteTicket, remove)])

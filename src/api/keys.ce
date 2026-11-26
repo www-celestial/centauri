@@ -1,0 +1,25 @@
+(* The contracts of the keys of programs (API keys): a partner's program, a script, a job of another app calls the
+   endpoints of a tenant with Authorization: Bearer and a key, which an admin of the tenant made with some of his roles.
+   A key has the form of a session's cookie, id.secret; it is shown once, and the database keeps the hash of its
+   secret only. *)
+use std/check
+
+(** A key as its tenant's admins see it: its name, its roles, who made it, when, when it ends (if it does), when it
+    was last used (within 5 minutes). The secret is never shown again. *)
+KeyRow = check.Record({Id: check.Id(), Name: check.Text(1, 120), Roles: check.List(check.Text(1, 40), 0, 20), By: check.Id(optional = true),
+  Created: check.Time(), Ends: check.Time(optional = true), Last: check.Time(optional = true)})
+
+(** A new key of the tenant of the session, with roles that its maker has, for days days (forever when absent): its
+    id, and Key, "id.secret", the one time it is shown. A program sends it as Authorization: Bearer Key. *)
+NewKey = Post("/auth/keys", body = check.Record({Name: check.Text(1, 120), Roles: check.List(check.Text(1, 40), 1, 20),
+  Days: check.Int(1, 3650, optional = true)}), out = check.Record({Id: check.Id(), Key: check.Text(1, 200), Ends: check.Time(optional = true)}),
+  role = "admin", about = "Makes a key for a program, with some of your roles: shown once.")
+
+(** The keys of the tenant of the session, the newest first. *)
+Keys = Get("/auth/keys", out = Page(KeyRow, 50), role = "admin", about = "The keys of programs of this tenant.")
+
+(** A key revoked: its next request is refused, from any server of the app. *)
+RevokeKey = Delete("/auth/keys/:id", role = "admin", about = "Revokes a key of a program of this tenant.")
+
+(** The endpoints of the keys of programs. *)
+KeysOfTenant = [NewKey, Keys, RevokeKey]

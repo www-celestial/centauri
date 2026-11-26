@@ -1,0 +1,213 @@
+(** The generators of an app: cesia do new-module NAME writes a module that works and its test that passes, as Rails's,
+    Laravel's and Nest's generators do, so that a new part of an app starts from the shape of the others. It writes
+    src/NAME/api/api.ce (the contract, which the pages read too), src/NAME/kinds.ce (the kind of its things, each of
+    its tenant), src/NAME/NAME.ce (the handlers and the module) and tests/NAME.test.ce (made, listed, read, changed,
+    deleted, another tenant blind to them, and the tests Centauri makes of every app), and says the two lines to add
+    to the app. It never writes over a file.
+
+      Files("tickets").Value[1].Path --> "src/tickets/api/api.ce"
+      Files("Bad name") then result.IsErr() --> true *)
+use std/dict
+use std/io
+use std/list
+use std/result
+use std/sys
+use std/text
+use std/value
+
+defn isName(s)
+  (** A name of a module or a kind: small letters and digits, a letter first, 2 to 40 bytes: a package is named by its
+      folder, and a name of Cesia holds no - nor _. *)
+  bytes = text.Bytes(s)
+  if value.Len(bytes) < 2 or value.Len(bytes) > 40 or bytes[1] < 97 or bytes[1] > 122
+    return false
+  end
+  list.All([(b >= 97 and b <= 122) or (b >= 48 and b <= 57) for b in bytes])
+end
+
+defn Words(name, kind = missing)
+  (** The words of a module's code: its folder (name), its kind (kind, else name without its last s), the kind with a
+      capital (Cap), and the plural for the endpoints (Many, with a capital).
+
+        Words("tickets").Cap --> "Ticket"
+        Words("people", kind = "person").Many --> "People" *)
+  k = if value.IsMissing(kind) (if text.EndsWith("s", name) and text.ByteLength(name) > 2 text.ByteSlice(1, text.ByteLength(name) - 1, name) else name end) else kind end
+  {Name: name, Kind: k, Cap: capital(k), Many: capital(name), Package: name}
+end
+
+(* A name as Cesia writes a public one: its first letter a capital. *)
+capital(s) = "$(text.Upper(text.ByteSlice(1, 1, s)))$(text.ByteSlice(2, text.ByteLength(s), s))"
+
+defn put(template, w)
+  (** A template with its words: {name}, {kind}, {Kind}, {Many} and {package}; its lines of use are written @use, so
+      that the loader of this file takes none of them for its own. *)
+  template then text.Replace("@use ", "use ") then text.Replace("{name}", w.Name) then text.Replace("{kind}", w.Kind) then text.Replace("{Kind}", w.Cap) then text.Replace("{Many}", w.Many) then text.Replace("{package}", w.Package)
+end
+
+contract = "(** The contract of the {name}: the shapes of what comes in and goes out, and the endpoints, read by the server and by
+    the pages. Made by cesia do new-module {name}: change it as the {name} need. *)
+@use deps/www-celestial/centauri/src/api
+@use std/check
+
+(** What a page sends to make or change a {kind}. *)
+{Kind}In = check.Record({Name: check.Text(1, 200), Note: check.Text(0, 2000, optional = true, default = \"\")})
+
+(** A {kind} as the endpoints give it. *)
+{Kind}Out = check.Record({Id: check.Id(), Name: check.Text(), Note: check.Text(), Created: check.Time()})
+
+(** Makes a {kind} in the tenant of the session. *)
+Add{Kind} = api.Post(\"/{name}\", body = {Kind}In, out = {Kind}Out, role = \"member\", about = \"Makes a {kind}.\")
+
+(** The {name} of the tenant of the session, 20 a page, the newest first. *)
+{Many} = api.Get(\"/{name}\", out = api.Page({Kind}Out, 20), role = \"member\", about = \"The {name}, the newest first.\")
+
+(** A {kind} of the tenant of the session. *)
+{Kind} = api.Get(\"/{name}/:id\", out = {Kind}Out, role = \"member\", about = \"A {kind}.\")
+
+(** A {kind} changed. *)
+Edit{Kind} = api.Put(\"/{name}/:id\", body = {Kind}In, out = {Kind}Out, role = \"member\", about = \"Changes a {kind}.\")
+
+(** A {kind} deleted: its facts retracted, its history kept by Cepheus. *)
+Delete{Kind} = api.Delete(\"/{name}/:id\", role = \"member\", about = \"Deletes a {kind}.\")
+"
+
+kinds = "(* What the database keeps of the {name}. Made by cesia do new-module {name}. *)
+@use deps/www-celestial/cepheus/cesia/cepheus
+@use deps/www-celestial/centauri/src/app
+
+(** A {kind}, of its tenant: its name, a note, when it was made. *)
+{Kind} = app.Kind(\"{kind}\", {Tenant: cepheus.Link(), Name: cepheus.Text(), Note: cepheus.Text(), Created: cepheus.Date()})
+"
+
+routes = "(** The {name}: the handlers of their endpoints, and the module an app lists in app.Of([auth.Module(), {package}.Module]).
+    Each handler writes with r.User.Tenant and reads a {kind} named from outside through app.Own, which answers 404
+    for another tenant's. Made by cesia do new-module {name}. *)
+@use deps/www-celestial/cepheus/cesia/cepheus
+@use deps/www-celestial/centauri/src/app
+@use src/{name}/api as e
+@use std/dict
+@use std/result
+
+defn shown(id, t)
+  (** A {kind} as {Kind}Out gives it. *)
+  {Id: id, Name: t.Name, Note: dict.GetOr(\"Note\", \"\", t), Created: t.Created}
+end
+
+defn add(r, x)
+  (** POST /{name}. *)
+  id = cepheus.Insert({Kind}, {Tenant: r.User.Tenant, Name: x.Name, Note: x.Note, Created: r.Now}, r.Db, by = r.User.Id, why = r.Why)?
+  shown(id, app.Own({Kind}, id, r)?)
+end
+
+(* GET /{name}: a page, the newest first. *)
+listed(r) = cepheus.Find(4, (t, n, o, c) -> {Where: [[t, {Kind}.Tenant, r.User.Tenant], [t, {Kind}.Name, n], [t, {Kind}.Note, o], [t, {Kind}.Created, c]],
+  Give: {Id: t, Name: n, Note: o, Created: c}, Sort: [cepheus.Desc(c), cepheus.Desc(t)], Limit: r.Limit, After: r.After}, r.Db)
+
+defn one(r)
+  (** GET /{name}/:id. *)
+  t = app.Own({Kind}, r.Params.id, r)?
+  shown(t.Id, t)
+end
+
+defn edit(r, x)
+  (** PUT /{name}/:id. *)
+  t = app.Own({Kind}, r.Params.id, r)?
+  cepheus.Update({Kind}, t.Id, {Name: x.Name, Note: x.Note}, r.Db, by = r.User.Id, why = r.Why)?
+  shown(t.Id, app.Own({Kind}, t.Id, r)?)
+end
+
+defn remove(r)
+  (** DELETE /{name}/:id. *)
+  t = app.Own({Kind}, r.Params.id, r)?
+  cepheus.Write(app.Gone({Kind}, t.Id, r.Db)?, r.Db, by = r.User.Id, why = r.Why)?
+  result.Ok(missing)
+end
+
+(** The module of the {name}. *)
+Module = app.Module(\"{name}\", kinds = [{Kind}], serve = [app.Serve(e.Add{Kind}, add), app.Serve(e.{Many}, listed), app.Serve(e.{Kind}, one),
+  app.Serve(e.Edit{Kind}, edit), app.Serve(e.Delete{Kind}, remove)])
+"
+
+test = "(** The {name}: made, listed, read, changed and deleted by a member; another tenant sees none of them; and the three
+    tests Centauri makes of every app. Made by cesia do new-module {name}. *)
+@use deps/www-celestial/centauri/src/app
+@use deps/www-celestial/centauri/src/apptest
+@use deps/www-celestial/centauri/src/auth
+@use src/{name}
+@use src/{name}/api as e
+@use std/value
+
+App = app.Of([auth.Module(), {package}.Module], name = \"{name}\")
+
+ana = {Email: \"ana@example.com\", Password: \"correct horse 12\", Name: \"Ana\"}
+bo = {Email: \"bo@example.com\", Password: \"correct horse 34\", Name: \"Bo\"}
+
+defn isMadeListedChangedDeleted()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(e.Add{Kind}, {Name: \"First\"})?
+  a.Call(e.Edit{Kind}, {id: made.Id, Name: \"First, changed\"})?
+  seen = a.Call(e.{Kind}, {id: made.Id})?
+  page = a.Call(e.{Many})?
+  a.Call(e.Delete{Kind}, {id: made.Id})?
+  seen.Name == \"First, changed\" and value.Len(page.Rows) == 1 and a.Call(e.{Kind}, {id: made.Id}).Error.Status == 404
+end
+
+defn isOtherTenantBlind()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignUp(bo)?
+  made = a.Call(e.Add{Kind}, {Name: \"Ana's\"})?
+  b.Call(e.{Kind}, {id: made.Id}).Error.Status == 404 and value.Len(b.Call(e.{Many})?.Rows) == 0
+end
+
+isIsolated() = apptest.Isolated(App)?
+isFuzzed() = apptest.Fuzz(App, cases = 2)?
+"
+
+defn Files(name, kind = missing)
+  (** The files of a new module: an Ok of [{Path, Text}], or an Err of what is wrong with its name. *)
+  if not value.IsText(name) or not isName(name)
+    return result.Err({Kind: "gen", Message: "A module's name is 2 to 40 small letters and digits, a letter first: $name"})
+  end
+  if not value.IsMissing(kind) and not isName(kind)
+    return result.Err({Kind: "gen", Message: "A kind's name is 2 to 40 small letters and digits, a letter first: $kind"})
+  end
+  w = Words(name, kind = kind)
+  result.Ok([{Path: "src/$name/api/api.ce", Text: put(contract, w)}, {Path: "src/$name/kinds.ce", Text: put(kinds, w)},
+    {Path: "src/$name/$name.ce", Text: put(routes, w)}, {Path: "tests/$name.test.ce", Text: put(test, w)}])
+end
+
+defn Write(name, root = ".", kind = missing)
+  (** Writes the files of a new module under root, none of them over a file there: an Ok of their paths, or an Err. *)
+  files = Files(name, kind = kind)?
+  for f in files
+    if sys.Exists("$root/$(f.Path)")
+      return result.Err({Kind: "gen", Message: "$(f.Path) is there already: nothing was written."})
+    end
+  end
+  for f in files
+    parts = text.Split("/", f.Path)
+    sys.Mkdir("$root/$(text.Join("/", list.Take(value.Len(parts) - 1, parts)))")?
+    sys.Write("$root/$(f.Path)", f.Text, new = true)?
+  end
+  result.Ok([f.Path for f in files])
+end
+
+defn Main(args)
+  (** cesia do new-module NAME [KIND]: the files written, and the lines to add to the app, or what is wrong. *)
+  if value.Len(args) < 1 or value.Len(args) > 2
+    io.PrintError("cesia do new-module NAME [KIND]: a module NAME (as tickets), its kind KIND (as ticket; NAME without its last s by default).")
+    sys.Exit(2)
+  end
+  done = Write(args[1], kind = if value.Len(args) > 1 args[2] else missing end)
+  if result.IsErr(done)
+    io.PrintError("new-module: $(done.Error.Message)")
+    sys.Exit(1)
+  end
+  for p in done.Value
+    io.Print("wrote $p")
+  end
+  w = Words(args[1])
+  io.Print("Add it to the app: use src/$(args[1]), then $(w.Package).Module in app.Of([...]). Then cesia test tests/$(args[1]).test.ce.")
+end

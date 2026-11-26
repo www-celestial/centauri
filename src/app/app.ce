@@ -54,13 +54,14 @@ Kind(name, fields, secret = []) = cepheus.Kind(name, fields) then dict.Put("name
     module of package jobs runs), ends (for the who-module: ends(user, env, until), a channel that gets a value at each
     change of a user's session, so that his live screens end with it), verify (a function of env that gives an Ok, or an Err of lines that stop the start,
     as a time zone that can't be read), migrations (app.Migration, run once each, in order, before the app
-    serves), and pages, a function of env that gives the pages the module serves, {Path, Folder}, a folder of files
-    built beforehand served at a path a setting chooses (Pages), or missing for none.
+    serves), pages, a function of env that gives the pages the module serves, {Path, Folder}, a folder of files
+    built beforehand served at a path a setting chooses (Pages), or missing for none, and messages, the catalogue of
+    its words in other languages (i18n.Catalog).
 
       Module("notes", serve = []).Name --> "notes" *)
 Module(name, kinds = [], rules = [], serve = [], who = missing, settings = {}, start = missing, key = missing, jobs = [], verify = missing,
-  migrations = [], ends = missing, pages = missing) = {Name: name, Kinds: kinds, Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key,
-  Jobs: jobs, Verify: verify, Migrations: migrations, Ends: ends, Pages: pages}
+  migrations = [], ends = missing, pages = missing, messages = missing) = {Name: name, Kinds: kinds, Rules: rules, Serve: serve, Who: who, Settings: settings, Start: start, Key: key,
+  Jobs: jobs, Verify: verify, Migrations: migrations, Ends: ends, Pages: pages, Messages: messages}
 
 (** The roles of an app unless it names its own: each role with the roles it includes. owner and admin manage the
     members of their tenant (the endpoints of auth need admin); member is the role of every user who signs up. *)
@@ -92,11 +93,12 @@ defn RolesOf(roles, env)
   list.Unique(list.Flatten([dict.GetOr(r, [r], env.Expanded) for r in roles]))
 end
 
-defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name = "app", version = "0.1.0", pages = missing)
+defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name = "app", version = "0.1.0", pages = missing, messages = missing)
   (** An app: its modules, in order, then its own settings (a check.Record, or a map of names to shapes), its roles,
       the defaults of its settings (values of their types, which the environment overrides: an app that is single-
       tenant says defaults = {Tenancy: "single"}), its name and version (for OpenAPI and the admin), and pages, the
-      folder of its front (dist/), served for the paths that no route takes. An endpoint whose role is no role of the
+      folder of its front (dist/), served for the paths that no route takes, and messages, the catalogue of its words
+      in other languages (i18n.Catalog, or the map Catalog takes), which the setting Langs turns on. An endpoint whose role is no role of the
       table, nor api.Public, api.Signed or api.Super, stops here: a role written wrong never opens a route. *)
   modules = withRunner(modules)
   fields = Core
@@ -133,7 +135,7 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
   end
   bug.Assert(value.Len(jobs) == 0 or "jobs" in [m.Name for m in modules], "The modules of this app have jobs ($(text.Join(", ", [j.Name for j in jobs]))), and no module runs them: add jobs.Module() to app.Of.")
   {Name: name, Version: version, Modules: modules, Fields: fields, Defaults: defaults, Roles: roles, Kinds: kinds, Rules: rules,
-    Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served], Jobs: jobs, Lives: lives}
+    Pages: pages, Served: served, Endpoints: [b.Endpoint for b in served], Jobs: jobs, Lives: lives, Messages: messages}
 end
 
 defn withRunner(modules)
@@ -159,6 +161,7 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   keys = crypto.Open()?
   hashSlots = dict.GetOr("HashSlots", 2, s)
   rates = {Ip: ipRate(s.LimitIp), User: ipRate(s.LimitUser), Tenant: ipRate(s.LimitTenant)}
+  keyRate = ipRate(dict.GetOr("KeyLimit", 600, s))
   state = State(slots = hashSlots, kept = s.LogLines, clock = clock, rates = rates)?
   key = if value.IsMissing(dict.Get("Secret", s)) crypto.Random(32, keys) else crypto.Blake2b("centauri cursor $(s.Secret)", keys) end
   who = missing
@@ -176,6 +179,7 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   served = [rated(b) for b in list.Concat(adminOfApp(), a.Served)]
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
   guards = Guards(s.Csp, text.StartsWith("https://", s.Origin))
+  words = wordsOf(a, s)
   env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
     Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
     Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: guards,
@@ -184,7 +188,8 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version)),
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s), SessionKeyOf: sessionKey,
     WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
-    JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards)}
+    JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards),
+    KeyRate: keyRate, Catalog: words.Catalog, Langs: words.Langs, Lang: words.Lang, Translating: words.Translating}
   result.Ok(env)
 end
 

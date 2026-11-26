@@ -143,7 +143,7 @@ defn operation(e)
     op.requestBody = {required: true, content: dict.Dict([{Key: t, Value: {schema: {type: "string", format: "binary", maxLength: e.Most}}} for t in e.Types])}
     op.parameters = list.Append(param("name", "query", false, {type: "string", maxLength: 200}), op.parameters)
   end
-  op.security = if e.Role == Public [] else [{session: []}] end
+  op.security = if e.Role == Public [] else [{session: []}, {key: []}] end
   if e.Role != Public and e.Role != Signed
     op["x-role"] = e.Role
   end
@@ -166,5 +166,6 @@ defn OpenApi(endpoints, title = "API", version = "0.1.0")
     end
   end
   {openapi: "3.2.0", info: {title: title, version: version}, paths: paths,
-    components: {securitySchemes: {session: param("__Host-sid", "cookie", missing, missing) then dict.Drop("required") then dict.Drop("schema") then dict.Put("type", "apiKey")}}}
+    components: {securitySchemes: {session: param("__Host-sid", "cookie", missing, missing) then dict.Drop("required") then dict.Drop("schema") then dict.Put("type", "apiKey"),
+      key: {type: "http", scheme: "bearer", description: "A key of a program, made by an admin of a tenant: Authorization: Bearer id.secret."}}}}
 end

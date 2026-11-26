@@ -44,6 +44,7 @@ Core = {
   CallCa: check.Text(1, 1000, optional = true),
   IdempotencyKey: check.OneOf(["honored", "required", "ignored"], optional = true, default = "honored"),
   IdempotencyTime: check.Int(60, 31536000, optional = true, default = 86400),
+  Langs: check.Text(2, 400, optional = true, default = "en"),
   Csp: check.Text(1, 2000, optional = true, default = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
 }
 

@@ -1,0 +1,11 @@
+(** cesia do new-module NAME [KIND]: writes a new module of the app (src/NAME/api/api.ce, src/NAME/kinds.ce,
+    src/NAME/NAME.ce) and its test (tests/NAME.test.ce), which passes, never over a file. An app's cesia.toml runs it
+    as a task, from Centauri in deps/:
+
+      [tasks.new-module]
+      file = "deps/www-celestial/centauri/tools/new-module.ce"
+      allow = ["read", "write"] *)
+use src/gen
+use std/sys
+
+gen.Main(sys.Args)

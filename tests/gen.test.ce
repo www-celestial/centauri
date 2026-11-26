@@ -1,0 +1,26 @@
+(** The generator of modules: what it writes is the module of examples/notes/src/tickets, whose test passes there; it
+    refuses a wrong name, and never writes over a file. *)
+use src/gen
+use std/result
+use std/sys
+use std/test
+use std/value
+
+defn isTheTicketsOfTheNotes()
+  files = gen.Files("tickets")?
+  same = [f.Path for f in files if sys.Read("examples/notes/$(f.Path)") == result.Ok(f.Text)]
+  value.Len(files) == 4 and value.Len(same) == 4
+end
+
+defn isWrongNameRefused()
+  bad = ["", "a", "Tickets", "9lives", "two words", "a-b", "../x", "x/y"]
+  value.Len([n for n in bad if result.IsOk(gen.Files(n))]) == 0 and result.IsOk(gen.Files("people", kind = "person"))
+end
+
+defn isNothingWrittenOver()
+  root = test.Temp()
+  first = gen.Write("tickets", root = root)
+  sys.Write("$root/src/tickets/kinds.ce", "mine")?
+  again = gen.Write("tickets", root = root)
+  result.IsOk(first) and result.IsErr(again) and sys.Read("$root/src/tickets/kinds.ce") == result.Ok("mine")
+end

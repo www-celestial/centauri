@@ -1,0 +1,86 @@
+(** The languages of an app: the errors of the server and of the forms in the language of the account, else of the
+    browser; English alone costing nothing; an Accept-Language made to inject a header or a script, which reaches
+    nothing; the mails of the accounts in the user's language; the app's own words beside Centauri's. *)
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/i18n
+use std/bug
+use std/check
+use std/http
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = "member")
+
+App = app.Of([auth.Module(), app.Module("hello", serve = [app.Serve(Hello, r -> {Text: app.Say(r, "{N} unpaid invoices", args = {N: 2})})])], name = "words",
+  messages = {fr: {"{N} unpaid invoices": {one: "{N} facture impayée", other: "{N} factures impayées"}}})
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+lang(l) = [{Name: "accept-language", Value: l}]
+
+defn short(t, l)
+  (** A sign-up with a password too short, in a language. *)
+  t.Raw("POST", "/auth/signup", body = json.Text({Email: "ana@example.com", Password: "short", Name: "Ana"}), headers = lang(l))
+end
+
+defn isFrenchByTheBrowser()
+  t = apptest.Start(App, settings = {Langs: "en,fr"})?
+  out = short(t, "fr-FR,fr;q=0.9,en;q=0.5")
+  p = json.Parse(out.Body)?
+  bug.Assert(out.Status == 422 and http.HeaderValue("content-language", out.Headers) == "fr", "$(out.Status) $(out.Headers)")
+  bug.Assert(p.detail == "Vérifiez les champs." and p.title == "Contenu non traitable", "detail and title: $(out.Body)")
+  p.errors.Password == "Un texte de 12 à 128 octets."
+end
+
+defn isEnglishAloneUntouched()
+  t = apptest.Start(App)?
+  out = short(t, "fr")
+  p = json.Parse(out.Body)?
+  p.detail == "Check the fields." and value.IsMissing(http.HeaderValue("content-language", out.Headers))
+end
+
+defn isAccountBeforeBrowser()
+  t = apptest.Start(App, settings = {Langs: "en,fr"})?
+  a = t.SignUp(ana)?
+  bug.Assert(a.Call(Hello)?.Text == "2 unpaid invoices", "English first")
+  me = a.Call(api.SetLang, {Lang: "fr"})?
+  bug.Assert(me.Lang == "fr", "the account: $me")
+  bug.Assert(a.Call(Hello)?.Text == "2 factures impayées", "the app's own words")
+  out = a.Raw("DELETE", "/auth/sessions/999999", headers = lang("en"))
+  wrong = a.Call(api.SetLang, {Lang: "de"})
+  bug.Assert(wrong.Error.Status == 422, "a language the app doesn't speak: $(wrong.Error)")
+  json.Parse(out.Body)?.detail == "Cette chose n’existe pas."
+end
+
+defn isLanguageHeaderInjectionHarmless()
+  t = apptest.Start(App, settings = {Langs: "en,fr"})?
+  bad = ["fr\r\nset-cookie: sid=evil", "<script>alert(1)</script>", text.Repeat(5000, "fr,"), "fr;q=2, en;q=0.1", "*;q=1", "fr-$(text.Char(1))", "zz;q=abc"]
+  langs = [http.HeaderValue("content-language", short(t, l).Headers) for l in bad]
+  bodies = [short(t, l).Body for l in bad]
+  bug.Assert(list.All([l == "en" or l == "fr" for l in langs]), "only a language of the app: $langs")
+  not list.Any([text.Contains("script", b) or text.Contains("evil", b) for b in bodies]) and langs[1] == "en" and langs[3] == "fr" and langs[4] == "en"
+end
+
+defn isMailInTheUsersLanguage()
+  t = apptest.Start(App, settings = {Langs: "en,fr"})?
+  a = t.SignUp(ana)?
+  a.Call(api.SetLang, {Lang: "fr"})?
+  t.Anyone().Call(api.Forgot, {Email: "ana@example.com"})
+  t.RunJobs()?
+  m = t.Mails()[value.Len(t.Mails())]
+  m.Subject == "Un nouveau mot de passe pour words" and text.Contains("ouvrez ce lien dans l’heure", m.Text)
+end
+
+defn isSignUpTakingTheBrowsersLanguage()
+  t = apptest.Start(App, settings = {Langs: "en,fr"})?
+  out = t.Raw("POST", "/auth/signup", body = json.Text(ana), headers = lang("fr-CA"))
+  json.Parse(out.Body)?.Lang == "fr"
+end
+
+isCatalogueExact() = i18n.Say(i18n.Centauri, "fr", "Too many requests: wait 30 seconds.") == "Trop de requêtes$(text.Char(160)): attendez 30 secondes."

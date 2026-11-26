@@ -1,0 +1,35 @@
+(** The tickets: made, listed, read, changed and deleted by a member; another tenant sees none of them; and the three
+    tests Centauri makes of every app. Made by cesia do new-module tickets. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use src/tickets
+use src/tickets/api as e
+use std/value
+
+App = app.Of([auth.Module(), tickets.Module], name = "tickets")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+bo = {Email: "bo@example.com", Password: "correct horse 34", Name: "Bo"}
+
+defn isMadeListedChangedDeleted()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(e.AddTicket, {Name: "First"})?
+  a.Call(e.EditTicket, {id: made.Id, Name: "First, changed"})?
+  seen = a.Call(e.Ticket, {id: made.Id})?
+  page = a.Call(e.Tickets)?
+  a.Call(e.DeleteTicket, {id: made.Id})?
+  seen.Name == "First, changed" and value.Len(page.Rows) == 1 and a.Call(e.Ticket, {id: made.Id}).Error.Status == 404
+end
+
+defn isOtherTenantBlind()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignUp(bo)?
+  made = a.Call(e.AddTicket, {Name: "Ana's"})?
+  b.Call(e.Ticket, {id: made.Id}).Error.Status == 404 and value.Len(b.Call(e.Tickets)?.Rows) == 0
+end
+
+isIsolated() = apptest.Isolated(App)?
+isFuzzed() = apptest.Fuzz(App, cases = 2)?

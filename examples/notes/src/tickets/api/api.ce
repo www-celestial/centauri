@@ -1,0 +1,25 @@
+(** The contract of the tickets: the shapes of what comes in and goes out, and the endpoints, read by the server and by
+    the pages. Made by cesia do new-module tickets: change it as the tickets need. *)
+use deps/www-celestial/centauri/src/api
+use std/check
+
+(** What a page sends to make or change a ticket. *)
+TicketIn = check.Record({Name: check.Text(1, 200), Note: check.Text(0, 2000, optional = true, default = "")})
+
+(** A ticket as the endpoints give it. *)
+TicketOut = check.Record({Id: check.Id(), Name: check.Text(), Note: check.Text(), Created: check.Time()})
+
+(** Makes a ticket in the tenant of the session. *)
+AddTicket = api.Post("/tickets", body = TicketIn, out = TicketOut, role = "member", about = "Makes a ticket.")
+
+(** The tickets of the tenant of the session, 20 a page, the newest first. *)
+Tickets = api.Get("/tickets", out = api.Page(TicketOut, 20), role = "member", about = "The tickets, the newest first.")
+
+(** A ticket of the tenant of the session. *)
+Ticket = api.Get("/tickets/:id", out = TicketOut, role = "member", about = "A ticket.")
+
+(** A ticket changed. *)
+EditTicket = api.Put("/tickets/:id", body = TicketIn, out = TicketOut, role = "member", about = "Changes a ticket.")
+
+(** A ticket deleted: its facts retracted, its history kept by Cepheus. *)
+DeleteTicket = api.Delete("/tickets/:id", role = "member", about = "Deletes a ticket.")

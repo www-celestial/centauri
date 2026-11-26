@@ -1,0 +1,89 @@
+(* The languages of an app: the catalogue of its messages (Centauri's own, its modules', its own, package i18n), the
+   languages it speaks (the setting Langs, the first one its default), the language of a request (the account's, then
+   Accept-Language), and the Problem Details of the door translated into it. An app that speaks one language pays
+   nothing for it: no header is read, no answer read again. *)
+use src/i18n
+use std/dict
+use std/http
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+defn wordsOf(a, s)
+  (** What env keeps of the languages of an app: {Catalog, Langs, Lang, Translating}, Translating false when the app
+      speaks English alone, so that its answers are never read again. *)
+  langs = [text.Trim(x) for x in text.Split(",", dict.GetOr("Langs", "en", s)) if text.Trim(x) != ""]
+  if value.Len(langs) == 0
+    langs = ["en"]
+  end
+  catalogs = list.Concat([i18n.Centauri], [m.Messages for m in a.Modules if not value.IsMissing(dict.Get("Messages", m))])
+  own = dict.Get("Messages", a)
+  if not value.IsMissing(own)
+    catalogs = list.Append(if dict.Has("Exact", own) own else i18n.Catalog(own) end, catalogs)
+  end
+  {Catalog: i18n.Of(catalogs), Langs: langs, Lang: langs[1], Translating: not (value.Len(langs) == 1 and text.Lower(langs[1]) == "en")}
+end
+
+defn Lang(r)
+  (** The language of a request, one of the app's (the setting Langs): the account's (its Lang), else the one its
+      Accept-Language prefers, else the app's first. *)
+  env = r.Env
+  if not env.Translating
+    return env.Lang
+  end
+  mine = if value.IsDict(r.User) dict.Get("Lang", r.User) else missing end
+  if value.IsText(mine) and mine in env.Langs
+    return mine
+  end
+  i18n.Best(http.HeaderValue("accept-language", r.Headers), env.Langs, env.Lang)
+end
+
+(** A message of the app in the language of a request, as i18n.Say gives it from the app's catalogue: with args, the
+    values of its names; without, a message already filled in, read against the catalogue's templates. *)
+Say(r, message, args = missing) = i18n.Say(r.Env.Catalog, Lang(r), message, args = args)
+
+(** A message in a language, as Say, for a job or a mail, where there is no request: lang one of the app's, or missing
+    for its first. *)
+SayIn(env, lang, message, args = missing) = i18n.Say(env.Catalog, if value.IsText(lang) and lang in env.Langs lang else env.Lang end, message, args = args)
+
+defn isProblem(out)
+  (** Is a response Problem Details, by its media type. *)
+  for h in dict.GetOr("Headers", [], out)
+    if h.Name == "content-type" and h.Value == "application/problem+json"
+      return true
+    end
+  end
+  false
+end
+
+defn translated(out, req, env)
+  (** A response of Problem Details in the language of its request: its title, its detail and the messages of its
+      fields, and Content-Language. The language is the account's when the route knew it (out.Lang), else the one
+      Accept-Language prefers among the app's: nothing of the header reaches the answer but one of them. *)
+  if not env.Translating or not isProblem(out) or not value.IsText(dict.Get("Body", out))
+    return out
+  end
+  lang = dict.Get("Lang", out)
+  if not (value.IsText(lang) and lang in env.Langs)
+    lang = i18n.Best(http.HeaderValue("accept-language", req.Headers), env.Langs, env.Lang)
+  end
+  got = json.Parse(out.Body)
+  if result.IsErr(got) or not value.IsDict(got.Value)
+    return out
+  end
+  p = got.Value
+  c = env.Catalog
+  for k in ["title", "detail"]
+    if value.IsText(dict.Get(k, p))
+      p[k] = i18n.Say(c, lang, p[k])
+    end
+  end
+  if value.IsDict(dict.Get("errors", p))
+    p.errors = dict.MapValues(m -> if value.IsText(m) i18n.Say(c, lang, m) else m end, p.errors)
+  end
+  done = out
+  done.Body = json.Text(p)
+  http.WithHeader("content-language", lang, done)
+end

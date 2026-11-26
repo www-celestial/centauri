@@ -1,0 +1,153 @@
+(** The keys of programs against what goes wrong with them: a key that leaks in a log or an answer, a key copied from
+    the database, a key used past its roles, on the accounts, past its end, after it was revoked, of another tenant,
+    forged, or sent too often. Each test is an app in memory (apptest). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/check
+use std/dict
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100)}), out = NoteOut, role = "member")
+Notes = api.Get("/notes", out = api.Page(NoteOut, 50), role = "member")
+Purge = api.Post("/notes/purge", role = "admin")
+
+defn add(r, x)
+  made = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Note, made, r)
+end
+
+listed(r) = cepheus.Find(2, (n, t) -> {Where: [[n, Note.Tenant, r.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}, Sort: [n], Limit: r.Limit, After: r.After}, r.Db)
+
+App = app.Of([auth.Module(), app.Module("notes", kinds = [Note], serve = [app.Serve(AddNote, add), app.Serve(Notes, listed), app.Serve(Purge, r -> missing)])], name = "notes")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+bo = {Email: "bo@example.com", Password: "another long secret", Name: "Bo"}
+
+bearer(key) = [{Name: "authorization", Value: "Bearer $key"}]
+
+defn program(t, key, method, path, body = "")
+  (** A request of a program, which has no cookie: its key only. *)
+  t.Raw(method, path, body = body, headers = list.Concat(bearer(key), if body == "" [] else [{Name: "content-type", Value: "application/json"}] end))
+end
+
+defn isKeyMadeShownOnceAndUsed()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "billing robot", Roles: ["member"]})?
+  bug.Assert(text.StartsWith("$(made.Id).", made.Key) and text.ByteLength(made.Key) > 64, "id.secret: $(made.Key)")
+  wrote = program(t, made.Key, "POST", "/notes", body = json.Text({Text: "from the robot"}))
+  bug.Assert(wrote.Status == 201, "a member's endpoint: $(wrote.Status) $(wrote.Body)")
+  read = program(t, made.Key, "GET", "/notes")
+  bug.Assert(read.Status == 200 and text.Contains("from the robot", read.Body), "read back: $(read.Body)")
+  listing = a.Send(api.Keys)
+  secret = text.Split(".", made.Key)[2]
+  bug.Assert(listing.Status == 200 and text.Contains("billing robot", listing.Body) and not text.Contains(secret, listing.Body), "listed, no secret: $(listing.Body)")
+  k = cepheus.Get(auth.Key, made.Id, t.Db)?
+  not text.Contains(secret, json.Text(k)) and value.Equal(k.Roles, ["member"])
+end
+
+defn isKeyOfTheDatabaseUseless()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
+  k = cepheus.Get(auth.Key, made.Id, t.Db)?
+  copied = program(t, "$(made.Id).$(k.Hash)", "GET", "/notes")
+  forged = program(t, "$(made.Id).$(text.Repeat(64, "0"))", "GET", "/notes")
+  session = program(t, text.Split("=", a.Cookie)[2], "GET", "/notes")
+  copied.Status == 401 and forged.Status == 401 and session.Status == 401
+end
+
+defn isKeyBoundToItsRoles()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
+  admin = program(t, made.Key, "POST", "/notes/purge")
+  bug.Assert(admin.Status == 403, "a member's key calls no admin's endpoint: $(admin.Status)")
+  b = t.SignUp(bo)?
+  t.As(b, ["admin"])?
+  owner = b.Call(api.NewKey, {Name: "too much", Roles: ["owner"]})
+  member = t.SignUp({Email: "cy@example.com", Password: "correct horse cy", Name: "Cy"})?
+  t.As(member, ["member"])?
+  owner.Error.Status == 403 and status(member.Call(api.NewKey, {Name: "x", Roles: ["member"]})) == 403
+end
+
+status(got) = if result.IsOk(got) 200 else got.Error.Status end
+
+defn isKeyNoPerson()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["owner", "admin", "member"]})?
+  codes = [program(t, made.Key, "GET", "/auth/me").Status, program(t, made.Key, "POST", "/auth/signout-all").Status,
+    program(t, made.Key, "GET", "/auth/sessions").Status, program(t, made.Key, "POST", "/auth/keys", body = json.Text({Name: "child", Roles: ["member"]})).Status]
+  bug.Assert(value.Equal(codes, [403, 403, 403, 403]), "no endpoint of the accounts: $codes")
+  result.IsOk(a.Call(api.Me))
+end
+
+defn isKeyRevokedEverywhere()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
+  bug.Assert(program(t, made.Key, "GET", "/notes").Status == 200, "works first")
+  b = t.SignUp(bo)?
+  other = b.Send(api.RevokeKey, {id: made.Id})
+  bug.Assert(other.Status == 404, "another tenant's admin knows nothing of it: $(other.Status)")
+  a.Call(api.RevokeKey, {id: made.Id})?
+  program(t, made.Key, "GET", "/notes").Status == 401
+end
+
+defn isKeyEnded()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"], Days: 1})?
+  bug.Assert(program(t, made.Key, "GET", "/notes").Status == 200, "within its day")
+  t.Advance(86401)
+  program(t, made.Key, "GET", "/notes").Status == 401
+end
+
+defn isKeyLimitedApart()
+  t = apptest.Start(App, settings = {KeyLimit: "8"})?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
+  codes = [program(t, made.Key, "GET", "/notes").Status for k in 1..3]
+  bug.Assert(value.Equal(codes, [200, 200, 429]), "a burst of a quarter of 8 a minute, then 429: $codes")
+  a.Send(Notes).Status == 200
+end
+
+defn isKeyNeverInLogsNorEvents()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
+  secret = text.Split(".", made.Key)[2]
+  program(t, made.Key, "GET", "/notes")
+  program(t, "$(made.Id).$(text.Repeat(64, "a"))", "GET", "/notes")
+  lines = json.Text(app.Lines(t.Env.State))
+  boss = t.Super()?
+  events = boss.Send(api.AdminEvents)
+  not text.Contains(secret, lines) and not text.Contains(secret, events.Body) and text.Contains("Key $(made.Id) made", events.Body)
+end
+
+defn isKeyBeforeCookie()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignUp(bo)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
+  a.Call(AddNote, {Text: "ana's"})?
+  out = t.Raw("GET", "/notes", headers = list.Append({Name: "cookie", Value: b.Cookie}, bearer(made.Key)))
+  out.Status == 200 and text.Contains("ana's", out.Body)
+end
+
+defn isOpenApiNamingKeys()
+  t = apptest.Start(App)?
+  doc = json.Parse(t.Raw("GET", "/openapi.json").Body)?
+  doc.components.securitySchemes.key.scheme == "bearer" and value.Len(doc.paths["/notes"].get.security) == 2
+end

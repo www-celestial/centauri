@@ -1,0 +1,81 @@
+(** The feature flags: the code's default, a flag turned for everyone, a tenant, a user, a share of the users, the most
+    precise one winning, what a page asks, and a change seen by another process without a restart. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/flags
+use std/bug
+use std/check
+use std/dict
+use std/list
+use std/result
+use std/value
+
+Export = flags.Flag("new-export", about = "The CSV export of 2027.")
+Dark = flags.Flag("dark", default = true)
+
+Hello = api.Get("/hello", out = check.Record({Export: check.Bool()}), role = "member")
+
+App = app.Of([auth.Module(), flags.Module([Export, Dark]), app.Module("hello", serve = [app.Serve(Hello, r -> {Export: flags.On("new-export", r)})])], name = "flagged")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+bo = {Email: "bo@example.com", Password: "another long secret", Name: "Bo"}
+
+defn isDefaultThenMostPreciseWins()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignUp(bo)?
+  boss = t.Super()?
+  seen = () -> [a.Call(Hello)?.Export, b.Call(Hello)?.Export]
+  bug.Assert(value.Equal(seen(), [false, false]), "the code's default: $(seen())")
+  boss.Call(api.AdminFlag, {name: "new-export", On: true})?
+  bug.Assert(value.Equal(seen(), [true, true]), "on for everyone: $(seen())")
+  boss.Call(api.AdminFlag, {name: "new-export", Tenant: b.Tenant, On: false})?
+  bug.Assert(value.Equal(seen(), [true, false]), "off for Bo's tenant: $(seen())")
+  boss.Call(api.AdminFlag, {name: "new-export", User: b.User, On: true})?
+  bug.Assert(value.Equal(seen(), [true, true]), "on for Bo himself: $(seen())")
+  boss.Call(api.AdminFlag, {name: "new-export", User: b.User, Clear: true})?
+  bug.Assert(value.Equal(seen(), [true, false]), "his tenant's again: $(seen())")
+  row = boss.Call(api.AdminFlags)?[2]
+  row.Name == "new-export" and row.On == true and value.Len(row.Tenants) == 1 and value.Len(row.Users) == 0
+end
+
+defn isShareOfUsersStable()
+  t = apptest.Start(App)?
+  boss = t.Super()?
+  boss.Call(api.AdminFlag, {name: "new-export", Percent: 30})?
+  on = [flags.OnFor("new-export", t.Env, user = u) for u in 1..2000]
+  again = [flags.OnFor("new-export", t.Env, user = u) for u in 1..2000]
+  n = list.Sum([if x 1 else 0 end for x in on])
+  bug.Assert(n > 520 and n < 680, "about 30% of 2,000: $n")
+  value.Equal(on, again) and not flags.OnFor("new-export", t.Env)
+end
+
+defn isPageToldItsFlags()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  value.Equal(a.Call(api.FlagsOn)?, ["dark"])
+end
+
+defn isChangeSeenByAnotherProcess()
+  t = apptest.Start(App)?
+  s = app.Read(App.Fields, {Profile: "test", Origin: "http://app.test"}, defaults = App.Defaults)?
+  other = app.Start(App, s, t.Db, clock = apptest.Epoch)?
+  bug.Assert(not flags.OnFor("new-export", other), "off at first")
+  boss = t.Super()?
+  boss.Call(api.AdminFlag, {name: "new-export", On: true})?
+  app.Advance(2, other.State)
+  flags.OnFor("new-export", other)
+end
+
+defn isWrongSettingRefused()
+  t = apptest.Start(App)?
+  boss = t.Super()?
+  a = t.SignUp(ana)?
+  both = boss.Call(api.AdminFlag, {name: "new-export", Tenant: a.Tenant, User: a.User, On: true})
+  share = boss.Call(api.AdminFlag, {name: "new-export", Tenant: a.Tenant, Percent: 5})
+  none = boss.Call(api.AdminFlag, {name: "nothing", On: true})
+  both.Error.Status == 422 and share.Error.Status == 422 and none.Error.Status == 404
+end

@@ -95,6 +95,9 @@ defn front(base, req, env)
       out = refuse(out.Status, if out.Status == 404 "There is no such address." else http.Reason(out.Status) end, rid, env)
     end
   end
+  if env.Translating
+    out = translated(out, req, env)
+  end
   if not dict.Has("Secured", out)
     out = Secure(out, env.Guards, names = env.GuardNames)
   end
@@ -304,7 +307,20 @@ defn served(b, e, req, env, rid)
   if not d.Ok
     return limited(d, env, req.Ip, e.Name, rid)
   end
+  out = routed(b, e, req, env, rid, user, d)
+  if env.Translating and value.IsDict(user) and value.IsText(dict.Get("Lang", user))
+    out.Lang = user.Lang
+  end
+  out
+end
+
+defn routed(b, e, req, env, rid, user, d)
+  (** A request at its route once its user and its limits passed: its role, its input, its handler, its output. *)
   status = if e.Role == api.Public 0 else allowedRole(e.Role, user, env.Roles) end
+  if status == 0 and value.IsDict(user) and dict.Has("Key", user) and b.Module == env.WhoModule
+    metrics.Add("centauri_refused_total", labels = {reason: "role"})
+    return refuse(403, "A key of a program calls the app's endpoints, not those of the accounts.", rid, env)
+  end
   if status != 0
     metrics.Add("centauri_refused_total", labels = {reason: if status == 401 "signin" else "role" end})
     return refuse(status, if status == 401 "Sign in first." else "This is for the role $(e.Role)." end, rid, env)
@@ -335,7 +351,7 @@ defn served(b, e, req, env, rid)
     before = if s.GetDb == "fork" probe(db) else missing end
   end
   r = {Method: req.Method, Path: req.Path, Params: req.Params, Query: req.Query, Headers: req.Headers, Cookies: req.Cookies, Body: req.Body, Ip: req.Ip,
-    Id: rid, Route: e.Name, User: user, Db: db, Why: "$(e.Name) #$rid", Settings: s, Now: d.Now, Keys: env.Keys,
+    Id: rid, Route: e.Name, User: user, Db: db, Why: if value.IsDict(user) and dict.Has("Key", user) "$(e.Name) #$rid key $(user.Key)" else "$(e.Name) #$rid" end, Settings: s, Now: d.Now, Keys: env.Keys,
     Limit: if value.IsMissing(pageSize) missing else pageSize + 1 end, After: after, Env: env}
   got = missing
   if b.Upload

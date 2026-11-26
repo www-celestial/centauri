@@ -1,0 +1,25 @@
+(* The contracts of the feature flags: a page asks which flags are on for its user, a super-admin sees each flag and
+   turns it on or off for everyone, a share of the users, a tenant or a user. *)
+use std/check
+
+(** The flags that are on for the user of the session, by their names: what a page asks to show a feature or not. *)
+FlagsOn = Get("/flags/on", out = check.List(check.Text(1, 100), 0, 1000), role = Signed, about = "The flags on for this user.")
+
+(** A flag as the admin sees it: its name, what it is for, its default in the code, and what was set over it: for
+    everyone (On, or Percent of the users), for tenants and for users. *)
+FlagRow = check.Record({Name: check.Text(1, 100), About: check.Text(0, 1000), Default: check.Bool(), On: check.Bool(optional = true),
+  Percent: check.Int(0, 100, optional = true), Tenants: check.List(check.Record({Id: check.Id(), On: check.Bool()}), 0, 100000),
+  Users: check.List(check.Record({Id: check.Id(), On: check.Bool()}), 0, 100000)})
+
+(** Every flag that the app's code declares. *)
+AdminFlags = Get("/admin/flags", out = check.List(FlagRow, 0, 1000), role = Super, about = "The feature flags.")
+
+(** A flag set: for everyone (neither Tenant nor User), on or off, or on for Percent of the users (the same users at
+    each request: a hash of the flag and the user); for a tenant; for a user. Clear takes back what was set there,
+    and the code's default, or the level above, rules again. Every process sees it within FlagsRefresh seconds. *)
+AdminFlag = Put("/admin/flags/:name", body = check.Record({On: check.Bool(optional = true), Percent: check.Int(0, 100, optional = true),
+  Tenant: check.Id(optional = true), User: check.Id(optional = true), Clear: check.Bool(optional = true)}), out = FlagRow, role = Super,
+  about = "Turns a feature flag on or off, for everyone, a share of the users, a tenant or a user.")
+
+(** The endpoints of the feature flags. *)
+FlagEndpoints = [FlagsOn, AdminFlags, AdminFlag]

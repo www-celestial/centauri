@@ -52,20 +52,31 @@ defn NewSession(user, member, tenant, req, env, thing = 1)
 end
 
 defn SessionKey(req, env)
-  (** What names the session of a request among those the state of the process keeps: the BLAKE2b of its cookie, or
-      missing for a request without one. A lookup by it tells nothing of the secret by its time, and a cookie made by
-      hand names no session kept: it is checked by Who first. *)
+  (** What names the session of a request among those the state of the process keeps: the BLAKE2b of its key of a
+      program (Authorization: Bearer) or of its cookie, or missing for a request without either. A lookup by it tells
+      nothing of the secret by its time, and a cookie or a key made by hand names no session kept: it is checked by
+      Who first. *)
+  bearer = BearerOf(req)
+  if not value.IsMissing(bearer)
+    return crypto.Blake2b("bearer $bearer", env.Keys)
+  end
   cookies = dict.Get("Cookies", req)
   raw = if value.IsDict(cookies) dict.Get(CookieName(env), cookies) else missing end
   if value.IsText(raw) and text.ByteLength(raw) <= 100 crypto.Blake2b(raw, env.Keys) else missing end
 end
 
 defn Who(req, env)
-  (** The user of a request's session: an Ok of {Id, Tenant, Member, Session, Roles, Super, Email, Name, Until, Checked},
-      Checked whether his address was checked by the link of a mail, Roles
+  (** The user of a request's session: an Ok of {Id, Tenant, Member, Session, Roles, Super, Email, Name, Until, Checked,
+      Lang}, Checked whether his address was checked by the link of a mail, Roles
       with every role they include, Until the time the session ends unless it is seen again (its end, or its end of
-      idleness), or an Ok of missing for no session, an ended one, a disabled user, or a member taken out of his
-      tenant. The time of the session is seen again at most every 5 minutes, by a write in a fiber of its own. *)
+      idleness), Lang his language when he chose one, or an Ok of missing for no session, an ended one, a disabled
+      user, or a member taken out of his tenant. The time of the session is seen again at most every 5 minutes, by a
+      write in a fiber of its own. A request with Authorization: Bearer is a program's: its key decides (keys.ce),
+      and a cookie beside it is not read. *)
+  bearer = BearerOf(req)
+  if not value.IsMissing(bearer)
+    return keyWho(bearer, env)
+  end
   p = parts(dict.Get(CookieName(env), dict.GetOr("Cookies", {}, req)))
   if value.IsMissing(p)
     return result.Ok(missing)
@@ -94,7 +105,8 @@ defn Who(req, env)
     fiber.Spawn(() -> cepheus.Write([cepheus.Expect(p.Id, Session.Seen, s.Seen), cepheus.Add(p.Id, Session.Seen, now)], env.Db, by = s.User, why = "session seen"))
   end
   result.Ok({Id: s.User, Tenant: s.Tenant, Member: s.Member, Session: p.Id, Roles: roles, Super: u.Super == true, Email: u.Email,
-    Name: dict.GetOr("Name", "", u), Until: list.Min([s.Ends, s.Seen + env.Settings.SessionIdle]), Checked: not value.IsMissing(dict.Get("Checked", u))})
+    Name: dict.GetOr("Name", "", u), Until: list.Min([s.Ends, s.Seen + env.Settings.SessionIdle]), Checked: not value.IsMissing(dict.Get("Checked", u)),
+    Lang: dict.Get("Lang", u)})
 end
 
 defn Ends(user, env, until)
@@ -102,7 +114,10 @@ defn Ends(user, env, until)
       (a sign-out, a role taken or given, a user disabled), from any process of any server, until the channel until
       closes: what ends the live screens of a session. *)
   member = dict.Get("Member", user)
-  w = if value.IsMissing(member)
+  key = dict.Get("Key", user)
+  w = if not value.IsMissing(key)
+    cepheus.Watch(1, h -> {Where: [[key, Key.Hash, h]], Give: {H: h}}, env.Db, until = until)
+  else if value.IsMissing(member)
     cepheus.Watch(2, (h, d) -> {Where: [[user.Session, Session.Hash, h], [user.Id, User.Disabled, d]], Give: {H: h, D: d}}, env.Db, until = until)
   else
     cepheus.Watch(3, (h, d, r) -> {Where: [[user.Session, Session.Hash, h], [user.Id, User.Disabled, d], [member, Member.Roles, r]], Give: {H: h, D: d, R: r}}, env.Db, until = until)

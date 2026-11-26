@@ -1,0 +1,202 @@
+(** Feature flags: a feature of the code that is on for some and off for others, turned without a deployment nor a
+    restart. The code declares each flag with its default (Flag), a handler asks On(name, r); a super-admin sets a
+    flag for everyone, for a share of the users (always the same ones: a hash of the flag and the user), for a tenant
+    or for a user, and the most precise wins: the user, then his tenant, then everyone, then the code's default. What
+    is set is facts in Cepheus, so every process of every server sees it; each process reads them into its memory at
+    most every FlagsRefresh seconds (1 by default), and its own changes at once: asking a flag costs a round trip to
+    the state of the process, no read of the database.
+
+      Export = Flag("new-export", about = "The CSV export of 2027.")
+      Export.Default --> false
+      Module([Export]).Name --> "flags" *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use std/bug
+use std/check
+use std/crypto
+use std/dict
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+(** A flag of the code: its name (small letters, digits, - and .), what it is for, and its default.
+
+      Flag("beta.search", default = true).Default --> true *)
+defn Flag(name, about = "", default = false)
+  bug.Assert(isName(name), "A flag's name is 1 to 100 small letters, digits, - and .: $name")
+  {Name: name, About: about, Default: default}
+end
+
+isName(s) = value.IsText(s) and text.ByteLength(s) >= 1 and text.ByteLength(s) <= 100 and list.All([(b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 45 or b == 46 for b in text.Bytes(s)])
+
+(** What was set over a flag: its name, Key (unique: the name alone for everyone, "name t:ID" for a tenant, "name
+    u:ID" for a user), the tenant or the user it is for, On, and Percent, the share of the users it is on for. *)
+Set = app.Kind("centauri_flag", {Name: cepheus.Text(), Key: cepheus.Text(unique = true), Tenant: cepheus.Link(), User: cepheus.Link(),
+  On: cepheus.Bool(), Percent: cepheus.Int()})
+
+(** The settings of the flags: how often a process reads them again, in seconds. *)
+Settings = {FlagsRefresh: check.Float(0, 3600, optional = true, default = 1)}
+
+defn Module(flags)
+  (** The module of the flags of an app: their kind, their endpoints (api.FlagEndpoints) and the flags the code
+      declares. Two flags of one name stop the app. *)
+  names = [f.Name for f in flags]
+  bug.Assert(value.Len(list.Unique(names)) == value.Len(names), "Two flags have one name: $names")
+  app.Module("flags", kinds = [Set], settings = Settings, serve = [app.Serve(api.FlagsOn, mine), app.Serve(api.AdminFlags, adminFlags),
+    app.Serve(api.AdminFlag, adminFlag)]) then dict.Put("Flags", flags)
+end
+
+defn declared(env)
+  (** The flags of the app's module of flags, by name. *)
+  for m in env.App.Modules
+    if m.Name == "flags"
+      return dict.Dict([{Key: f.Name, Value: f} for f in m.Flags])
+    end
+  end
+  dict.Dict()
+end
+
+memo = "centauri flags"   (* The key of the table in the state of the process. *)
+
+defn table(env)
+  (** What is set over the flags, read from the memory of the process, or from Cepheus when it is older than
+      FlagsRefresh seconds: an Ok of {Flags, Rows}, Rows each set by its Key. *)
+  kept = app.Recall(memo, env.State)
+  if not value.IsMissing(kept)
+    return result.Ok(kept)
+  end
+  rows = {}
+  for x in cepheus.Find(2, (f, k) -> {Where: [[f, Set.Key, k]], Give: {Id: f, Key: k}}, env.Db)?
+    s = cepheus.Get(Set, x.Id, env.Db)?
+    rows[x.Key] = {On: dict.Get("On", s), Percent: dict.Get("Percent", s), Id: x.Id}
+  end
+  t = {Flags: declared(env), Rows: rows}
+  app.Remember(memo, t, env.Now() + dict.GetOr("FlagsRefresh", 1, env.Settings), env.State)
+  result.Ok(t)
+end
+
+defn bucket(name, user, env)
+  (** The place of a user among a hundred for a flag, from 0 to 99, the same at every request and in every process:
+      the first two bytes of the BLAKE2b of the flag's name and the user's id. *)
+  b = text.Bytes(crypto.Blake2b("centauri flag\n$name\n$user", env.Keys, size = 16))
+  math.Mod(b[1] * 256 + b[2], 100)
+end
+
+defn OnFor(name, env, user = missing, tenant = missing)
+  (** Is a flag on for a user of a tenant (either may be missing, as in a job): the user's setting, else his tenant's,
+      else everyone's (or the user's place within Percent), else the code's default. A flag the code doesn't declare
+      stops the program: a name written wrong shows in the tests. *)
+  t = result.Unwrap(table(env))
+  f = dict.Get(name, t.Flags)
+  bug.Assert(not value.IsMissing(f), "No flag $name is declared: flags.Module([flags.Flag(\"$name\"), ...]).")
+  if not value.IsMissing(user)
+    u = dict.Get("$name u:$user", t.Rows)
+    if not value.IsMissing(u)
+      return u.On == true
+    end
+  end
+  if not value.IsMissing(tenant)
+    s = dict.Get("$name t:$tenant", t.Rows)
+    if not value.IsMissing(s)
+      return s.On == true
+    end
+  end
+  all = dict.Get(name, t.Rows)
+  if value.IsMissing(all)
+    return f.Default
+  end
+  if value.IsInt(all.Percent)
+    return not value.IsMissing(user) and bucket(name, user, env) < all.Percent
+  end
+  all.On == true
+end
+
+defn On(name, r)
+  (** Is a flag on for the user of a request: OnFor with his id and his tenant. A handler asks
+      flags.On("new-export", r). *)
+  u = r.User
+  if value.IsDict(u) OnFor(name, r.Env, user = dict.Get("Id", u), tenant = dict.Get("Tenant", u)) else OnFor(name, r.Env) end
+end
+
+(* GET /flags/on. *)
+mine(r) = [name for name in dict.Keys(declared(r.Env)) if On(name, r)]
+
+defn rowOf(f, t)
+  (** A flag as the admin sees it. *)
+  row = {Name: f.Name, About: f.About, Default: f.Default, Tenants: [], Users: []}
+  all = dict.Get(f.Name, t.Rows)
+  if not value.IsMissing(all)
+    if value.IsInt(all.Percent)
+      row.Percent = all.Percent
+    else
+      row.On = all.On == true
+    end
+  end
+  for p in dict.Pairs(t.Rows)
+    if text.StartsWith("$(f.Name) t:", p.Key)
+      row.Tenants = list.Append({Id: text.Number(text.Split(" t:", p.Key)[2]), On: p.Value.On == true}, row.Tenants)
+    else if text.StartsWith("$(f.Name) u:", p.Key)
+      row.Users = list.Append({Id: text.Number(text.Split(" u:", p.Key)[2]), On: p.Value.On == true}, row.Users)
+    end
+  end
+  row
+end
+
+defn adminFlags(r)
+  (** GET /admin/flags: the flags, in the order of their names. *)
+  t = table(r.Env)?
+  [rowOf(t.Flags[n], t) for n in list.Sort(dict.Keys(t.Flags))]
+end
+
+defn adminFlag(r, x)
+  (** PUT /admin/flags/:name. *)
+  env = r.Env
+  f = dict.Get(r.Params.name, declared(env))
+  if value.IsMissing(f)
+    return app.Missing("There is no such flag.")
+  end
+  tenant = dict.Get("Tenant", x)
+  user = dict.Get("User", x)
+  percent = dict.Get("Percent", x)
+  clear = dict.Get("Clear", x) == true
+  if not value.IsMissing(tenant) and not value.IsMissing(user)
+    return app.Fail(422, "Check the fields.", fields = {User: "A tenant or a user, not both."})
+  end
+  if not value.IsMissing(percent) and (not value.IsMissing(tenant) or not value.IsMissing(user))
+    return app.Fail(422, "Check the fields.", fields = {Percent: "A share of the users is for everyone: no tenant, no user."})
+  end
+  if not clear and value.IsMissing(percent) and value.IsMissing(dict.Get("On", x))
+    return app.Fail(422, "Check the fields.", fields = {On: "On, Percent or Clear."})
+  end
+  key = if not value.IsMissing(user) "$(f.Name) u:$user" else if not value.IsMissing(tenant) "$(f.Name) t:$tenant" else f.Name end
+  found = cepheus.Find(1, s -> {Where: [[s, Set.Key, key]], Give: {Id: s}}, r.Db)?
+  ops = []
+  for s in found
+    ops = list.Concat(ops, app.Gone(Set, s.Id, r.Db)?)
+  end
+  if not clear
+    fields = {Name: f.Name, Key: key}
+    if not value.IsMissing(user)
+      fields.User = user
+    end
+    if not value.IsMissing(tenant)
+      fields.Tenant = tenant
+    end
+    if value.IsMissing(percent)
+      fields.On = x.On
+    else
+      fields.Percent = percent
+    end
+    ops = list.Concat(ops, app.Facts(Set, cepheus.New(1), fields))
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)?
+  end
+  app.Forget(memo, env.State)
+  _ = app.Note(env, "flag", "$(f.Name) $(if clear "cleared" else if value.IsMissing(percent) "set $(x.On)" else "on for $percent%" end) for $(if not value.IsMissing(user) "user $user" else if not value.IsMissing(tenant) "tenant $tenant" else "everyone" end).",
+    user = r.User.Id, tenant = tenant, ip = r.Ip, route = r.Route)
+  rowOf(f, table(env)?)
+end

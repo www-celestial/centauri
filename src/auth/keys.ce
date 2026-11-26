@@ -1,0 +1,142 @@
+(* The keys of programs (API keys). A key belongs to a tenant: an admin of it makes one with some of his roles, a
+   program sends it as Authorization: Bearer id.secret, the form of a session's cookie, and the database keeps the
+   BLAKE2b of its secret only, so a copy of the database opens nothing. Checking one is the read of a session: its
+   thing by its id, a hash, a comparison in constant time. A key is no person: it calls the app's endpoints with its
+   roles, never those of the accounts (it signs nobody out, changes no password, makes no key); its requests count
+   against its own limit (KeyLimit a minute); its maker is who writes, for the history, and the key is named in the
+   why of each write. A key revoked is refused at its next request on every server, once the sessions that the
+   state of a process keeps (SessionCache seconds) are read again. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use std/crypto
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/list
+use std/result
+use std/text
+use std/value
+
+(** A key of a program: its tenant, its name, its roles, the hash of its secret, who made it, when, when it ends
+    (missing: never) and when it was last used. *)
+Key = app.Kind("centauri_key", {Tenant: cepheus.Link(), Name: cepheus.Text(), Roles: cepheus.Text(many = true), Hash: cepheus.Text(),
+  By: cepheus.Link(), Created: cepheus.Date(), Ends: cepheus.Date(), Last: cepheus.Date()}, secret = ["Hash"])
+
+defn BearerOf(req)
+  (** The token of a request's Authorization: Bearer header (the scheme in any case, RFC 9110), or missing when it has
+      none or one longer than 200 bytes.
+
+        BearerOf({Headers: [{Name: "authorization", Value: "Bearer 12.ab"}]}) --> "12.ab"
+        BearerOf({Headers: [{Name: "authorization", Value: "Basic eDp5"}]}) --> missing *)
+  h = http.HeaderValue("authorization", dict.GetOr("Headers", [], req))
+  if not value.IsText(h) or text.ByteLength(h) > 207 or text.ByteLength(h) < 8 or text.Lower(text.ByteSlice(1, 7, h)) != "bearer "
+    return missing
+  end
+  t = text.Trim(text.ByteSlice(8, text.ByteLength(h), h))
+  if t == "" missing else t end
+end
+
+defn keyWho(token, env)
+  (** The user of a request made with a key: an Ok of the user a route sees ({Id: its maker, Tenant, Key, Roles,
+      Rate...}), or of missing for a key that is wrong, revoked, ended, or whose tenant is gone. *)
+  p = parts(token)
+  if value.IsMissing(p)
+    return result.Ok(missing)
+  end
+  k = cepheus.Get(Key, p.Id, env.Db)?
+  if value.IsMissing(k) or not value.IsText(dict.Get("Hash", k)) or not crypto.IsSame(hashOf(p.Secret, env.Keys), k.Hash, env.Keys)
+    return result.Ok(missing)
+  end
+  now = env.Now()
+  ends = dict.Get("Ends", k)
+  if value.IsNumber(ends) and now >= ends
+    return result.Ok(missing)
+  end
+  t = cepheus.Get(Tenant, k.Tenant, env.Db)?
+  if value.IsMissing(t) or value.IsMissing(dict.Get("Created", t))
+    return result.Ok(missing)
+  end
+  last = dict.Get("Last", k)
+  if not value.IsNumber(last) or now - last > 300
+    by = dict.GetOr("By", 0, k)
+    fiber.Spawn(() -> cepheus.Write(list.Concat(if value.IsNumber(last) [cepheus.Expect(p.Id, Key.Last, last)] else [cepheus.Expect(p.Id, Key.Last)] end,
+      [cepheus.Add(p.Id, Key.Last, now)]), env.Db, by = by, why = "key used"))
+  end
+  until = now + 86400
+  if value.IsNumber(ends) and ends < until
+    until = ends
+  end
+  result.Ok({Id: dict.GetOr("By", 0, k), Tenant: k.Tenant, Member: missing, Session: missing, Key: p.Id, Roles: app.RolesOf(k.Roles, env), Super: false,
+    Email: "", Name: dict.GetOr("Name", "", k), Until: until, Checked: true, Rate: env.KeyRate})
+end
+
+defn newKey(r, x)
+  (** POST /auth/keys: a key of the tenant of the session with some of the maker's roles; its secret shown once. *)
+  grantable(x.Roles, r)?
+  secret = encode.Hex(crypto.Random(32, r.Env.Keys))
+  now = r.Now
+  fields = {Tenant: r.User.Tenant, Name: x.Name, Roles: x.Roles, Hash: hashOf(secret, r.Env.Keys), By: r.User.Id, Created: now}
+  if not value.IsMissing(dict.Get("Days", x))
+    fields.Ends = now + x.Days * 86400
+  end
+  id = cepheus.Insert(Key, fields, r.Db, by = r.User.Id, why = r.Why)?
+  note(r, "key", "Key $id made, $(x.Name), roles $(x.Roles).", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  {Id: id, Key: "$id.$secret", Ends: dict.Get("Ends", fields)}
+end
+
+defn keyRow(id, db)
+  (** A key as KeyRow shows it. *)
+  k = cepheus.Get(Key, id, db)?
+  row = {Id: id, Name: dict.GetOr("Name", "", k), Roles: dict.GetOr("Roles", [], k), Created: k.Created}
+  for f in ["By", "Ends", "Last", "Tenant"]
+    if not value.IsMissing(dict.Get(f, k))
+      row[f] = k[f]
+    end
+  end
+  result.Ok(row)
+end
+
+defn keysOf(tenant, r)
+  (** A page of the keys of a tenant (all tenants for missing), the newest first. *)
+  rows = if value.IsMissing(tenant)
+    cepheus.Find(2, (k, c) -> {Where: [[k, Key.Created, c]], Give: {Id: k, Created: c}, Sort: [cepheus.Desc(c), cepheus.Desc(k)], Limit: r.Limit, After: r.After}, r.Db)?
+  else
+    cepheus.Find(2, (k, c) -> {Where: [[k, Key.Tenant, tenant], [k, Key.Created, c]], Give: {Id: k, Created: c}, Sort: [cepheus.Desc(c), cepheus.Desc(k)],
+      Limit: r.Limit, After: r.After}, r.Db)?
+  end
+  result.Ok([dict.Merge(x, keyRow(x.Id, r.Db)?) for x in rows])
+end
+
+(* GET /auth/keys. *)
+keys(r) = keysOf(r.User.Tenant, r)
+
+defn revoked(id, r)
+  (** A key revoked: its facts retracted, so its next request is refused. *)
+  cepheus.Write(app.Gone(Key, id, r.Db)?, r.Db, by = r.User.Id, why = r.Why)?
+  app.ForgetSessions(r.Env.State)
+  result.Ok(missing)
+end
+
+defn revokeKey(r)
+  (** DELETE /auth/keys/:id: a key of the tenant of the session, else a 404. *)
+  k = app.Own(Key, r.Params.id, r)?
+  revoked(k.Id, r)?
+  note(r, "key-revoked", "Key $(k.Id) revoked, $(dict.GetOr("Name", "", k)).", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  result.Ok(missing)
+end
+
+(* GET /admin/keys: the keys of every tenant, or of one. *)
+adminKeys(r, q) = keysOf(dict.Get("Tenant", q), r)
+
+defn adminRevokeKey(r)
+  (** DELETE /admin/keys/:id. *)
+  id = app.IdOf(r.Params.id)
+  k = if value.IsMissing(id) missing else cepheus.Get(Key, id, r.Db)? end
+  if value.IsMissing(k) or value.IsMissing(dict.Get("Created", k))
+    return app.Missing()
+  end
+  revoked(id, r)?
+  note(r, "key-revoked", "Key $id revoked by a super-admin.", user = r.User.Id, tenant = dict.Get("Tenant", k), every = 0)
+  result.Ok(missing)
+end

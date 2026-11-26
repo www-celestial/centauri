@@ -56,16 +56,18 @@ Settings = {
   CheckPage: check.Text(1, 200, optional = true, default = "/check-email"),
   ResetPage: check.Text(1, 200, optional = true, default = "/reset-password"),
   MailsPerHour: check.Int(1, 1000, optional = true, default = 5),
+  KeyLimit: check.Int(1, 1000000, optional = true, default = 600),
 }
 
 (** The mails of the accounts, as an app may write them in its own words: each a function of {Link, Name, Email, App,
-    Hours} that gives {Subject, Text}, and Html if it has one. Check is the link that checks an address, Reset the
+    Hours, Lang, Say} that gives {Subject, Text}, and Html if it has one; Lang is the language of the user (his own, else
+    the app's first), and Say(template) the template in it, from the app's catalogue, its {Names} filled from x. Check is the link that checks an address, Reset the
     one that sets a new password, Taken the mail to the owner of an address that someone tried to sign up with again,
     when the sign-up answers the same for every address (SignUpAnswer neutral). *)
 Mails = {
-  Check: x -> {Subject: "Check your e-mail address for $(x.App)", Text: "Hello $(x.Name),\n\nTo check that this address is yours, open this link within $(x.Hours) hours:\n\n$(x.Link)\n\nIf you didn't sign up for $(x.App), ignore this mail.\n"},
-  Reset: x -> {Subject: "A new password for $(x.App)", Text: "Hello $(x.Name),\n\nTo set a new password, open this link within $(x.Hours) hours:\n\n$(x.Link)\n\nIf you didn't ask for it, ignore this mail: your password stays as it is.\n"},
-  Taken: x -> {Subject: "Someone tried to sign up with your address at $(x.App)", Text: "Hello $(x.Name),\n\nSomeone tried to sign up for $(x.App) with this address, which has an account already. If it was you, sign in, or set a new password here:\n\n$(x.Link)\n\nIf it wasn't you, ignore this mail: nothing changed.\n"},
+  Check: x -> {Subject: x.Say("Check your e-mail address for {App}"), Text: x.Say("Hello {Name},\n\nTo check that this address is yours, open this link within {Hours} hours:\n\n{Link}\n\nIf you didn't sign up for {App}, ignore this mail.\n")},
+  Reset: x -> {Subject: x.Say("A new password for {App}"), Text: x.Say("Hello {Name},\n\nTo set a new password, open this link within {Hours} hours:\n\n{Link}\n\nIf you didn't ask for it, ignore this mail: your password stays as it is.\n")},
+  Taken: x -> {Subject: x.Say("Someone tried to sign up with your address at {App}"), Text: x.Say("Hello {Name},\n\nSomeone tried to sign up for {App} with this address, which has an account already. If it was you, sign in, or set a new password here:\n\n{Link}\n\nIf it wasn't you, ignore this mail: nothing changed.\n")},
 }
 
 defn Module(signUp = api.SignUp, facts = missing, mails = Mails)
@@ -84,7 +86,8 @@ defn Module(signUp = api.SignUp, facts = missing, mails = Mails)
     app.Serve(api.ChangePassword, changePassword), app.Serve(api.Challenge, challenge), app.Serve(api.Members, members),
     app.Serve(api.Invite, invite), app.Serve(api.Join, joining), app.Serve(api.SetRoles, setRoles), app.Serve(api.RemoveMember, removeMember),
     app.Serve(api.MyTenants, myTenants), app.Serve(api.SwitchTenant, switchTenant), app.Serve(api.CheckEmail, checkEmail),
-    app.Serve(api.SendCheck, (r, x) -> sendCheck(r, x, kinds)), app.Serve(api.Forgot, (r, x) -> forgot(r, x, kinds)), app.Serve(api.Reset, resetPassword)]
+    app.Serve(api.SendCheck, (r, x) -> sendCheck(r, x, kinds)), app.Serve(api.Forgot, (r, x) -> forgot(r, x, kinds)), app.Serve(api.Reset, resetPassword),
+    app.Serve(api.SetLang, setLang), app.Serve(api.NewKey, newKey), app.Serve(api.Keys, keys), app.Serve(api.RevokeKey, revokeKey)]
   made = app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, key = SessionKey, ends = Ends,
     settings = dict.Merge(Settings, mail.Settings), start = keep, jobs = [checking, resetting, taken, mail.Job], verify = verified)
   dict.Put("Runner", jobs.Module(), made)
@@ -180,7 +183,24 @@ defn account(user, tenant, roles, db, table)
   (** The Account of a user in a tenant. *)
   u = cepheus.Get(User, user, db)?
   result.Ok({User: user, Email: u.Email, Name: dict.GetOr("Name", "", u), Tenant: tenant, TenantName: tenantName(tenant, db),
-    Roles: app.Expand(roles, table), Super: u.Super == true, Checked: not value.IsMissing(dict.Get("Checked", u))})
+    Roles: app.Expand(roles, table), Super: u.Super == true, Checked: not value.IsMissing(dict.Get("Checked", u)), Lang: dict.Get("Lang", u)})
+end
+
+defn setLang(r, x)
+  (** PUT /auth/lang: one of the app's languages, or "" for none (the browser's). *)
+  if x.Lang != "" and not (x.Lang in r.Env.Langs)
+    return app.Fail(422, "Check the fields.", fields = {Lang: "One of: $(text.Join(", ", r.Env.Langs))."})
+  end
+  u = cepheus.Get(User, r.User.Id, r.Db)?
+  ops = if value.IsText(dict.Get("Lang", u)) [cepheus.Retract(r.User.Id, User.Lang, u.Lang)] else [] end
+  if x.Lang != ""
+    ops = list.Append(cepheus.Add(r.User.Id, User.Lang, x.Lang), ops)
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)?
+  end
+  m = membershipOf(r.User.Id, r.User.Tenant, r.Db)?
+  account(r.User.Id, r.User.Tenant, if value.IsMissing(m) [] else m.Roles end, r.Db, r.Env.Roles)
 end
 
 defn single(env)
@@ -246,7 +266,7 @@ defn signingUp(r, x, facts, kinds)
   if neutral and value.Len(cepheus.Find(1, u -> {Where: [[u, User.Email, x.Email]], Give: {U: u}}, env.Db)?) > 0
     return takenAnswer(x, r, kinds)
   end
-  ops = app.Facts(User, cepheus.New(1), {Email: x.Email, Name: x.Name, Hash: hash, Super: false, Disabled: false, Created: now})
+  ops = app.Facts(User, cepheus.New(1), newUser(x.Email, x.Name, hash, now, r))
   next = 2
   tenant = missing
   roles = []
@@ -306,6 +326,15 @@ defn signingUp(r, x, facts, kinds)
   end
   out = account(user, tenantId, roles, env.Db, env.Roles)?
   app.Reply(out, headers = [Cookie(session.Value(things[member + 1]), env, s.SessionMax)])
+end
+
+defn newUser(email, name, hash, now, r)
+  (** The fields of a new user: his language the one his browser prefers among the app's, when it speaks several. *)
+  u = {Email: email, Name: name, Hash: hash, Super: false, Disabled: false, Created: now}
+  if r.Env.Translating
+    u.Lang = app.Lang(r)
+  end
+  u
 end
 
 defn takenAnswer(x, r, kinds)
@@ -534,7 +563,11 @@ defn mailed(user, kind, page, seconds, texts, env)
   end
   c = newCode(user, kind, seconds, env)
   cepheus.Write(c.Ops, env.Db, why = env.Why)?
-  words = texts({Link: link(env, page, c.Code), Name: dict.GetOr("Name", "", u), Email: u.Email, App: env.App.Name, Hours: math.Ceil(seconds / 3600)})
+  lang = dict.Get("Lang", u)
+  x = {Link: link(env, page, c.Code), Name: dict.GetOr("Name", "", u), Email: u.Email, App: env.App.Name, Hours: math.Ceil(seconds / 3600)}
+  x.Lang = if value.IsText(lang) and lang in env.Langs lang else env.Lang end
+  x.Say = t -> app.SayIn(env, x.Lang, t, args = x)
+  words = texts(x)
   m = {To: [u.Email], Subject: words.Subject, Text: words.Text}
   if dict.Has("Html", words)
     m.Html = words.Html

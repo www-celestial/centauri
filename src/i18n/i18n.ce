@@ -1,0 +1,387 @@
+(** Translations, the same on the server and in a page: catalogues of messages, the plural rules of CLDR, and the
+    language of a request. A message is its English text, as gettext and Django write it, with {Name} for a value put
+    in it: "Too many attempts: wait {Seconds} seconds.". A catalogue gives, for each language, the text of each
+    message, or its plural forms by the categories of CLDR (zero, one, two, few, many, other). Say translates a message
+    whose values are given, and also one already filled in, as std/check and Centauri write their errors in English:
+    "A whole number from 1 to 10." is read against "A whole number from {Min} to {Max}.", and its values put in the
+    French. So the errors of the forms, the Problem Details of the server and the mails are translated by one
+    catalogue, which the pages use too. This package uses std only: it runs in a page.
+
+      c = Catalog({fr: {"Hello {Name}.": "Bonjour {Name}.", "{N} invoices": {one: "{N} facture", other: "{N} factures"}}})
+      Say(c, "fr", "Hello {Name}.", {Name: "Ana"}) --> "Bonjour Ana."
+      Say(c, "fr", "{N} invoices", {N: 1}) --> "1 facture"
+      Say(c, "fr", "{N} invoices", {N: 3}) --> "3 factures"
+      Say(c, "en", "Hello {Name}.", {Name: "Ana"}) --> "Hello Ana." *)
+use std/dict
+use std/list
+use std/math
+use std/text
+use std/value
+
+defn pieces(template)
+  (** The literal parts and the names of a template, in order: {Parts, Names}, Parts one more than Names (the text
+      before the first name, between two, after the last). A { not followed by a name and } is plain text. *)
+  parts = []
+  names = []
+  rest = template
+  current = ""
+  while true
+    open = text.ByteFind("{", 1, rest)
+    if value.IsMissing(open)
+      current = "$current$rest"
+      break
+    end
+    close = text.ByteFind("}", open + 1, rest)
+    name = if value.IsMissing(close) "" else text.ByteSlice(open + 1, close - 1, rest) end
+    if name == "" or not isName(name)
+      current = "$current$(text.ByteSlice(1, open, rest))"
+      rest = text.ByteSlice(open + 1, text.ByteLength(rest), rest)
+    else
+      parts = list.Append("$current$(text.ByteSlice(1, open - 1, rest))", parts)
+      names = list.Append(name, names)
+      current = ""
+      rest = text.ByteSlice(close + 1, text.ByteLength(rest), rest)
+    end
+  end
+  {Parts: list.Append(current, parts), Names: names}
+end
+
+defn isName(s)
+  (** A name of a value in a template: letters and digits, a letter first, at most 40 bytes. *)
+  bytes = text.Bytes(s)
+  if value.Len(bytes) > 40
+    return false
+  end
+  k = 0
+  for b in bytes
+    k += 1
+    letter = (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+    if not (letter or (k > 1 and b >= 48 and b <= 57))
+      return false
+    end
+  end
+  true
+end
+
+defn Catalog(messages)
+  (** A catalogue of messages: messages maps each language ("fr", "pt-BR") to a map of messages, each to its text or
+      to its plural forms, {one: ..., other: ...} (By, a name of the template, says which value chooses the form; the
+      first value that is a number else). The catalogue keeps each language's messages as they are, for Say with
+      values, and the templates of those that have values, for Say of a message already filled in.
+
+        Catalog({fr: {"Yes": "Oui"}}).Langs --> ["fr"] *)
+  exact = {}
+  patterns = {}
+  for p in dict.Pairs(messages)
+    lang = text.Lower(p.Key)
+    exact[lang] = dict.Merge(dict.GetOr(lang, {}, exact), p.Value)
+    found = dict.GetOr(lang, [], patterns)
+    for m in dict.Pairs(p.Value)
+      t = pieces(m.Key)
+      if value.Len(t.Names) > 0 and fits(t)
+        found = list.Append({Parts: t.Parts, Names: t.Names, Key: m.Key}, found)
+      end
+    end
+    patterns[lang] = found
+  end
+  {Langs: dict.Keys(exact), Exact: exact, Patterns: patterns}
+end
+
+defn fits(t)
+  (** Can a message filled in be read back against a template: no two names side by side, so that each value ends
+      where the next literal part begins. *)
+  for k in 2..value.Len(t.Parts) - 1
+    if t.Parts[k] == ""
+      return false
+    end
+  end
+  true
+end
+
+defn Of(catalogs)
+  (** One catalogue of several, as those of Centauri and of an app: for a message in two, the last one's text wins.
+
+        Say(Of([Catalog({fr: {"Yes": "Oui"}}), Catalog({fr: {"Yes": "Oui !"}})]), "fr", "Yes") --> "Oui !" *)
+  messages = {}
+  for c in catalogs
+    for p in dict.Pairs(c.Exact)
+      messages[p.Key] = dict.Merge(dict.GetOr(p.Key, {}, messages), p.Value)
+    end
+  end
+  Catalog(messages)
+end
+
+defn langOf(catalog, lang)
+  (** The language of a catalogue that serves lang: itself, else its base language ("pt" for "pt-BR"), else missing. *)
+  l = if value.IsText(lang) text.Lower(lang) else "" end
+  if dict.Has(l, catalog.Exact)
+    return l
+  end
+  cut = text.ByteFind("-", 1, l)
+  base = if value.IsMissing(cut) missing else text.ByteSlice(1, cut - 1, l) end
+  if not value.IsMissing(base) and dict.Has(base, catalog.Exact) base else missing end
+end
+
+defn filled(template, args)
+  (** A template with the values of args in place of their names; a name args lacks stays as it is. *)
+  t = pieces(template)
+  out = t.Parts[1]
+  for k in 1..value.Len(t.Names)
+    v = dict.Get(t.Names[k], args)
+    out = "$out$(if value.IsMissing(v) "{$(t.Names[k])}" else value.Text(v) end)$(t.Parts[k + 1])"
+  end
+  out
+end
+
+defn formOf(target, lang, template, args)
+  (** The text of a translation for these values: itself, or the plural form of the number that chooses it. *)
+  if value.IsText(target)
+    return target
+  end
+  if not value.IsDict(target)
+    return template
+  end
+  by = dict.Get("By", target)
+  n = if value.IsMissing(by) missing else dict.Get(by, args) end
+  if value.IsMissing(n)
+    for name in pieces(template).Names
+      v = dict.Get(name, args)
+      if value.IsMissing(n) and (value.IsNumber(v) or (value.IsText(v) and value.IsNumber(text.Number(v))))
+        n = v
+      end
+    end
+  end
+  form = if value.IsMissing(n) "other" else Plural(lang, n) end
+  dict.GetOr(form, dict.GetOr("other", template, target), target)
+end
+
+defn Say(catalog, lang, message, args = missing)
+  (** A message in a language. With args, the values of its names: its text in the language (its plural form for
+      those values), else the message itself, filled in. Without args, a message as it was written, values in it:
+      its text when the catalogue has it as it is, else the first template it matches, its values taken from it and
+      put in the translation, else the message unchanged. A language the catalogue lacks gives the message; "pt-BR"
+      is served by "pt" when there is no "pt-BR".
+
+        c = Catalog({fr: {"A whole number from {Min} to {Max}.": "Un nombre entier de {Min} à {Max}."}})
+        Say(c, "fr", "A whole number from 1 to 10.") --> "Un nombre entier de 1 à 10."
+        Say(c, "fr-CA", "A whole number from 1 to 10.") --> "Un nombre entier de 1 à 10."
+        Say(c, "de", "A whole number from 1 to 10.") --> "A whole number from 1 to 10."
+        Say(c, "fr", "Something else.") --> "Something else." *)
+  l = langOf(catalog, lang)
+  if not value.IsMissing(args)
+    if value.IsMissing(l)
+      return filled(message, args)
+    end
+    target = dict.Get(message, catalog.Exact[l])
+    return if value.IsMissing(target) filled(message, args) else filled(formOf(target, l, message, args), args) end
+  end
+  if value.IsMissing(l) or not value.IsText(message)
+    return message
+  end
+  target = dict.Get(message, catalog.Exact[l])
+  if value.IsText(target)
+    return target
+  end
+  if value.IsDict(target)
+    return formOf(target, l, message, {})
+  end
+  for p in catalog.Patterns[l]
+    got = Match(p, message)
+    if not value.IsMissing(got)
+      return filled(formOf(catalog.Exact[l][p.Key], l, p.Key, got), got)
+    end
+  end
+  message
+end
+
+defn Match(pattern, message)
+  (** The values of a message filled in from a template of Catalog's ({Parts, Names}): a map of each name to the text
+      it holds, or missing when the message is not of this template. Each value ends at the first place where the
+      literal part after it comes, so a value never holds that part. *)
+  parts = pattern.Parts
+  size = text.ByteLength(message)
+  first = parts[1]
+  if not text.StartsWith(first, message)
+    return missing
+  end
+  at = text.ByteLength(first) + 1
+  out = {}
+  n = value.Len(pattern.Names)
+  for k in 1..n
+    after = parts[k + 1]
+    stop = 0
+    if k == n
+      if after == ""
+        stop = size + 1
+      else if text.ByteLength(after) <= size - at + 1 and text.ByteSlice(size - text.ByteLength(after) + 1, size, message) == after
+        stop = size - text.ByteLength(after) + 1
+      else
+        return missing
+      end
+    else
+      found = text.ByteFind(after, at, message)
+      if value.IsMissing(found)
+        return missing
+      end
+      stop = found
+    end
+    if stop <= at
+      return missing
+    end
+    out[pattern.Names[k]] = text.ByteSlice(at, stop - 1, message)
+    at = stop + text.ByteLength(after)
+  end
+  if at != size + 1
+    return missing
+  end
+  out
+end
+
+defn operands(n)
+  (** The operands of CLDR's plural rules of a number, or of a text that writes one: i its integer digits, v the count
+      of its visible digits after the point, f those digits as an integer, n its absolute value. *)
+  t = if value.IsText(n) text.Trim(n) else value.Text(n) end
+  if text.StartsWith("-", t)
+    t = text.ByteSlice(2, text.ByteLength(t), t)
+  end
+  dot = text.ByteFind(".", 1, t)
+  whole = if value.IsMissing(dot) t else text.ByteSlice(1, dot - 1, t) end
+  frac = if value.IsMissing(dot) "" else text.ByteSlice(dot + 1, text.ByteLength(t), t) end
+  i = text.Number(if whole == "" "0" else whole end)
+  num = text.Number(t)
+  if not value.IsInt(i) or value.IsMissing(num)
+    return {I: 0, V: 0, F: 0, N: 0}
+  end
+  {I: i, V: text.ByteLength(frac), F: if frac == "" 0 else text.Number(frac) end, N: num}
+end
+
+within(x, a, b) = value.IsInt(x) and x >= a and x <= b   (* x in a..b, for an integer x, as CLDR writes it *)
+
+defn Plural(lang, n)
+  (** The plural category of a number in a language, by the rules of CLDR 49: "zero", "one", "two", "few", "many" or
+      "other". Rules for ar, de, en, es, fr, it, ja, ko, nl, pl, pt, pt-PT, ru, sv, tr, uk and zh; any other language
+      has "other" alone. n is a number or a text that writes one ("1.50" has two digits after the point: CLDR counts
+      what is written).
+
+        Plural("en", 1) --> "one"
+        Plural("en", "1.0") --> "other"
+        Plural("fr", 0) --> "one"
+        Plural("fr", 1.5) --> "one"
+        Plural("fr", 1000000) --> "many"
+        Plural("ru", 22) --> "few"
+        Plural("ru", 25) --> "many"
+        Plural("pl", 12) --> "many"
+        Plural("ar", 102) --> "other"
+        Plural("ja", 1) --> "other" *)
+  o = operands(n)
+  i = o.I
+  v = o.V
+  l = if value.IsText(lang) text.Lower(lang) else "" end
+  base = if text.Contains("-", l) text.Split("-", l)[1] else l end
+  million = v == 0 and i != 0 and math.Mod(i, 1000000) == 0
+  if base == "en" or base == "de" or base == "nl" or base == "sv"
+    return if i == 1 and v == 0 "one" else "other" end
+  end
+  if base == "fr" or (base == "pt" and l != "pt-pt")
+    return if within(i, 0, 1) "one" else if million "many" else "other" end
+  end
+  if base == "it" or l == "pt-pt"
+    return if i == 1 and v == 0 "one" else if million "many" else "other" end
+  end
+  if base == "es"
+    return if o.N == 1 and v == 0 "one" else if million "many" else "other" end
+  end
+  if base == "tr"
+    return if o.N == 1 and v == 0 "one" else "other" end
+  end
+  if base == "ru" or base == "uk"
+    if v != 0
+      return "other"
+    end
+    d = math.Mod(i, 10)
+    h = math.Mod(i, 100)
+    return if d == 1 and h != 11 "one" else if within(d, 2, 4) and not within(h, 12, 14) "few" else "many" end
+  end
+  if base == "pl"
+    if v != 0
+      return "other"
+    end
+    d = math.Mod(i, 10)
+    h = math.Mod(i, 100)
+    return if i == 1 "one" else if within(d, 2, 4) and not within(h, 12, 14) "few" else "many" end
+  end
+  if base == "ar"
+    if v != 0
+      return "other"
+    end
+    h = math.Mod(i, 100)
+    return if i == 0 "zero" else if i == 1 "one" else if i == 2 "two" else if within(h, 3, 10) "few" else if within(h, 11, 99) "many" else "other" end
+  end
+  "other"
+end
+
+defn Best(header, langs, default)
+  (** The language of an Accept-Language header among langs, those an app speaks: the one the browser prefers most
+      (its q, 1 when absent, ties in the header's order), matched as it is ("fr-CA") or by its base ("fr"), else
+      default. The header is read only up to 400 bytes and 20 languages, each a tag of letters, digits and -, so that
+      nothing in it reaches an answer but one of langs.
+
+        Best("fr-CA,fr;q=0.9,en;q=0.8", ["en", "fr"], "en") --> "fr"
+        Best("de, en;q=0.5", ["en", "fr"], "en") --> "en"
+        Best("es", ["en", "fr"], "en") --> "en"
+        Best("fr;q=0, en", ["en", "fr"], "en") --> "en"
+        Best("<script>\r\nx: y", ["en", "fr"], "en") --> "en" *)
+  if not value.IsText(header) or header == ""
+    return default
+  end
+  h = if text.ByteLength(header) > 400 text.ByteSlice(1, 400, header) else header end
+  known = [text.Lower(x) for x in langs]
+  best = default
+  bestQ = 0
+  k = 0
+  for item in text.Split(",", h)
+    k += 1
+    if k > 20
+      break
+    end
+    cut = text.Split(";", item)
+    tag = text.Lower(text.Trim(cut[1]))
+    q = 1
+    if value.Len(cut) > 1
+      p = text.Trim(cut[2])
+      q = if text.StartsWith("q=", p) text.Number(text.ByteSlice(3, text.ByteLength(p), p)) else missing end
+    end
+    if isTag(tag) and value.IsNumber(q) and q > bestQ and q <= 1
+      found = matched(tag, known, langs)
+      if not value.IsMissing(found)
+        best = found
+        bestQ = q
+      end
+    end
+  end
+  best
+end
+
+defn isTag(t)
+  (** A language tag as Accept-Language writes one: letters, digits and -, 1 to 35 bytes. *)
+  if t == "" or text.ByteLength(t) > 35
+    return false
+  end
+  list.All([(b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 45 for b in text.Bytes(t)])
+end
+
+defn matched(tag, known, langs)
+  (** The language of langs that serves a tag: itself, else its base. *)
+  for k in 1..value.Len(known)
+    if known[k] == tag
+      return langs[k]
+    end
+  end
+  base = text.Split("-", tag)[1]
+  for k in 1..value.Len(known)
+    if known[k] == base
+      return langs[k]
+    end
+  end
+  missing
+end

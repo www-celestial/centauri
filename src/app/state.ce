@@ -82,6 +82,17 @@ Lines(state) = ask(state, {Op: "lines"})
     event a key and not one a request. *)
 Fresh(key, seconds, state) = ask(state, {Op: "fresh", Key: key, Every: seconds})
 
+(** Keeps a value under a key until a time (in seconds since 1970, the state's clock), for what a process reads often
+    and changes seldom: the keys of an OpenID provider, the table of the feature flags. The state holds keys of them
+    at most; past that, the oldest ones go. *)
+Remember(key, v, until, state) = fiber.Send({Op: "remember", Key: key, Value: v, Until: until}, state)
+
+(** The value kept under a key, or missing when there is none or its time passed. *)
+Recall(key, state) = ask(state, {Op: "recall", Key: key})
+
+(** Forgets the value kept under a key: the next Recall gives missing. *)
+Forget(key, state) = fiber.Send({Op: "forget-one", Key: key}, state)
+
 (** Counts a failed sign-in in the failures of the last minute. *)
 Failed(state) = fiber.Send({Op: "failed"}, state)
 
@@ -94,7 +105,8 @@ defn door(ip, state, session, store, user, endpoint, gen)
       true and User the user it names (missing for a cookie that names nobody); when it is not, Hit is false, Gen the
       generation of the kept sessions, and nothing is counted: the request reads its session, and comes back with it,
       store = {User, Until}, kept until Until if no session was forgotten since Gen. Then the limits of its address,
-      of its user and his tenant (user, without a session to look up), and of its endpoint ({Name, Gap, Tol}), all of
+      of its user (of its key, for a program's: user.Key, at user.Rate) and his tenant (user, without a session to
+      look up), and of its endpoint ({Name, Gap, Tol}), all of
       them or none, as Allow counts them. Now is the time of the state, a test's clock too. The arguments that don't
       apply are missing, gen 0. *)
   reply = fiber.Channel(size = 1)
@@ -135,6 +147,7 @@ defn own(ch, slots, most, kept, keys, clock, rates)
   served = 0
   box = []
   places = dict.Dict()
+  memo = dict.Dict()
   while true
     got = fiber.Receive(ch)
     if result.IsErr(got)
@@ -191,7 +204,9 @@ defn own(ch, slots, most, kept, keys, clock, rates)
       else if value.IsMissing(m.Endpoint)
         (* the request of a user: the limits of his address, of himself and of his tenant, all or none *)
         k1 = "ip:$(m.Ip)"
-        k2 = "u:$(user.Id)"
+        program = dict.Get("Key", user)
+        k2 = if value.IsMissing(program) "u:$(user.Id)" else "k:$program" end
+        r2 = if value.IsMissing(program) rates.User else user.Rate end
         tenant = dict.Get("Tenant", user)
         k3 = if value.IsMissing(tenant) missing else "t:$tenant" end
         t1 = dict.GetOr(k1, now, due)
@@ -202,8 +217,8 @@ defn own(ch, slots, most, kept, keys, clock, rates)
         t3 = if t3 < now now else t3 end
         late = t1 - now - rates.Ip.Tol
         refused = if late > 0 k1 else missing end
-        if value.IsMissing(refused) and t2 - now - rates.User.Tol > 0
-          late = t2 - now - rates.User.Tol
+        if value.IsMissing(refused) and t2 - now - r2.Tol > 0
+          late = t2 - now - r2.Tol
           refused = k2
         end
         if value.IsMissing(refused) and not value.IsMissing(k3) and t3 - now - rates.Tenant.Tol > 0
@@ -212,7 +227,7 @@ defn own(ch, slots, most, kept, keys, clock, rates)
         end
         if value.IsMissing(refused)
           due[k1] = t1 + rates.Ip.Gap
-          due[k2] = t2 + rates.User.Gap
+          due[k2] = t2 + r2.Gap
           if not value.IsMissing(k3)
             due[k3] = t3 + rates.Tenant.Gap
           end
@@ -228,12 +243,15 @@ defn own(ch, slots, most, kept, keys, clock, rates)
         ks = ["ip:$(m.Ip)"]
         rs = [rates.Ip]
         if not value.IsMissing(user)
+          program = dict.Get("Key", user)
+          ku = if value.IsMissing(program) "u:$(user.Id)" else "k:$program" end
+          ru = if value.IsMissing(program) rates.User else user.Rate end
           if value.IsMissing(dict.Get("Tenant", user))
-            ks = ["ip:$(m.Ip)", "u:$(user.Id)"]
-            rs = [rates.Ip, rates.User]
+            ks = ["ip:$(m.Ip)", ku]
+            rs = [rates.Ip, ru]
           else
-            ks = ["ip:$(m.Ip)", "u:$(user.Id)", "t:$(user.Tenant)"]
-            rs = [rates.Ip, rates.User, rates.Tenant]
+            ks = ["ip:$(m.Ip)", ku, "t:$(user.Tenant)"]
+            rs = [rates.Ip, ru, rates.Tenant]
           end
         end
         e = m.Endpoint
@@ -355,6 +373,19 @@ defn own(ch, slots, most, kept, keys, clock, rates)
       box = list.Append(m.Mail, if value.Len(box) >= 1000 list.Skip(1, box) else box end)
     else if op == "mails"
       fiber.Send(box, m.Reply)
+    else if op == "recall"
+      kept1 = dict.Get(m.Key, memo)
+      fiber.Send(if value.IsMissing(kept1) or now >= kept1.Until missing else kept1.Value end, m.Reply)
+    else if op == "remember"
+      if value.Len(memo) >= keys and not dict.Has(m.Key, memo)
+        memo = dict.Dict([p for p in dict.Pairs(memo) if p.Value.Until > now])
+        if value.Len(memo) >= keys
+          memo = dict.Dict()
+        end
+      end
+      memo[m.Key] = {Value: m.Value, Until: m.Until}
+    else if op == "forget-one"
+      memo = dict.Drop(m.Key, memo)
     else if op == "now"
       fiber.Send(now, m.Reply)
     else if op == "advance"
