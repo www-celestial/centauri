@@ -20,7 +20,38 @@ language, `i18n.Catalog(lang, messages)`: its messages are a list of pairs, each
 forms (`{one: ..., other: ...}`, and `By`, the name of the value that chooses the form). `i18n.Of` joins catalogues,
 of one language or of several:
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/admin
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/flags
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use std/bug
+use std/json
+use std/value
+Countries = json.Parse("{}")!
+ExportCountry = json.Parse("{}")!
+Kinds = json.Parse("{}")!
+Report = json.Parse("{}")!
+Roles = json.Parse("{}")!
+Rules = json.Parse("{}")!
+Settings = json.Parse("{}")!
+ada = json.Parse("{}")!
+inv = json.Parse("{}")!
+invoices = json.Parse("{}")!
+keep = json.Parse("{}")!
+lang = json.Parse("{}")!
+n = json.Parse("{}")!
+r = json.Parse("{}")!
+words = json.Parse("{}")!
 ```
+
+```cesia norun
 (* src/invoices/words/words.ce *)
 use deps/www-celestial/centauri/src/i18n
 
@@ -28,16 +59,16 @@ Words = i18n.Catalog("fr", [
   ["Invoice {Number} is paid already.", "La facture {Number} est déjà payée."],
   ["Another client has this e-mail.", "Un autre client a cette adresse e-mail."],
   ["This client has invoices: it stays.", "Ce client a des factures : il reste."],
-  ...
+  (* ... *)
   ["{N} unpaid invoices", {one: "{N} facture impayée", other: "{N} factures impayées"}],
 ])
 ```
 
 The module gives its catalogue, and the app says which languages it speaks, its first the default:
 
-```
+```cesia norun
 (* src/invoices/module.ce *)
-Module = app.Module("invoices", kinds = Kinds, rules = Rules, start = keep, serve = [...], migrations = [Countries], messages = words.Words)
+Module = app.Module("invoices", kinds = Kinds, rules = Rules, start = keep, serve = [(* ... *)], migrations = [Countries], messages = words.Words)
 
 App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), flags.Module([ExportCountry]), admin.Module(folder = "admin"), Module], name = "invoices", roles = Roles, settings = Settings,
   defaults = {MemberRoles: "accountant", EmailCheck: "required", SignUpAnswer: "neutral", Langs: "en,fr"})
@@ -60,7 +91,7 @@ invoice.paid=La facture {0} est déjà payée.
 
 A handler writes its errors as it did, in English, the values in them:
 
-```
+```cesia norun
 (* src/invoices/invoices.ce *)
     return app.Fail(409, "Invoice $(inv.Number) is paid already.")
 ```
@@ -73,7 +104,7 @@ back, and is said with its values only.
 
 With values, a handler or a job says a message itself, in the language of the request:
 
-```
+```cesia norun
 app.Say(r, "{N} unpaid invoices", args = {N: 2})    (* "2 unpaid invoices", or "2 factures impayées" *)
 ```
 
@@ -129,11 +160,11 @@ Centauri's mails, the check of an address, a new password, the mail to the owner
 with, are in the language of their user (his `Lang`, else the app's first); an invitation in the app's first, since
 the invitee has no account yet. Their texts are messages of the catalogue, said by `x.Say`:
 
-```
+```cesia norun
 (* src/auth/auth.ce *)
 Mails = {
   Check: x -> {Subject: x.Say("Check your e-mail address for {App}"), Text: x.Say("Hello {Name},\n\nTo check that this address is yours, open this link within {Hours} hours:\n\n{Link}\n\nIf you didn't sign up for {App}, ignore this mail.\n")},
-  ...
+  (* ... *)
 }
 ```
 
@@ -146,10 +177,9 @@ language, its plural chosen by `Hours`: "dans l’heure" for one, "dans les 48 h
 
 Package i18n uses std only: a page of Ceres, in WebAssembly, takes it as the server does, with the same catalogues.
 
-```
-(* a sketch: a page of the invoices *)
+```cesia norun
+(* a sketch: a page of the invoices; words is their package src/invoices/words *)
 use deps/www-celestial/centauri/src/i18n
-use src/invoices/words
 
 c = i18n.Of([i18n.Centauri, words.Words])
 said = i18n.Say(c, lang, "{N} unpaid invoices", {N: n})
@@ -177,7 +207,7 @@ English.
 | ar | 1 | zero: 0; two: 2; few: ends in 03 to 10; many: ends in 11 to 99 (whole numbers, 3.0 too) | the rest, and decimals |
 | ja, ko, zh, and any other | | | everything |
 
-```
+```cesia norun
 i18n.Plural("fr", 0) --> "one"
 i18n.Plural("fr", 1000000) --> "many"
 i18n.Plural("ru", 22) --> "few"
@@ -214,11 +244,11 @@ a mail in the user's language (`isMailInTheUsersLanguage`); a sign-up that keeps
 (`isSignUpTakingTheBrowsersLanguage`); the catalogue's French exactly, with its no-break space before a colon
 (`isCatalogueExact`).
 
-```
+```cesia norun
 defn isInFrench()
   t = apptest.Start(invoices.App)?
   a = t.SignUp(ada)?
-  ...
+  (* ... *)
   fr = [{Name: "accept-language", Value: "fr-FR,fr;q=0.9"}]
   again = a.Raw("POST", "/invoices/$(inv.Id)/pay", headers = fr)
   wrong = a.Raw("POST", "/clients", body = json.Text({Name: "", Email: "nobody"}), headers = fr)

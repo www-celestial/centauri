@@ -52,10 +52,25 @@ centauri: APP_SIGN_IN_WITH: nobody is no provider (google, microsoft, apple, git
 
 The provider of the app's own, beside those Centauri knows:
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use std/bug
+use std/dict
+use std/json
+use std/value
+invoices = json.Parse("{}")!
+made = json.Parse("{}")!
 ```
+
+```cesia norun
 (* a sketch: the invoices sign in with Google alone *)
 Okta = auth.Provider("okta", title = "Okta", issuer = "https://acme.okta.com")
-App = app.Of([auth.Module(providers = [Okta]), ...], ...)
+App = app.Of([auth.Module(providers = [Okta]), (* ... *)], (* ... *))
 ```
 
 `auth.Provider(name, title, issuer, scopes)` reads `APP_OKTA_ID` and `APP_OKTA_SECRET` (its name with a capital, then
@@ -233,7 +248,7 @@ endpoint checks PKCE and the client's secret and signs an ID token with its own 
 `alg`, with a pair of keys given or made). Its `Settings` turn it on in an app as `oidc` (`SignInWith`, `OidcIssuer`,
 `OidcId`, `OidcSecret`, and `CallAllow` and `CallCa`, since it is on this machine).
 
-```
+```cesia norun
 defn isSignedInWithGoogle()
   first = apptest.Start(invoices.App)?
   p = apptest.Provider(first)?
@@ -242,7 +257,7 @@ defn isSignedInWithGoogle()
   out = apptest.ProviderSignIn(t, p, start = {Return: "/invoices?Unpaid=true"})
   a = json.Parse(out.Body)?
   bug.Assert(out.Status == 201 and a.Return == "/invoices?Unpaid=true" and a.Checked == true and "owner" in a.Roles, "an office of her own: $(out.Body)")
-  ...
+  (* ... *)
   made.Status == 201 and value.Len(t.Mails()) == 0
 end
 ```

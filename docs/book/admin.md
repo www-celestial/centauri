@@ -15,21 +15,44 @@ screen of [chapter 9](live.md), and nothing else: no new way into the app.
 
 ## 1. Mount it
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/check
+use std/dict
+use std/result
+use std/value
+use std/json
+Invoice = json.Parse("{}")!
+Module = json.Parse("{}")!
+Report = json.Parse("{}")!
+Statuses = json.Parse("{}")!
+byOffice = json.Parse("{}")!
+e = json.Parse("{}")!
+paying = json.Parse("{}")!
 ```
+
+```cesia norun
 (* src/invoices/module.ce *)
 use deps/www-celestial/centauri/src/admin
 
-App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), admin.Module(folder = "admin"), Module], name = "invoices", ...)
+App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), admin.Module(folder = "admin"), Module], name = "invoices", (* ... *))
 ```
 
-```
+```cesia norun
 (* admin/page.ce: the app's entry of its admin pages *)
 use deps/www-celestial/centauri/src/admin/pages
 
 pages.Run(title = "Invoices — admin")
 ```
 
-```
+```sh
 cesia build --target wasm admin/page.ce     # admin/page.wasm, its loader page.js, the glue ceres.js and admin.js
 brotli -k -q 11 admin/page.wasm admin/*.js  # optional: the browser then gets 144 KB in all
 APP_ADMIN_EMAIL=ana@example.com APP_ADMIN_PASSWORD=... cesia do admin   # the first super-admin
@@ -94,7 +117,7 @@ password, a webhook's secret) is never sent to a page, shown `(secret)`, and nev
 The support of the platform wants the unpaid invoices of every office, their sum by office, and to mark one paid when
 a client pays by phone. Two endpoints of the role super on the server, and a page in the admin's entry:
 
-```
+```cesia norun
 (* src/invoices/endpoints/endpoints.ce *)
 AdminRow = check.Record({Id: check.Id(), Tenant: check.Id(), Number: check.Int(1), BillTo: check.Text(), Due: check.Date(),
   Status: check.OneOf(Statuses), Total: check.Money(2, 0, 1e15)})
@@ -103,7 +126,7 @@ AdminInvoices = api.Get("/admin/invoices", query = check.Record({Status: check.O
 AdminPay = api.Post("/admin/invoices/:id/pay", role = api.Super, about = "Marks an invoice paid, for the support.")
 ```
 
-```
+```cesia norun
 (* src/invoices/invoices.ce: an invoice of any office paid by the support, as its office would pay it *)
 defn adminPaying(r)
   id = app.IdOf(r.Params.id)
@@ -120,11 +143,10 @@ end
 adminPay(r) = app.Retry(() -> adminPaying(r))
 ```
 
-```
-(* admin/page.ce *)
+```cesia norun
+(* admin/page.ce; e is the package of the invoices' contracts, src/invoices/endpoints, and words their catalogue *)
 use deps/www-celestial/centauri/src/admin/pages
 use deps/www-celestial/ceres/src/web
-use src/invoices/endpoints as e
 use std/plot
 
 defn unpaid(p)

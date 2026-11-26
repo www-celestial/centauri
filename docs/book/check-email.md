@@ -13,7 +13,29 @@ background jobs (package `mail`, chapter [The report of each night](nightly-repo
 
 ## 1. Two settings
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use std/bug
+use std/http
+use std/value
+use std/json
+Module = json.Parse("{}")!
+Report = json.Parse("{}")!
+Roles = json.Parse("{}")!
+Settings = json.Parse("{}")!
+ada = json.Parse("{}")!
+invoices = json.Parse("{}")!
+now = json.Parse("{}")!
 ```
+
+```cesia norun
 App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), Module], name = "invoices", roles = Roles, settings = Settings,
   defaults = {MemberRoles: "accountant", EmailCheck: "required", SignUpAnswer: "neutral"})
 ```
@@ -48,7 +70,7 @@ Each is a setting, and an app that wants another way of its own sets it: a publi
 The sign-up writes, in one group, the user, his tenant, his membership and the job of the mail; the job makes the code,
 keeps its BLAKE2b hash with its end (`centauri_code`), and sends the link:
 
-```
+```text
 http://localhost:8080/check-email#code=5f0c...e91a
 ```
 
@@ -66,7 +88,7 @@ back, as at a sign-in. A new mail is `POST /auth/check/send {Email}`, which answ
 
 ## 3. A forgotten password
 
-```
+```text
 POST /auth/forgot {Email}            -> 202, always
 POST /auth/reset  {Code, Password}   -> the account, and a new session
 ```
@@ -106,14 +128,14 @@ so the tests of an app don't change when it turns the check on (`examples/invoic
 
 ## 5. Its test
 
-```
+```cesia norun
 defn isSignedUpByTheLinkOfItsMail()
   t = apptest.Start(invoices.App, now = now)?
   first = t.Anyone().Send(api.SignUp, ada)
   bug.Assert(first.Status == 202 and value.IsMissing(http.HeaderValue("set-cookie", first.Headers)), "no session before the check")
   t.RunJobs()?
   a = t.Anyone().Call(api.CheckEmail, {Code: t.Code(ada.Email)})?
-  ...
+  (* ... *)
 end
 ```
 

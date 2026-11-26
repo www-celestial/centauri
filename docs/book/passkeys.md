@@ -114,7 +114,7 @@ removal stay, so a user can still see and take away what he made.
 
 ## 3. Signing up without a password
 
-```
+```text
 POST /auth/signup/passkey/options {Email, Name, Tenant?, Invite?, Proof?}   -> {Ticket, Options}
 POST /auth/signup/passkey         {Ticket, Credential}                      -> the Account, and a session
 ```
@@ -136,7 +136,7 @@ TOTP (*Time-based One-Time Password*, RFC 6238, over HOTP, RFC 4226): the server
 Authenticator, 1Password, Aegis) share a secret of 20 random bytes; every 30 seconds both compute a code of 6 digits
 from it and the time. Nothing goes over the network but the code.
 
-```
+```text
 POST /auth/totp                   -> {Secret, Uri, Codes}     a new secret, not on yet
 POST /auth/totp/confirm {Code}    -> the factors               a code of the app turns it on
 POST /auth/recovery {Code}        -> {Codes}                   10 new recovery codes, with a code of the app
@@ -224,7 +224,20 @@ sign-in. Their other arguments make the answer wrong on purpose, as an attacker 
 ends a sign-up or a sign-in that the settings stopped at a second factor not yet set up: it sets TOTP up as its owner
 would and gives `{Client, Secret, Codes}`; `auth.TotpCode(secret, at, t.Env)` is the code his app would show.
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/apptest
+use std/bug
+use std/result
+use std/value
+use std/json
+ada = json.Parse("{}")!
+invoices = json.Parse("{}")!
 ```
+
+```cesia norun
 defn isPasskeyAndTwoFactor()
   t = apptest.Start(invoices.App, settings = {TwoFactorRoles: "owner"})?
   stopped = t.SignUp(ada)

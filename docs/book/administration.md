@@ -38,13 +38,23 @@ event (`data-edited`, `job-retried`, `job-cancelled`), and so are a session ende
 (`factors-reset`), an invitation (`invite`), a key revoked (`key-revoked`) and a flag set (`flag`), with the others:
 [the admin pages](admin.md) show them as the audit trail.
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use std/json
+a = json.Parse("{}")!
+made = json.Parse("{}")!
+t = json.Parse("{}")!
 ```
+
+```cesia norun
 boss = t.Super()?
 users = boss.Call(api.AdminUsers, {Search: "ana"})?
 boss.Call(api.AdminDisable, {id: users.Rows[1].Id})?
 ```
 
-```
+```cesia norun
 boss.Call(api.AdminResetFactors, {id: a.User, Totp: true, Passkeys: true})?
 boss.Call(api.AdminRevokeKey, {id: made.Id})?
 ```

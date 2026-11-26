@@ -13,13 +13,41 @@ runs): `flags.Flag`, `flags.Module`, `flags.On`, `flags.OnFor`, the setting `Fla
 
 ## 1. A flag in the code
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/admin
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use std/dict
+use std/list
+use std/text
+use std/json
+Module = json.Parse("{}")!
+Report = json.Parse("{}")!
+ada = json.Parse("{}")!
+bruno = json.Parse("{}")!
+cell = json.Parse("{}")!
+countryOf = json.Parse("{}")!
+day = json.Parse("{}")!
+e = json.Parse("{}")!
+invoices = json.Parse("{}")!
+paid = json.Parse("{}")!
+r = json.Parse("{}")!
+rows = json.Parse("{}")!
 ```
+
+```cesia norun
 (* src/invoices/module.ce *)
 use deps/www-celestial/centauri/src/flags
 
 ExportCountry = flags.Flag("export.country", about = "The CSV export of the invoices with the country of the client.")
 
-App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), flags.Module([ExportCountry]), admin.Module(folder = "admin"), Module], ...)
+App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), flags.Module([ExportCountry]), admin.Module(folder = "admin"), Module], (* ... *))
 ```
 
 `flags.Flag(name, about, default)` declares a flag: its name of 1 to 100 small letters, digits, `-` and `.`; what it
@@ -29,7 +57,7 @@ its start.
 
 The handler asks it, for the user of its request:
 
-```
+```cesia norun
 (* src/invoices/invoices.ce, in export *)
   country = flags.On("export.country", r)
   head = ["number", "date", "due", "bill_to", "status", "total", "paid_at"]
@@ -52,7 +80,7 @@ if (featureManager.isActive(Features.EXPORT_COUNTRY)) { head.add("country"); }
 
 ## 2. Turned by a super-admin
 
-```
+```text
 PUT /admin/flags/export.country {Tenant: 65537, On: true}     (role super)
 ```
 
@@ -101,7 +129,7 @@ one server is seen on another within `FlagsRefresh` seconds, with no restart (`i
 
 ## 5. The page asks
 
-```
+```text
 GET /flags/on    -> ["export.country"]     (role signed: Ada's office, once it is on for it)
 ```
 
@@ -110,7 +138,7 @@ is on (`isPageToldItsFlags`). The page only shows: the handler asks `flags.On` a
 
 ## 6. Its test
 
-```
+```cesia norun
 defn isExportOpenedToOneOffice()
   t = apptest.Start(invoices.App)?
   a = t.SignUp(ada)?

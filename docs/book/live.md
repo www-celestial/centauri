@@ -11,14 +11,26 @@ session and the rights, the endpoints as actions.
 
 ## 1. The contract and the question
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/json
+Invoice = json.Parse("{}")!
+InvoiceRow = json.Parse("{}")!
+e = json.Parse("{}")!
 ```
+
+```cesia norun
 Unpaid = api.Live("invoices.unpaid", out = InvoiceRow, role = "accountant")
 
 unpaid(s, args) = cepheus.Watch(7, (i, no, b, d, u, st, t) -> {Where: [[i, Invoice.Tenant, s.User.Tenant], [i, Invoice.Number, no],
   [i, Invoice.BillTo, b], [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, st], cepheus.Not([i, Invoice.Status, "paid"]), [i, Invoice.Total, t]],
   Give: {Id: i, Number: no, BillTo: b, Date: d, Due: u, Status: st, Total: t}}, s.Db, until = s.Ended)
 
-Module = app.Module("invoices", ..., serve = [..., app.Live(e.Unpaid, unpaid), ...])
+Module = app.Module("invoices", (* ... *) serve = [(* ... *) app.Live(e.Unpaid, unpaid), (* ... *)])
 ```
 
 The handler gets the screen `s` (`{User, Db, Ended, Settings, Env, Now}`) and the arguments the page asked, read
@@ -28,7 +40,7 @@ question, only the name of a show. `until = s.Ended` ends the watch with the scr
 A page opens its screen with its cookie, from the app's origin, and names its shows (the page's side is `live.js` of
 `std/live`, at `/live/live.js`):
 
-```
+```text
 ws://app.example/live?shows=[{"Show":"invoices.unpaid","Args":{}}]
 ```
 

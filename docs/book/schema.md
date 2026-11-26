@@ -12,8 +12,16 @@ and what waits for Cepheus's proposal A2.
 
 A field or a kind added is declared by Cepheus at the start (`Connect` declares what is missing): nothing to write.
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/check
 ```
-Client = app.Kind("client", {Tenant: cepheus.Link(), Name: cepheus.Text(), ..., City: cepheus.Text(), Overdue: cepheus.Bool(), Country: cepheus.Text()})
+
+```cesia norun
+Client = app.Kind("client", {Tenant: cepheus.Link(), Name: cepheus.Text(), (* ... *) City: cepheus.Text(), Overdue: cepheus.Bool(), Country: cepheus.Text()})
 ClientIn = check.Record({Name: check.Text(1, 120), Email: check.Email(), City: check.Text(0, 80, optional = true, default = ""),
   Country: check.Text(2, 2, optional = true, default = "FR")})
 ```
@@ -23,9 +31,9 @@ works (*never break user space*; `apptest.Surface` says when a change would brea
 
 ## 2. A migration: the data that moves
 
-```
+```cesia norun
 Countries = app.Migration("2026-11-26 clients get a country", app.Fill(Client, "Country", c -> "FR"))
-Module = app.Module("invoices", ..., migrations = [Countries])
+Module = app.Module("invoices", (* ... *) migrations = [Countries])
 ```
 
 - A migration has a name, unique and never reused, and a run, `run(env)`, an `Ok` or an `Err`.
@@ -63,7 +71,7 @@ a version that works with the one before:
 Renaming a field, changing its type, taking it away: that is Cepheus's proposal A2 (`Rename`, `Migrate`, `Drop`),
 which is not built. Centauri says so, and stops the start with the way that works without it:
 
-```
+```cesia norun
 app.Rename(Client, "City", "Town")    (* a migration that stops the start: needs A2; add Town, fill it (app.Fill), read it, stop writing City *)
 app.Retype(Client, "City", "int")
 app.Drop(Client, "City")

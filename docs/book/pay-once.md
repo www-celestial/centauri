@@ -9,7 +9,25 @@ read; `app.Next`, numbers without a gap; `app.Retry`; `by` and `why` on every wr
 
 ## 1. An invoice and its lines, in one group
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/list
+use std/result
+use std/text
+use std/json
+Client = json.Parse("{}")!
+Invoice = json.Parse("{}")!
+e = json.Parse("{}")!
+invoiceOf = json.Parse("{}")!
+lineOps = json.Parse("{}")!
+office = json.Parse("{}")!
+totalOf = json.Parse("{}")!
 ```
+
+```cesia norun
 defn addInvoice(r, x)
   c = app.Own(Client, x.Client, r)?
   total = totalOf(x)?
@@ -47,7 +65,7 @@ InvoiceOut add(@Valid @RequestBody InvoiceIn in, @AuthenticationPrincipal Princi
 
 ## 2. Paid once
 
-```
+```cesia norun
 defn paying(r)
   inv = app.Own(Invoice, r.Params.id, r)?
   if inv.Status == "paid"
@@ -92,7 +110,7 @@ them at `GET /admin/events` ([The administration](administration.md)).
 
 ## 4. Its tests
 
-```
+```cesia norun
 defn isPaidOnce()
   s = office()?
   paid = s.Ada.Call(e.Pay, {id: s.One.Id})?

@@ -25,7 +25,17 @@ centauri: APP_CEPHEUS_URL: the database is needed in prod, as cepheus://localhos
 A secret (`check.Secret()`, as `APP_SECRET`, `APP_CEPHEUS_TOKEN`, and the providers' `APP_GOOGLE_SECRET`,
 `APP_APPLE_KEY`...) is never written in a log, and the administration shows it `(secret)`. An app adds its own settings, with their shapes, and reads them in `r.Settings`:
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/auth
+use std/check
+use std/json
+invoices = json.Parse("{}")!
 ```
+
+```cesia norun
 Settings = check.Record({MailFrom: check.Email(optional = true, default = "office@example.com")})
 App = app.Of([auth.Module(), invoices.Module], settings = Settings, defaults = {Tenancy: "single"})
 ```
