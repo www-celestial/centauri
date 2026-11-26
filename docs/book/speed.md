@@ -127,8 +127,8 @@ others; 2 s a measure after 1 s of warming, the four servers in turn, 21 rounds;
 | Go 1.26 net/http | 61,819 [17,369, 90,961] | 19.8 ms | 21 MB |
 
 No request failed. The ranges overlap: under load, what a request saves in the program is small beside its share of
-the collector. What the tables change there is the memory: 256 requests in flight no longer wait in the state's
-channel, each with its message and its answer, 11 MB less.
+the collector. What the tables change there is the memory, 11 MB less: most likely the messages and answers of 256
+requests in flight, which no longer wait in the state's channel (not measured apart).
 
 ## The first month: what L2 adds, and what its pieces cost
 
