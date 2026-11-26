@@ -1,9 +1,11 @@
 (** The test of the admin pages in a browser: the invoices and their admin served in this program (tools/admin-serve.ce,
     a database in memory filled with a month), Chrome without a window opens /admin, driven by its DevTools protocol over
     std/websocket; tools/admin-play.js, evaluated in the page, plays a super-admin who signs in, visits each page, disables
-    a user, changes an invoice in place, marks one paid by the app's own action, reads the audit trail and signs out. A
-    picture of each page goes to OUT (shots/ by default). CHROME names the browser, a Chrome or a chrome-headless-shell;
-    its profile is in PROFILE (/tmp/centauri-admin-shot). Build the pages first: cesia build --target wasm admin/page.ce. *)
+    a user, changes an invoice in place (markup typed in it stays a text), marks one paid by the app's own action, reads
+    the audit trail and signs out; each page visited fits the window. A picture of each page goes to OUT (shots/ by
+    default). LANG, en by default, is the language of the browser: with fr the pages speak French, and the player reads
+    them in French. CHROME names the browser, a Chrome or a chrome-headless-shell; its profile is in PROFILE
+    (/tmp/centauri-admin-shot). Build the pages first: cesia build --target wasm admin/page.ce. *)
 use deps/www-celestial/centauri/src/app
 use src/filled
 use std/dict
@@ -64,6 +66,7 @@ end
 defn main()
   (** Serves, opens, plays, pictures: an Ok of the lines of the steps. *)
   out = env("OUT", "shots")
+  lang = env("LANG", "en")
   profile = env("PROFILE", "/tmp/centauri-admin-shot")
   l = net.Listen(0)?
   port = net.Port(l)
@@ -72,7 +75,7 @@ defn main()
   _ = sys.Mkdir(out)
   _ = sys.Remove("$profile/DevToolsActivePort")
   proc = sys.Start(env("CHROME", "chrome"), args = ["--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
-    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "http://127.0.0.1:$port/admin"])?
+    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "--lang=$lang", "--accept-lang=$lang", "http://127.0.0.1:$port/admin"])?
   start = sys.Now()
   while not sys.Exists("$profile/DevToolsActivePort") and sys.Now() - start < 15
     sys.Sleep(0.05)
@@ -84,9 +87,9 @@ defn main()
   lines = []
   n = waitReady(conn, 1, start)
   evaluated(conn, n, sys.Read("tools/admin-play.js")?)?
-  steps = [["signIn", missing, "signin"], ["signedIn", missing, "dashboard"], ["visit", "Dashboard", "dashboard"], ["visit", "Users", "users"], ["disable", missing, "users-disabled"],
+  steps = [["lang", lang, "signin"], ["signIn", missing, "signin"], ["signedIn", missing, "dashboard"], ["lang", lang, "dashboard"], ["visit", "Dashboard", "dashboard"], ["visit", "Users", "users"], ["disable", missing, "users-disabled"],
     ["visit", "Tenants", "tenants"], ["visit", "Events", "events"], ["visit", "Log", "log"], ["visit", "Jobs", "jobs"], ["visit", "Webhooks", "webhooks"],
-    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"],
+    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"], ["markup", missing, "data-invoice"],
     ["visit", "Unpaid", "unpaid"], ["pay", missing, "unpaid-paid"], ["visit", "Audit", "audit"], ["audit", missing, "audit-after"],
     ["visit", "Keys", "keys"], ["revoke", missing, "keys-revoked"], ["visit", "Flags", "flags"], ["flag", missing, "flags-on"], ["user", missing, "user-factors"], ["signOut", missing, "signout"], ["signedOut", missing, "signout"]]
   for s in steps
@@ -100,7 +103,7 @@ defn main()
     end
     got = evaluated(conn, n, "adminPlay($(json.Text(s[1])), $(json.Text(s[2])))")?
     lines = list.Append(got, lines)
-    if s[1] != "signIn" and s[1] != "signOut"
+    if s[1] != "signIn" and s[1] != "signOut" and s[1] != "lang" and s[1] != "markup"
       pictured(conn, n + 1, "$out/admin-$(s[3]).png")?
     end
   end

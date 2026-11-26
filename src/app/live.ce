@@ -175,7 +175,7 @@ defn guarding(req, user, roles, stop, ended, env)
   end
 end
 
-defn act(e, handle, s, args)
+defn act(e, handle, s, args, translating)
   (** An action of a page: the endpoint e called through the app's door with the cookie of the screen, as a request
       of HTTP of the same origin would be: an Ok of its answer, or an Err {Kind: "api", Status, Message, Fields}, with
       Instance, the number of the request to quote, and Retry, the seconds to wait after a 429. *)
@@ -188,6 +188,11 @@ defn act(e, handle, s, args)
     {Name: "content-type", Value: "application/json"}, {Name: "user-agent", Value: "live"}]
   if value.IsText(cookie)
     headers = list.Append({Name: "cookie", Value: cookie}, headers)
+  end
+  (* the language of the page's browser, so that an app of several languages answers the action in it *)
+  lang = if translating http.HeaderValue("accept-language", r.Headers) else missing end
+  if value.IsText(lang)
+    headers = list.Append({Name: "accept-language", Value: lang}, headers)
   end
   out = handle({Method: q.Method, Path: parts[1], Query: if value.Len(parts) > 1 parts[2] else "" end, Headers: headers, Body: q.Body,
     Peer: dict.GetOr("Peer", "", r)})
@@ -212,7 +217,7 @@ defn actions(env, handle)
   for b in env.Served
     e = b.Endpoint
     if not dict.Has("Types", e) and not (value.IsDict(e.Out) and dict.Get("Kind", e.Out) == "file")
-      out[e.Name] = (s, args) -> act(e, handle, s, args)
+      out[e.Name] = (s, args) -> act(e, handle, s, args, env.Words.Translating)
     end
   end
   out

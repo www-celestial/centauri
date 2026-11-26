@@ -1,0 +1,71 @@
+(* The admin pages in a language, without a browser: their texts said, the numbers and times written as France writes
+   them, the plurals of CLDR (0 and 1 are "one" in French), a text the catalogue lacks shown in English, never empty,
+   the app's words after Centauri's, and a page drawn in French, the band of keys of Ceres too; a translation with
+   markup stays a text. English, as before. *)
+use deps/www-celestial/ceres/src/web
+use src/i18n
+use std/bug
+use std/date
+use std/list
+use std/math
+use std/text
+use std/value
+
+(* The measures of a page without a browser: a character half its size wide. *)
+measure = {Width: (s, size, font) -> value.Len(s) * math.Div(size, 2), Line: size -> size + math.Div(size, 2)}
+
+defn names(n)
+  (** The names of a node of the semantics tree and of those under it. *)
+  list.Concat(if n.Name == "" [] else [n.Name] end, list.FlatMap(k -> names(k), n.Kids))
+end
+
+defn page(view)
+  (** The names a view shows, drawn on a page of 1000 by 700, the keys of its band after them. *)
+  ui = web.Start(web.App([web.Route("/", view)], say = t -> Say(t)), 1000, 700, measure)
+  list.Concat(names(web.Semantics(ui)), list.Flatten(web.Keys(ui)))
+end
+
+defn isFrench()
+  speak("fr", missing)
+  bug.Assert(Say("Sign out") == "Se déconnecter" and Say("{N} rows, all of them.", {N: Num(0)}) == "0 ligne : tout est là.", "said")
+  bug.Assert(Say("{N} rows, all of them.", {N: Num(1)}) == "1 ligne : tout est là." and Say("{N} rows, all of them.", {N: Num(2)}) == "2 lignes : tout est là.", "plurals")
+  bug.Assert(Say("{N} members", {N: Num(12345)}) == "12 345 membres", "a count of thousands: $(Say("{N} members", {N: Num(12345)}))")
+  bug.Assert(Num(-1234567.25) == "-1 234 567,25" and Num(12) == "12" and Num(0.5) == "0,5" and Num(missing) == "", "numbers")
+  bug.Assert(Cell(true) == "oui" and Cell(3) == 3 and Cell(1.5).Text == "1,5" and Cell([1.5, 2]) == "1,5, 2", "cells")
+  bug.Assert(Local(1794528000) == "13/11/2026" and Span(200000) == "2 j" and Span(30) == "30 s", "a day, a span")
+  d = date.Local(1794528000 + 3723)
+  bug.Assert(Local(1794528000 + 3723) == "13/11/2026 $(two(d.Hour)):$(two(d.Minute)):03", "a time: $(Local(1794528000 + 3723))")
+  bug.Assert(DayFirst("25/11/2026 08:00") == "2026-11-25 08:00" and DayFirst("2026-11-25") == "2026-11-25" and DayFirst("2/11/2026") == "2/11/2026", "typed day first")
+  p = Problem({Status: 429, Message: "Sign in first.", Instance: "a7", Retry: 3})
+  bug.Assert(p == "429 Connectez-vous d’abord. — requête a7 — attendez 3 s", "a problem: $p")
+  Problem({Status: 422, Message: "Vérifiez les champs.", Fields: {Text: "Un texte de 1 à 100 octets."}}) == "422 Vérifiez les champs. (Text: Un texte de 1 à 100 octets.)"
+end
+
+defn isEnglishAsBefore()
+  speak(missing, missing)
+  bug.Assert(Say("Sign out") == "Sign out" and Say("{N} rows, all of them.", {N: Num(1)}) == "1 rows, all of them.", "said")
+  bug.Assert(Num(12345.5) == "12345.5" and Cell(true) == "yes" and Cell(1.5) == 1.5 and Local(1794528000) == "2026-11-13" and Span(200000) == "2 d", "formats")
+  Problem({Status: 429, Message: "Sign in first.", Instance: "a7", Retry: 3}) == "429 Sign in first. — request a7 — wait 3 s"
+end
+
+defn isMissingEnglishNeverEmpty()
+  speak("fr", i18n.Catalog("fr", [["Unpaid", "Impayées"], ["Sign out", "Sortir"], ["Paid", ""]]))
+  bug.Assert(Say("Unpaid") == "Impayées" and Say("Sign out") == "Sortir" and Say("Users") == "Utilisateurs", "the app's words after Centauri's, and winning")
+  Say("A text no catalogue has.") == "A text no catalogue has." and Say("Paid") == "Paid"
+end
+
+defn isASignInDrawnInFrench()
+  speak("fr", missing)
+  got = page(p -> signIn(p, Say("Admin"), ""))
+  wanted = ["Administration", "Connectez-vous avec le compte d’un super-admin de la plateforme.", "Mot de passe", "Se connecter", "premier champ"]
+  bug.Assert(list.All([w in got for w in wanted]), "$got")
+  not ("Password" in got) and not ("Sign in" in got)
+end
+
+defn isATranslationATextNotMarkup()
+  (** Markup in a translation is a text of the page: the name of the button holds it as written, which Ceres's glue
+      puts in the document as text (textContent, aria-label), never as markup. *)
+  bad = "<img src=x onerror=alert(1)><b>Entrer</b>"
+  speak("fr", i18n.Catalog("fr", [["Sign in", bad]]))
+  bad in page(p -> signIn(p, "Admin", ""))
+end

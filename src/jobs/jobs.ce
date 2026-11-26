@@ -135,7 +135,7 @@ end
 
 defn Module(every = [], jobs = [])
   (** The module that runs the jobs of the app: those of every module's jobs, these kinds, and the schedules every.
-      An app with jobs lists it: app.Of([auth.Module(), jobs.Module(every = [Report]), invoices.Module]). Its
+      An app with jobs lists it: app.Of([auth.Module(), jobs.Module(every = [Report, Backup]), invoices.Module]). Its
       endpoints are the administration of the jobs (api.AdminJobs, api.AdminJobRetry). *)
   kinds = list.Concat(jobs, [s.Kind for s in every])
   m = app.Module("jobs", kinds = [Job], settings = Settings, jobs = kinds, start = env -> Work(env, every),

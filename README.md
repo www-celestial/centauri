@@ -39,7 +39,7 @@ App = app.Of([auth.Module(), app.Module("notes", kinds = [Kind], serve = [app.Se
 app.Run(App)
 ```
 
-That is a whole server ([`examples/notes`](examples/notes), with its tests): `POST /notes` takes a JSON body checked
+That is a whole server ([`examples/notes`](https://github.com/www-celestial/centauri/tree/main/examples/notes), with its tests): `POST /notes` takes a JSON body checked
 by its shape (422 with each wrong field), answers 401 without a session and 403 without the role, writes in the tenant
 of who asks, records who wrote and why, and sends back only the fields of `Note`. Beside it come signing up and in, sessions, members, invitations, the administration
 endpoints and `/openapi.json` in dev.

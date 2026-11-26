@@ -532,10 +532,12 @@ defn signingOutAll(r)
 end
 
 defn me(r)
-  (** GET /auth/me. *)
+  (** GET /auth/me; in an app of several languages, Content-Language says the one it speaks to this user (his own,
+      else his browser's), which the admin pages read to speak it too. *)
   u = r.User
-  result.Ok({User: u.Id, Email: u.Email, Name: u.Name, Tenant: u.Tenant, TenantName: tenantName(u.Tenant, r.Db), Roles: u.Roles, Super: u.Super,
-    Checked: dict.GetOr("Checked", false, u), Lang: dict.Get("Lang", u)})
+  out = {User: u.Id, Email: u.Email, Name: u.Name, Tenant: u.Tenant, TenantName: tenantName(u.Tenant, r.Db), Roles: u.Roles, Super: u.Super,
+    Checked: dict.GetOr("Checked", false, u), Lang: dict.Get("Lang", u)}
+  if r.Env.Words.Translating app.Reply(out, headers = [{Name: "content-language", Value: app.Lang(r)}]) else result.Ok(out) end
 end
 
 defn sessions(r)
