@@ -472,5 +472,5 @@ defn passkeySignUp(r, x, facts, kinds)
       fields[f] = missing
     end
   end
-  signingUp(r, fields, facts, kinds, hash = "", handle = c.Handle, extra = (user, thing) -> app.Facts(Passkey, cepheus.New(thing), dict.Put("User", user, p)))
+  signingUp(r, fields, facts, kinds, hash = "", handle = c.Handle, pow = false, gated = false, extra = (user, thing) -> app.Facts(Passkey, cepheus.New(thing), dict.Put("User", user, p)))
 end

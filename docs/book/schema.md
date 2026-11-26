@@ -74,4 +74,4 @@ refused by Cepheus at the start (`declared already as another kind of property`)
 to do (`isWhatNeedsA2Refused`). When A2 comes, these three will run the change, and the apps that wrote them will not
 change a line.
 
-Back to the [index](index.md).
+Next: [Sign in with Google](google.md).

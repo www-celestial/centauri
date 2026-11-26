@@ -88,7 +88,7 @@ defn main()
     ["visit", "Tenants", "tenants"], ["visit", "Events", "events"], ["visit", "Log", "log"], ["visit", "Jobs", "jobs"], ["visit", "Webhooks", "webhooks"],
     ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"],
     ["visit", "Unpaid", "unpaid"], ["pay", missing, "unpaid-paid"], ["visit", "Audit", "audit"], ["audit", missing, "audit-after"],
-    ["visit", "Keys", "keys"], ["revoke", missing, "keys-revoked"], ["visit", "Flags", "flags"], ["flag", missing, "flags-on"], ["signOut", missing, "signout"], ["signedOut", missing, "signout"]]
+    ["visit", "Keys", "keys"], ["revoke", missing, "keys-revoked"], ["visit", "Flags", "flags"], ["flag", missing, "flags-on"], ["user", missing, "user-factors"], ["signOut", missing, "signout"], ["signedOut", missing, "signout"]]
   for s in steps
     n += 2
     if s[1] == "signedIn" or s[1] == "signedOut"

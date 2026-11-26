@@ -481,6 +481,10 @@ defn oidcFinish(r, x, facts, kinds)
   end
   p = providerNamed(f.Provider, env)?
   conf = discovered(p, env)?
+  if value.IsMissing(dict.Get("Iss", x)) and dict.Get("authorization_response_iss_parameter_supported", conf) == true
+    note(r, "oidc-mixup", "A sign-in with $(p.Name) came back without the issuer its provider says it sends.")
+    return app.Fail(401, "The provider's answer names another issuer.")
+  end
   if not value.IsMissing(dict.Get("Iss", x)) and not sameIssuer(x.Iss, dict.GetOr("issuer", p.Issuer, conf)) and x.Iss != p.Issuer
     note(r, "oidc-mixup", "A sign-in with $(p.Name) came back named by another issuer.")
     return app.Fail(401, "The provider's answer names another issuer.")
@@ -567,6 +571,9 @@ defn accountOf(r, p, who, f, facts, kinds)
         return app.Fail(409, "An account has this address: sign in to it, then link $(p.Title) from your account.")
       end
       cepheus.Insert(Identity, {User: owner, Provider: p.Name, Key: key, Email: who.Email, Created: now, Last: now}, env.Db, by = owner, why = r.Why)?
+      if value.IsMissing(dict.Get("Checked", cepheus.Get(User, owner, env.Db)?))
+        _ = cepheus.Write([cepheus.Add(owner, User.Checked, now)], env.Db, by = owner, why = r.Why)
+      end
       note(r, "oidc-link", "$(p.Title) was linked by its verified address.", user = owner, every = 0)
       user = owner
     end
@@ -586,6 +593,9 @@ defn accountOf(r, p, who, f, facts, kinds)
   u = cepheus.Get(User, user, env.Db)?
   if value.IsMissing(u) or u.Disabled == true
     return app.Fail(403, "This account may not sign in.")
+  end
+  if s.EmailCheck == "required" and value.IsMissing(dict.Get("Checked", u))
+    return app.Fail(403, "Check your e-mail address first: open the link of the mail we sent you.")
   end
   m = membershipOf(user, missing, env.Db)?
   need = secondNeeded(user, if value.IsMissing(m) [] else app.Expand(m.Roles, env.Roles) end, u.Super == true, r)?

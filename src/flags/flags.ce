@@ -167,6 +167,9 @@ defn adminFlag(r, x)
   if not value.IsMissing(tenant) and not value.IsMissing(user)
     return app.Fail(422, "Check the fields.", fields = {User: "A tenant or a user, not both."})
   end
+  if not value.IsMissing(percent) and not value.IsMissing(dict.Get("On", x))
+    return app.Fail(422, "Check the fields.", fields = {Percent: "On or Percent, not both."})
+  end
   if not value.IsMissing(percent) and (not value.IsMissing(tenant) or not value.IsMissing(user))
     return app.Fail(422, "Check the fields.", fields = {Percent: "A share of the users is for everyone: no tenant, no user."})
   end

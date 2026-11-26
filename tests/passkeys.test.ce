@@ -149,5 +149,17 @@ end
 
 defn isPasswordOff()
   t = apptest.Start(App, settings = {Passwords: "off"})?
-  t.Anyone().Call(api.SignUp, ana).Error.Status == 403 and t.Anyone().Call(api.SignIn, {Email: ana.Email, Password: ana.Password}).Error.Status == 403
+  t.Anyone().Call(api.SignUp, ana).Error.Status == 403 and t.Anyone().Call(api.SignIn, {Email: ana.Email, Password: ana.Password}).Error.Status == 403 and
+    t.Anyone().Call(api.Forgot, {Email: ana.Email}).Error.Status == 403
 end
+
+defn isSignedUpUnderProofOfWork()
+  t = apptest.Start(App, settings = {Pow: "always", PowBits: "4"})?
+  d = apptest.Device(t)?
+  asked = t.Anyone().Send(api.PasskeySignUpStart, {Email: "bo@example.com", Name: "Bo"})
+  challenge = json.Parse(asked.Body)?.challenge
+  c = t.Anyone().Call(api.PasskeySignUpStart, {Email: "bo@example.com", Name: "Bo", Proof: auth.Solve(challenge.Challenge, t.Env.Keys)})?
+  out = t.Anyone().Send(api.PasskeySignUp, {Ticket: c.Ticket, Credential: apptest.Made(d, c.Options, t).Credential})
+  asked.Status == 428 and out.Status == 201
+end
+

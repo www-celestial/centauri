@@ -83,8 +83,9 @@ Lines(state) = ask(state, {Op: "lines"})
 Fresh(key, seconds, state) = ask(state, {Op: "fresh", Key: key, Every: seconds})
 
 (** Keeps a value under a key until a time (in seconds since 1970, the state's clock), for what a process reads often
-    and changes seldom: the keys of an OpenID provider, the table of the feature flags. The state holds keys of them
-    at most; past that, the oldest ones go. *)
+    and changes seldom: the keys of an OpenID provider, the table of the feature flags. The state holds as many of
+    them as the keys of its limits at most; past that, those whose time passed go, and if it is still full, all of
+    them: each is read again at its next use. *)
 Remember(key, v, until, state) = fiber.Send({Op: "remember", Key: key, Value: v, Until: until}, state)
 
 (** The value kept under a key, or missing when there is none or its time passed. *)

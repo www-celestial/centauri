@@ -76,11 +76,11 @@ defn askKeeper(box, m)
   fiber.Receive(reply).Value
 end
 
-defn Provider(t, alg = "ES256", pair = missing, client = "centauri-test", secret = "s3cret")
+defn Provider(t, alg = "ES256", pair = missing, client = "centauri-test", secret = "s3cret", iss = false)
   (** A provider on a free port of this machine, signing by alg with pair (a new pair of crypto.KeyPair when missing:
       an RSA pair takes some 50 ms, a test that makes many gives one): an Ok of {Issuer, Settings, Box, Ssl}, Settings
       those that make the app t signs in with it as "oidc" (SignInWith, OidcIssuer, OidcId, OidcSecret, CallAllow,
-      CallCa), to give apptest.Start. *)
+      CallCa), to give apptest.Start. iss: its discovery document says it names itself in its answers (RFC 9207). *)
   c = TestCerts()?
   o = crypto.OpenSsl()?
   p = if value.IsMissing(pair) crypto.KeyPair(alg, o)? else pair end
@@ -89,7 +89,8 @@ defn Provider(t, alg = "ES256", pair = missing, client = "centauri-test", secret
   fiber.Spawn(() -> keeper(box, first))
   l = net.Listen(0)?
   issuer = "https://localhost:$(net.Port(l))"
-  conf = {"issuer": issuer, "authorization_endpoint": "$issuer/authorize", "token_endpoint": "$issuer/token", "jwks_uri": "$issuer/jwks"}
+  conf = {"issuer": issuer, "authorization_endpoint": "$issuer/authorize", "token_endpoint": "$issuer/token", "jwks_uri": "$issuer/jwks",
+    "authorization_response_iss_parameter_supported": iss}
   routes = http.App() then http.Get("/.well-known/openid-configuration", r -> http.Json(conf))
     then http.Get("/jwks", r -> http.WithHeader("cache-control", "max-age=300", http.Json({keys: [k.Jwk for k in askKeeper(box, {Op: "keys"})]})))
     then http.Post("/token", r -> token(r, box, client, secret, t, o))

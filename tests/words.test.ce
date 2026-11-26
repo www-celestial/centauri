@@ -18,7 +18,7 @@ use std/value
 Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = "member")
 
 App = app.Of([auth.Module(), app.Module("hello", serve = [app.Serve(Hello, r -> {Text: app.Say(r, "{N} unpaid invoices", args = {N: 2})})])], name = "words",
-  messages = {fr: {"{N} unpaid invoices": {one: "{N} facture impayée", other: "{N} factures impayées"}}})
+  messages = i18n.Catalog("fr", [["{N} unpaid invoices", {one: "{N} facture impayée", other: "{N} factures impayées"}]]))
 
 ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
 
@@ -50,7 +50,7 @@ defn isAccountBeforeBrowser()
   a = t.SignUp(ana)?
   bug.Assert(a.Call(Hello)?.Text == "2 unpaid invoices", "English first")
   me = a.Call(api.SetLang, {Lang: "fr"})?
-  bug.Assert(me.Lang == "fr", "the account: $me")
+  bug.Assert(me.Lang == "fr" and a.Call(api.Me)?.Lang == "fr", "the account: $me")
   bug.Assert(a.Call(Hello)?.Text == "2 factures impayées", "the app's own words")
   out = a.Raw("DELETE", "/auth/sessions/999999", headers = lang("en"))
   wrong = a.Call(api.SetLang, {Lang: "de"})

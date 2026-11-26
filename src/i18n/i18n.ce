@@ -1,13 +1,15 @@
 (** Translations, the same on the server and in a page: catalogues of messages, the plural rules of CLDR, and the
     language of a request. A message is its English text, as gettext and Django write it, with {Name} for a value put
-    in it: "Too many attempts: wait {Seconds} seconds.". A catalogue gives, for each language, the text of each
-    message, or its plural forms by the categories of CLDR (zero, one, two, few, many, other). Say translates a message
+    in it: "Too many attempts: wait {Seconds} seconds.". A catalogue of a language gives the text of each message in
+    it, or its plural forms by the categories of CLDR (zero, one, two, few, many, other); Of joins catalogues. A
+    catalogue is a list of pairs, never a dictionary written with texts as keys, so that a page in WebAssembly loads it
+    as the server does. Say translates a message
     whose values are given, and also one already filled in, as std/check and Centauri write their errors in English:
     "A whole number from 1 to 10." is read against "A whole number from {Min} to {Max}.", and its values put in the
     French. So the errors of the forms, the Problem Details of the server and the mails are translated by one
     catalogue, which the pages use too. This package uses std only: it runs in a page.
 
-      c = Catalog({fr: {"Hello {Name}.": "Bonjour {Name}.", "{N} invoices": {one: "{N} facture", other: "{N} factures"}}})
+      c = Catalog("fr", [["Hello {Name}.", "Bonjour {Name}."], ["{N} invoices", {one: "{N} facture", other: "{N} factures"}]])
       Say(c, "fr", "Hello {Name}.", {Name: "Ana"}) --> "Bonjour Ana."
       Say(c, "fr", "{N} invoices", {N: 1}) --> "1 facture"
       Say(c, "fr", "{N} invoices", {N: 3}) --> "3 factures"
@@ -63,18 +65,23 @@ defn isName(s)
   true
 end
 
-defn Catalog(messages)
-  (** A catalogue of messages: messages maps each language ("fr", "pt-BR") to a map of messages, each to its text or
-      to its plural forms, {one: ..., other: ...} (By, a name of the template, says which value chooses the form; the
-      first value that is a number else). The catalogue keeps each language's messages as they are, for Say with
-      values, and the templates of those that have values, for Say of a message already filled in.
+defn Catalog(lang, messages)
+  (** A catalogue of the messages of a language ("fr", "pt-BR"): messages is a list of pairs, [message, text], the text
+      a text or the plural forms of the message, {one: ..., other: ...} (By, a name of the template, says which value
+      chooses the form; the first value that is a number else). The catalogue keeps the messages as they are, for Say
+      with values, and the templates of those that have values, for Say of a message already filled in.
 
-        Catalog({fr: {"Yes": "Oui"}}).Langs --> ["fr"] *)
-  exact = {}
-  patterns = {}
+        Catalog("fr", [["Yes", "Oui"]]).Langs --> ["fr"] *)
+  made(dict.Dict([{Key: text.Lower(lang), Value: dict.Dict([{Key: m[1], Value: m[2]} for m in messages])}]))
+end
+
+defn made(messages)
+  (** A catalogue of a map of each language to the map of its messages. *)
+  exact = dict.Dict()
+  patterns = dict.Dict()
   for p in dict.Pairs(messages)
     lang = text.Lower(p.Key)
-    exact[lang] = dict.Merge(dict.GetOr(lang, {}, exact), p.Value)
+    exact[lang] = dict.Merge(dict.GetOr(lang, dict.Dict(), exact), p.Value)
     found = dict.GetOr(lang, [], patterns)
     for m in dict.Pairs(p.Value)
       t = pieces(m.Key)
@@ -101,14 +108,14 @@ end
 defn Of(catalogs)
   (** One catalogue of several, as those of Centauri and of an app: for a message in two, the last one's text wins.
 
-        Say(Of([Catalog({fr: {"Yes": "Oui"}}), Catalog({fr: {"Yes": "Oui !"}})]), "fr", "Yes") --> "Oui !" *)
-  messages = {}
+        Say(Of([Catalog("fr", [["Yes", "Oui"]]), Catalog("fr", [["Yes", "Oui !"]])]), "fr", "Yes") --> "Oui !" *)
+  messages = dict.Dict()
   for c in catalogs
     for p in dict.Pairs(c.Exact)
-      messages[p.Key] = dict.Merge(dict.GetOr(p.Key, {}, messages), p.Value)
+      messages[p.Key] = dict.Merge(dict.GetOr(p.Key, dict.Dict(), messages), p.Value)
     end
   end
-  Catalog(messages)
+  made(messages)
 end
 
 defn langOf(catalog, lang)
@@ -162,7 +169,7 @@ defn Say(catalog, lang, message, args = missing)
       put in the translation, else the message unchanged. A language the catalogue lacks gives the message; "pt-BR"
       is served by "pt" when there is no "pt-BR".
 
-        c = Catalog({fr: {"A whole number from {Min} to {Max}.": "Un nombre entier de {Min} à {Max}."}})
+        c = Catalog("fr", [["A whole number from {Min} to {Max}.", "Un nombre entier de {Min} à {Max}."]])
         Say(c, "fr", "A whole number from 1 to 10.") --> "Un nombre entier de 1 à 10."
         Say(c, "fr-CA", "A whole number from 1 to 10.") --> "Un nombre entier de 1 à 10."
         Say(c, "de", "A whole number from 1 to 10.") --> "A whole number from 1 to 10."
@@ -205,7 +212,7 @@ defn Match(pattern, message)
     return missing
   end
   at = text.ByteLength(first) + 1
-  out = {}
+  out = dict.Dict()
   n = value.Len(pattern.Names)
   for k in 1..n
     after = parts[k + 1]
@@ -272,6 +279,7 @@ defn Plural(lang, n)
         Plural("ru", 25) --> "many"
         Plural("pl", 12) --> "many"
         Plural("ar", 102) --> "other"
+        Plural("es", "1.0") --> "one"
         Plural("ja", 1) --> "other" *)
   o = operands(n)
   i = o.I
@@ -289,10 +297,10 @@ defn Plural(lang, n)
     return if i == 1 and v == 0 "one" else if million "many" else "other" end
   end
   if base == "es"
-    return if o.N == 1 and v == 0 "one" else if million "many" else "other" end
+    return if o.N == 1 "one" else if million "many" else "other" end
   end
   if base == "tr"
-    return if o.N == 1 and v == 0 "one" else "other" end
+    return if o.N == 1 "one" else "other" end
   end
   if base == "ru" or base == "uk"
     if v != 0
@@ -311,7 +319,7 @@ defn Plural(lang, n)
     return if i == 1 "one" else if within(d, 2, 4) and not within(h, 12, 14) "few" else "many" end
   end
   if base == "ar"
-    if v != 0
+    if o.N != math.Floor(o.N)
       return "other"
     end
     h = math.Mod(i, 100)

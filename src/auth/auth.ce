@@ -278,12 +278,12 @@ end
    answer is neutral. *)
 waiting = app.Reply({}, status = 202)
 
-defn signingUp(r, x, facts, kinds, hash = missing, handle = missing, checked = false, extra = missing, pow = true)
+defn signingUp(r, x, facts, kinds, hash = missing, handle = missing, checked = false, extra = missing, pow = true, gated = true)
   (** POST /auth/signup, and the sign-ups of a passkey and of a provider: hash, the hash of the password, given as ""
       for an account without one (the password of x is then not read); handle, the handle of the user's passkey;
       checked, an address that the provider checked; extra(user, thing), the operations of more facts (a passkey, an
       identity) with the user new and thing their first number in the group; pow, whether a proof of work may be
-      asked. *)
+      asked; gated, whether this sign-up counts against SignUpPerIp (a passkey's counted at its options). *)
   env = r.Env
   s = r.Settings
   if s.SignUp == "closed"
@@ -296,7 +296,9 @@ defn signingUp(r, x, facts, kinds, hash = missing, handle = missing, checked = f
     note(r, "bot", "The trap field of signing up was filled.")
     return app.Fail(422, "Check the fields.")
   end
-  gate("signup:$(r.Ip)", s.SignUpPerIp, 3600, r)?
+  if gated
+    gate("signup:$(r.Ip)", s.SignUpPerIp, 3600, r)?
+  end
   if pow
     proven(x, s.Pow == "always" or (s.Pow == "attack" and app.Failures(env.State) >= s.PowAfter), r)?
   end
@@ -533,7 +535,7 @@ defn me(r)
   (** GET /auth/me. *)
   u = r.User
   result.Ok({User: u.Id, Email: u.Email, Name: u.Name, Tenant: u.Tenant, TenantName: tenantName(u.Tenant, r.Db), Roles: u.Roles, Super: u.Super,
-    Checked: dict.GetOr("Checked", false, u)})
+    Checked: dict.GetOr("Checked", false, u), Lang: dict.Get("Lang", u)})
 end
 
 defn sessions(r)
@@ -556,6 +558,9 @@ end
 defn changePassword(r, x)
   (** POST /auth/password: the old password checked, the new one hashed, the user's other sessions ended. *)
   env = r.Env
+  if r.Settings.Passwords == "off"
+    return app.Fail(403, "Signing in with a password is off: use a passkey or a provider.")
+  end
   if text.ByteLength(x.New) < r.Settings.PasswordMin
     return app.Fail(422, "Check the fields.", fields = {New: "A password of $(r.Settings.PasswordMin) to 128 bytes."})
   end
@@ -723,6 +728,9 @@ end
 
 defn forgot(r, x, kinds)
   (** POST /auth/forgot: one write, the job of the mail, whatever the address; the job sends it only to an account. *)
+  if r.Settings.Passwords == "off"
+    return app.Fail(403, "Signing in with a password is off: use a passkey or a provider.")
+  end
   mailGate(x.Email, r)?
   _ = cepheus.Write(jobs.Later(kinds.Reset, {Email: x.Email}), r.Env.Db, why = r.Why)
   sent
@@ -733,6 +741,9 @@ defn resetPassword(r, x)
       the user ended, and a new one. *)
   env = r.Env
   s = r.Settings
+  if r.Settings.Passwords == "off"
+    return app.Fail(403, "Signing in with a password is off: use a passkey or a provider.")
+  end
   gate("signin:$(r.Ip)", s.SignInPerIp, 60, r)?
   if text.ByteLength(x.Password) < s.PasswordMin
     return app.Fail(422, "Check the fields.", fields = {Password: "A password of $(s.PasswordMin) to 128 bytes."})

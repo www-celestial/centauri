@@ -22,8 +22,8 @@ centauri: APP_SECRET: a secret of 32 bytes at least is needed in prod (the key o
 centauri: APP_CEPHEUS_URL: the database is needed in prod, as cepheus://localhost:7400/app.
 ```
 
-A secret (`check.Secret()`, as `APP_SECRET`, `APP_CEPHEUS_TOKEN`) is never written in a log, and the administration
-shows it `(secret)`. An app adds its own settings, with their shapes, and reads them in `r.Settings`:
+A secret (`check.Secret()`, as `APP_SECRET`, `APP_CEPHEUS_TOKEN`, and the providers' `APP_GOOGLE_SECRET`,
+`APP_APPLE_KEY`...) is never written in a log, and the administration shows it `(secret)`. An app adds its own settings, with their shapes, and reads them in `r.Settings`:
 
 ```
 Settings = check.Record({MailFrom: check.Email(optional = true, default = "office@example.com")})
@@ -45,7 +45,7 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_PORT`, `APP_HOST` | 8080, 127.0.0.1 | where it listens |
 | `APP_CEPHEUS_URL`, `APP_CEPHEUS_TOKEN`, `APP_CEPHEUS_CA` | | the database, its token, the certificate of its cluster's authority (TLS off its machine) |
 | `APP_CEPHEUS_READ_TOKEN`, `APP_GET_DB` | `fork` in dev and test, `read` in prod with the token, else `same` | the database of a GET: a fork whose writes are caught, or a token that only reads |
-| `APP_SECRET` | random at each start | the key of the cursors and of the challenges, 32 bytes at least, the same for every worker |
+| `APP_SECRET` | random at each start | the key of the cursors, of the challenges and of the secrets of TOTP and the recovery codes, 32 bytes at least, the same for every worker and at every start: with another, no secret of TOTP can be read ([passkeys](passkeys.md#4-totp-and-recovery-codes)) |
 | `APP_CERT`, `APP_KEY` | | a certificate and its key in PEM: https |
 | `APP_CORS` | | the origins of partners, with commas |
 | `APP_TRUST_PROXY` | false | the client's address is the last of `X-Forwarded-For`, which the proxy in front writes |
@@ -62,6 +62,24 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_EMAIL_CHECK`, `APP_SIGN_UP_ANSWER`, `APP_CHECK_TIME`, `APP_RESET_TIME`, `APP_CHECK_PAGE`, `APP_RESET_PAGE`, `APP_MAILS_PER_HOUR` | `off`, `tell`, 2 days, 1 hour, `/check-email`, `/reset-password`, 5 | the checks of addresses and the new passwords by mail ([check](check-email.md)) |
 | `APP_HOOK_TOLERANCE`, `APP_HOOK_TIMEOUT` | 300 s, 15 s | the webhooks: how far from now a message received may be, the deadline of each try |
 | `APP_ADMIN_PATH` | `/admin` | where the admin pages are served, `off` for none ([the admin pages](admin.md)) |
+| `APP_LANGS` | `en` | the languages the app speaks, with commas, its first the default; `en` alone translates nothing ([languages](languages.md)) |
+| `APP_KEY_LIMIT` | 600 | the requests a minute of each key of a program, a burst of a quarter, apart from the users' ([partner API](partner-api.md)) |
+| `APP_PASSWORDS` | `on` | `off`: no sign-up nor sign-in by password, only passkeys and providers |
+| `APP_TWO_FACTOR`, `APP_TWO_FACTOR_ROLES` | `optional`, none | TOTP `off`, `optional` (a user turns it on) or `required` of everyone; the roles, with commas, that must have a second factor (`super` for the super-admins) ([passkeys](passkeys.md)) |
+| `APP_TOTP_ALGORITHM`, `APP_TOTP_DIGITS`, `APP_TOTP_PERIOD`, `APP_TOTP_SKEW`, `APP_TOTP_ISSUER` | `SHA1`, 6, 30 s, 1, the app's name | the codes of TOTP: `SHA1` or `SHA256`, 6 to 8 digits, 15 to 120 seconds a code, 0 to 3 codes before and after now; the name the app of codes shows |
+| `APP_STEP_TIME`, `APP_STEP_TRIES` | 300 s, 5 | how long the second step of a sign-in waits (60 to 1,800), and the codes a ticket takes (1 to 20) |
+| `APP_PASSKEYS`, `APP_PASSKEY_CHECK`, `APP_PASSKEY_TIME`, `APP_PASSKEY_COUNTER`, `APP_PASSKEY_ORIGINS` | `on`, `required`, 300 s, `refuse`, none | the passkeys: on or off; the device's check of its user, `required`, `preferred` or `discouraged`; how long a ceremony waits (30 to 1,800); a counter that goes back refused or only noted (`allow`); other origins a ceremony may come from, with commas |
+| `APP_RP_ID`, `APP_RP_NAME` | the host of `APP_ORIGIN`, the app's name | the relying party of the passkeys: the id they are bound to, and the name the device shows |
+| `APP_INVITE_PAGE` | `/join` | the page of the front an invitation's link opens, at `APP_ORIGIN`, the code in its fragment |
+| `APP_SIGN_IN_WITH` | none | the providers to sign in with, with commas: `google`, `microsoft`, `apple`, `github`, `oidc`, or one of the app's (`auth.Provider`); each needs its settings, or the start stops ([Google](google.md)) |
+| `APP_OIDC_LINK`, `APP_OIDC_SIGN_UP`, `APP_OIDC_PAGE`, `APP_OIDC_TIME` | `verified`, `on`, `/signin/callback`, 600 s | an account linked by an address the provider verified, or `never`; an account made at a first sign-in, or `off`; the page the callback passes the provider's answer to; how long a sign-in with a provider waits (60 to 3,600) |
+| `APP_GOOGLE_ID`, `APP_GOOGLE_SECRET` | none | Google's client |
+| `APP_MICROSOFT_ID`, `APP_MICROSOFT_SECRET`, `APP_MICROSOFT_TENANT` | none, none, `common` | Microsoft's client, and its tenant: `common`, `organizations`, `consumers`, or the id of one |
+| `APP_APPLE_ID`, `APP_APPLE_TEAM`, `APP_APPLE_KEY_ID`, `APP_APPLE_KEY` | none | Apple's Services ID, team, key's id, and the key (`.p8`, PEM) that signs its client secret |
+| `APP_GITHUB_ID`, `APP_GITHUB_SECRET` | none | GitHub's client |
+| `APP_OIDC_ISSUER`, `APP_OIDC_ID`, `APP_OIDC_SECRET`, `APP_OIDC_NAME`, `APP_OIDC_SCOPES` | none, none, none, `SSO`, `openid email profile` | any provider of OpenID Connect: its issuer (https), its client, its button's title, its scopes |
+| `APP_<NAME>_ID`, `APP_<NAME>_SECRET` | none | the client of a provider of the app's own, `auth.Provider("okta", ...)` reading `APP_OKTA_ID` and `APP_OKTA_SECRET` |
+| `APP_FLAGS_REFRESH` | 1 s | how often a process reads the feature flags again, 0 to 3,600 seconds ([flags](flags.md)) |
 
 ## 2. Three profiles
 

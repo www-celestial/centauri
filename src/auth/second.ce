@@ -404,13 +404,11 @@ defn totpConfirm(r, x)
 end
 
 defn totpOff(r, x)
-  (** POST /auth/totp/off: with a code of the app or a recovery code, unless the settings ask it of the user. *)
+  (** POST /auth/totp/off: with a code of the app or a recovery code. When the settings ask a second factor of the user,
+      his next sign-in sets one up again: what a user does himself to move his codes to a new phone. *)
   t = totpOf(r.User.Id, r.Env)?
   if value.IsMissing(t) or not t.On
     return factorsOf(r.User.Id, r.Env)
-  end
-  if asked(r.User.Roles, r.User.Super, r.Settings)
-    return app.Fail(403, "Two-factor is asked of you by this app: it stays on.")
   end
   if value.IsMissing(taken(r.User.Id, x.Code, r.Env, r.User.Id, r.Why)?)
     return app.Fail(422, "Check the fields.", fields = {Code: "This code is not the right one."})

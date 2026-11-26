@@ -4,7 +4,8 @@ The task: the people who run the platform see it and act on it from a browser, a
 of what a platform needs: a dashboard of the last minutes (requests, failures, the time of a request, refusals and
 the signs of bots, jobs), the users, the tenants and their roles changed in place, the events and the log as they
 come, the jobs and the webhooks run again, the files, the settings, the data of every kind changed through its
-checks, and the trail of what the admins changed. And the app adds its own pages, columns and actions in a few lines.
+checks, the trail of what the admins changed, the keys of programs and the feature flags, and a user's second factors
+taken away when he lost his device. And the app adds its own pages, columns and actions in a few lines.
 The code is `src/admin/admin.ce` (the module) and `src/admin/pages/` (the pages); the tests are `tests/admin.test.ce`
 and, in a browser, `examples/invoices/tools/admin-shot.sh`.
 
@@ -42,7 +43,11 @@ beside it goes to a browser that takes brotli. They pass the same door as any re
 headers of security, the log.
 
 The pages sign in by HTTP (`POST /auth/signin`), the session a cookie no script reads; an account that isn't a
-super-admin's is signed out at once and told so. Then they open the live screen (`/live`), which reads the session
+super-admin's is signed out at once and told so. When the app asks a second factor (the super-admin's TOTP is on, or
+`APP_TWO_FACTOR_ROLES` names `super`), the sign-in shows its second step: a field for the code of his app or a
+recovery code, sent to `POST /auth/second`; and when he has none yet, first the secret to type into his app, its
+`otpauth://` address and his recovery codes, shown that once (`POST /auth/second/setup`). A wrong code shows its
+problem; an ended step goes back to the password ([passkeys](passkeys.md#5-the-second-step-of-a-sign-in)). Then they open the live screen (`/live`), which reads the session
 again, checks the role `super` of each show, and runs each action, an endpoint by its name, through the same door as
 over HTTP: the session, the role, the limits of the user, the shapes, the log, the metrics. A page in the browser is
 never trusted: it holds nothing the server would not give any program with the same cookie.
@@ -60,8 +65,8 @@ urlpatterns = [path("admin/", admin.site.urls)]
 |---|---|---|
 | Dashboard | the counts (users, tenants, sessions, requests, refused, failed sign-ins of the last minute); a point each second of the last five minutes: requests and 5xx, p50 and p99 of a request, refusals at the door by reason (another site, a limit, no session, a role) and failed sign-ins, jobs ready, running and dead; the last events | the show `admin.series` (each second, from the metrics and the log of the process), `admin.events`, `GET /admin/stats` |
 | Users | 50 a page, by the start of their e-mail or of a tenant, sorted by a click on a title | disable, enable, sign out everywhere, make or unmake a super-admin, each asked first (`POST /admin/users/:id/disable`...) |
-| A user | his account, his tenants with his roles in a field each, his sessions | roles saved in place (`PUT /admin/tenants/:id/members/:user`) |
-| Tenants, a tenant | by the start of their name; its members and their roles | roles in place, a user added by his id with roles |
+| A user | his account, his tenants with his roles in a field each; his ways of signing in and second factors (a password or not, TOTP and the recovery codes left, each passkey with when it was made and last used and whether its device verified him, the providers); his sessions | roles saved in place (`PUT /admin/tenants/:id/members/:user`); his TOTP and recovery codes, or his passkeys, taken away when he lost his device (`POST /admin/users/:id/factors/reset`); a session chosen in the table ended alone (`DELETE /admin/sessions/:id`); each asked first |
+| Tenants, a tenant | by the start of their name; its members and their roles | roles in place, a user added by his id with roles; someone invited by mail with roles (`POST /admin/tenants/:id/invites`) |
 | Events | by kind, user, tenant, route, and a time range on the viewer's clock, page after page; or live, the last hour as it is written | `GET /admin/events`, the show `admin.events` |
 | Log | the lines this process keeps, by level and a text; or live | `GET /admin/logs`, the show `admin.logs` |
 | Jobs | by state and kind | a dead one run again, a waiting one cancelled (`POST /admin/jobs/:id/retry`, `/cancel`) |
@@ -70,6 +75,8 @@ urlpatterns = [path("admin/", admin.site.urls)]
 | Settings | each setting, its variable, its value, where it came from (env, the app's code, Centauri's default); a secret is `(secret)`, masked by the server | |
 | Data | each kind of `app.Kind`; the things of one, 50 a page (All reads them all, 200,000 at most); the one chosen with all its fields | its fields changed in place (`PATCH /admin/data/:kind/:id`), the app's actions |
 | Audit | what the super-admins changed: who, when, from where, by which route, what | |
+| Keys | the keys of programs, 50 a page, of a tenant by its id or of all: their tenant, name, roles, when made, when they end, when last used; never a secret | a key chosen revoked, asked first (`DELETE /admin/keys/:id`) |
+| Flags | each feature flag the code declares: its name, what it is for, its state in words, what is set for tenants and users | on or off for everyone, on for a share of the users, back to the default, on, off or cleared for a tenant or a user by its id (`PUT /admin/flags/:name`) |
 
 Every time is shown on the viewer's clock (a day that Cepheus keeps at 00:00 UTC as the day); every problem with its
 status, its message, the fields that are wrong and the number of its request to quote (`urn:request:...`), and the
@@ -176,17 +183,21 @@ class InvoiceAdmin(admin.ModelAdmin):
 What the browser test plays (`examples/invoices/tools/admin-shot.sh`, Chrome without a window driven from Cesia, and
 the same in Firefox): sign in (the password a field of dots, a password input for the browser's manager), each page,
 a user chosen and disabled once asked, the table read again; an invoice's name changed in place and a total that is no
-number refused with its field; Mark paid on the Unpaid page; each change in the Audit; sign out.
+number refused with its field; Mark paid on the Unpaid page; each change in the Audit; on Keys, the accounting robot's
+key chosen and revoked once asked (the step `revoke`); on Flags, the flag `export.country` and its office, then on for
+everyone (the step `flag`); sign out.
 
 ## 4. Its tests
 
 `tests/admin.test.ce`: the files served with their type, ETag, 304 and brotli, no script of its own in the page, no
 source and nothing outside the folder (`isPagesServedWithTheirHeaders`); off by its setting (`isTurnedOffBySetting`);
-each endpoint the pages call refused without a session (401) and without the role (403) (`isEveryEndpointForSuperOnly`);
+each endpoint of `api.AdminOfApp`, `api.AdminOfAccounts` and the jobs refused without a session (401) and without the
+role (403) (`isEveryEndpointForSuperOnly`; the endpoints of the flags are not in its list);
 no secret sent (`isSecretNeverSent`); a field changed through its type, a secret refused, a unique value checked, the
 audit naming fields only (`isEditCheckedByTheKind`); a job cancelled, not while it runs, and run again
 (`isJobCancelledAndRetried`); events by time and route (`isEventsFilteredByTimeAndRoute`); a request of another site
 refused (`isCrossSiteRefused`); the log read once a line (`isLogTailedOnce`); the three shows for the role super only,
-over a real WebSocket (`isLiveForSuperOnly`).
+over a real WebSocket (`isLiveForSuperOnly`). `tests/people.test.ce`: the endpoints of the pages Keys and a user's
+factors, sessions and invitations ([the administration](administration.md)); `tests/flags.test.ce`: those of Flags; `isEveryEndpointForSuperOnly` lists `AdminFlags` and `AdminFlag` too.
 
 Next: [Speed](speed.md), where the pages' size, first paint and frames are measured.

@@ -153,3 +153,26 @@ defn isOpenApiNamingKeys()
   doc = json.Parse(t.Raw("GET", "/openapi.json").Body)?
   doc.components.securitySchemes.key.scheme == "bearer" and value.Len(doc.paths["/notes"].get.security) == 2
 end
+
+defn isKeyBoundToItsMaker()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  b = t.SignUp({Email: "cy@example.com", Password: "correct horse cy", Name: "Cy", Invite: a.Call(api.Invite, {Email: "cy@example.com", Roles: ["admin"]})?.Code})?
+  made = b.Call(api.NewKey, {Name: "Cy's robot", Roles: ["admin"]})?
+  bug.Assert(program(t, made.Key, "POST", "/notes/purge").Status == 204, "an admin's key")
+  a.Call(api.SetRoles, {id: b.User, Roles: ["member"]})?
+  t.Advance(3)
+  demoted = program(t, made.Key, "POST", "/notes/purge").Status
+  member = program(t, made.Key, "GET", "/notes").Status
+  a.Call(api.RemoveMember, {id: b.User})?
+  t.Advance(3)
+  gone = program(t, made.Key, "GET", "/notes").Status
+  demoted == 403 and member == 200 and gone == 401
+end
+
+defn isOpenApiNoKeyForAccounts()
+  t = apptest.Start(App)?
+  doc = json.Parse(t.Raw("GET", "/openapi.json").Body)?
+  value.Len(doc.paths["/auth/me"].get.security) == 1 and value.Len(doc.paths["/admin/users"].get.security) == 1 and value.Len(doc.paths["/notes"].get.security) == 2
+end
+

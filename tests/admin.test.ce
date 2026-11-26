@@ -9,6 +9,7 @@ use src/api
 use src/app
 use src/apptest
 use src/auth
+use src/flags
 use src/jobs
 use std/bug
 use std/check
@@ -29,7 +30,7 @@ folder = ".cesia/admin-pages"
 Thing = app.Kind("gadget", {Tenant: cepheus.Link(), Name: cepheus.Text(unique = true), Count: cepheus.Int(), Price: cepheus.Money(2), Seen: cepheus.Date(),
   Token: cepheus.Text()}, secret = ["Token"])
 Gadgets = app.Module("gadgets", kinds = [Thing])
-App = app.Of([auth.Module(), admin.Module(folder = folder), Gadgets], name = "gadgets")
+App = app.Of([auth.Module(), flags.Module([flags.Flag("beta")]), admin.Module(folder = folder), Gadgets], name = "gadgets")
 
 defn built()
   (** A build of pages, as cesia build would leave it: a module, its loader, its brotli. *)
@@ -75,9 +76,9 @@ defn isEveryEndpointForSuperOnly()
   (** Each endpoint the pages call refuses who has no session (401) and who hasn't the role super (403). *)
   t = apptest.Start(App)?
   ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
-  args = {id: 65537, kind: "gadget", user: 65537, Fields: "{}", Super: true, Roles: []}
+  args = {id: 65537, kind: "gadget", user: 65537, name: "beta", Fields: "{}", Super: true, Roles: [], On: true, Email: "x@example.com"}
   wrong = []
-  for e in list.Concat(api.AdminOfApp, list.Concat(api.AdminOfAccounts, [api.AdminJobs, api.AdminJobRetry, api.AdminJobCancel]))
+  for e in list.Concat(api.AdminOfApp, list.Concat(api.AdminOfAccounts, [api.AdminJobs, api.AdminJobRetry, api.AdminJobCancel, api.AdminFlags, api.AdminFlag]))
     if e.Method != "LIVE" and dict.Has(e.Name, dict.Dict([{Key: b.Endpoint.Name, Value: true} for b in t.Env.Served]))
       nobody = t.Anyone().Call(e, args)
       member = ana.Call(e, args)

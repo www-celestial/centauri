@@ -98,7 +98,7 @@ defn Of(modules, settings = missing, roles = DefaultRoles, defaults = {}, name =
       the defaults of its settings (values of their types, which the environment overrides: an app that is single-
       tenant says defaults = {Tenancy: "single"}), its name and version (for OpenAPI and the admin), and pages, the
       folder of its front (dist/), served for the paths that no route takes, and messages, the catalogue of its words
-      in other languages (i18n.Catalog, or the map Catalog takes), which the setting Langs turns on. An endpoint whose role is no role of the
+      in other languages (i18n.Catalog, or several joined by i18n.Of), which the setting Langs turns on. An endpoint whose role is no role of the
       table, nor api.Public, api.Signed or api.Super, stops here: a role written wrong never opens a route. *)
   modules = withRunner(modules)
   fields = Core
@@ -185,7 +185,7 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: guards,
     Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
     Now: if value.IsMissing(clock) (() -> sys.Now()) else (() -> Now(state)) end,
-    OpenApi: json.Text(api.OpenApi([b.Endpoint for b in served], title = a.Name, version = a.Version)),
+    OpenApi: json.Text(api.OpenApi([if b.Accounts dict.Put("NoKey", true, b.Endpoint) else b.Endpoint end for b in served], title = a.Name, version = a.Version)),
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s), SessionKeyOf: sessionKey,
     WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards),

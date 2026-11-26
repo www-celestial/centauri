@@ -21,7 +21,7 @@ defn wordsOf(a, s)
   catalogs = list.Concat([i18n.Centauri], [m.Messages for m in a.Modules if not value.IsMissing(dict.Get("Messages", m))])
   own = dict.Get("Messages", a)
   if not value.IsMissing(own)
-    catalogs = list.Append(if dict.Has("Exact", own) own else i18n.Catalog(own) end, catalogs)
+    catalogs = list.Append(own, catalogs)
   end
   {Catalog: i18n.Of(catalogs), Langs: langs, Lang: langs[1], Translating: not (value.Len(langs) == 1 and text.Lower(langs[1]) == "en")}
 end

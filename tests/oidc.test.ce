@@ -216,3 +216,23 @@ defn isFlowCookieGuarded()
     q["code_challenge_method"] == "S256" and text.ByteLength(q["code_challenge"]) == 43 and q["redirect_uri"] == "https://sso.example/auth/oidc/callback" and
     not text.Contains(text.Split(".", text.Split("=", text.Split(";", set)[1])[2])[2], json.Text(b.Q))
 end
+
+defn isIssuerAskedWhenPromised()
+  p = apptest.Provider(apptest.Start(App)!, alg = "RS256", pair = pairs[1], iss = true)!
+  t = started(p)?
+  b = begin(t)
+  without = finish(t, b, {State: b.Q.state, Code: codeOf(p, b)})
+  c = begin(t)
+  with = finish(t, c, {State: c.Q.state, Code: codeOf(p, c), Iss: p.Issuer})
+  without.Status == 401 and with.Status == 201
+end
+
+defn isAddressCheckedByTheProvider()
+  p = provider()
+  t = started(p, settings = {EmailCheck: "required"})?
+  t.Anyone().Send(api.SignUp, {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})
+  linked = signedIn(t, p)
+  bug.Assert(linked.Status == 201 and json.Parse(linked.Body)?.Checked == true, "linked by the verified address, the address checked: $(linked.Body)")
+  result.IsOk(t.SignIn("ana@example.com", "correct horse 12"))
+end
+

@@ -92,6 +92,17 @@ window.adminPlay = (() => {
       await press('button', 'On for everyone')
       return line(shown && await says('on for everyone'), 'the flag of the export, its office, then on for everyone')
     },
+    async user () {
+      await press('link', 'Users'); await wait(1200)
+      const bruno = await rowOf('bruno@example.com'); if (!bruno) return line(false, 'bruno in the users')
+      click(bruno); await wait(500)
+      await press('button', 'Open'); await wait(1500)
+      const seen = await says('Ways of signing in') && await says('Choose a session in the table')
+      const s = all(await tree(), n => n.Role === 'row')[1]; if (s) { click(s); await wait(500) }
+      const asked = await press('button', n => n.startsWith('End session')) && await says('?')
+      await press('button', 'Yes')
+      return line(seen && asked && await says('Done.'), "a user's ways of signing in, one session of his ended")
+    },
     async signOut () {
       setTimeout(() => press('button', 'Sign out'), 50)
       return line(true, 'signing out (the page loads again)')

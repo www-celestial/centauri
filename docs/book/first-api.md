@@ -42,6 +42,47 @@ Until both have tagged releases, Centauri's `tools/deps.sh examples/invoices` pu
 Spring Boot: a `pom.xml` with `spring-boot-starter-web`, `-data-jpa`, `-security`, `-validation`, the driver of
 PostgreSQL and Flyway; then `application.yml` for the database.
 
+### A module from the generator
+
+This chapter writes the clients by hand, to show each piece. A new module can also start from Centauri's generator,
+which writes a module that works, of the same shape as this one, and its test that passes. It is a task of the app,
+from Centauri in `deps/` (its `take` lists `"src/gen"` and `"tools"` too):
+
+```toml norun
+[tasks.new-module]
+file = "deps/www-celestial/centauri/tools/new-module.ce"
+allow = ["read", "write"]
+```
+
+```text
+$ cesia do new-module tickets
+wrote src/tickets/api/api.ce
+wrote src/tickets/kinds.ce
+wrote src/tickets/tickets.ce
+wrote tests/tickets.test.ce
+Add it to the app: use src/tickets, then tickets.Module in app.Of([...]). Then cesia test tests/tickets.test.ce.
+```
+
+- `src/tickets/api/api.ce`, the contract: `TicketIn`, `TicketOut`, and `AddTicket`, `Tickets` (20 a page, the newest
+  first), `Ticket`, `EditTicket`, `DeleteTicket`, of the role `member`.
+- `src/tickets/kinds.ce`: the kind `ticket`, each of its tenant (`Tenant`, `Name`, `Note`, `Created`).
+- `src/tickets/tickets.ce`: the handlers, each writing with `r.User.Tenant` and reading through `app.Own`, and
+  `Module`.
+- `tests/tickets.test.ce`: made, changed, read, listed and deleted by a member (`isMadeListedChangedDeleted`), another
+  tenant blind to them (`isOtherTenantBlind`), and the tests Centauri makes of every app (`isIsolated`, `isFuzzed`). It
+  runs its own app, the accounts and the new module, so it passes before the module is in the app.
+
+The two lines it names go into the app: `use src/tickets`, and `tickets.Module` in the list of `app.Of`. The name is 2
+to 40 small letters and digits, a letter first; the kind is the name without its last `s`, or the second word
+(`cesia do new-module people person`). The generator never writes over a file: if one of the four is there, it writes
+none ("src/tickets/kinds.ce is there already: nothing was written."). `member` is a role of Centauri's default table;
+an app of its own roles, as the invoices (owner, admin, accountant), changes the role in the contract, or its start
+stops on it ("POST /tickets: the role member is no role of the app (...)."). What it writes is the module of
+`examples/notes/src/tickets`, whose test passes there (`isTheTicketsOfTheNotes` in `tests/gen.test.ce`).
+
+Spring Boot has no generator of a module: Spring Initializr (start.spring.io) makes a project; JHipster's
+`jhipster entity` makes an entity with its pages, on its own stack.
+
 ## 2. The contract
 
 The contract says what each endpoint takes and gives, and who may call it. It is a package of its own, which uses

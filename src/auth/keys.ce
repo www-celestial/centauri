@@ -1,4 +1,5 @@
-(* The keys of programs (API keys). A key belongs to a tenant: an admin of it makes one with some of his roles, a
+(* The keys of programs (API keys). A key belongs to a tenant: an admin of it makes one with some of his roles, and
+   it keeps no more than he has: a maker disabled or out of the tenant ends his keys, a role taken from him leaves them; a
    program sends it as Authorization: Bearer id.secret, the form of a session's cookie, and the database keeps the
    BLAKE2b of its secret only, so a copy of the database opens nothing. Checking one is the read of a session: its
    thing by its id, a hash, a comparison in constant time. A key is no person: it calls the app's endpoints with its
@@ -57,6 +58,17 @@ defn keyWho(token, env)
   if value.IsMissing(t) or value.IsMissing(dict.Get("Created", t))
     return result.Ok(missing)
   end
+  roles = app.RolesOf(k.Roles, env)
+  maker = dict.Get("By", k)
+  if not value.IsMissing(maker)
+    u = cepheus.Get(User, maker, env.Db)?
+    m = membershipOf(maker, k.Tenant, env.Db)?
+    if value.IsMissing(u) or u.Disabled == true or value.IsMissing(m)
+      return result.Ok(missing)
+    end
+    has = app.RolesOf(m.Roles, env)
+    roles = [x for x in roles if x in has]
+  end
   last = dict.Get("Last", k)
   if not value.IsNumber(last) or now - last > 300
     by = dict.GetOr("By", 0, k)
@@ -67,7 +79,7 @@ defn keyWho(token, env)
   if value.IsNumber(ends) and ends < until
     until = ends
   end
-  result.Ok({Id: dict.GetOr("By", 0, k), Tenant: k.Tenant, Member: missing, Session: missing, Key: p.Id, Roles: app.RolesOf(k.Roles, env), Super: false,
+  result.Ok({Id: dict.GetOr("By", 0, k), Tenant: k.Tenant, Member: missing, Session: missing, Key: p.Id, Roles: roles, Super: false,
     Email: "", Name: dict.GetOr("Name", "", k), Until: until, Checked: true, Rate: env.KeyRate})
 end
 

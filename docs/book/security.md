@@ -68,6 +68,43 @@ The threats of the admin pages, each with its test in `tests/admin.test.ce`, and
 | a file outside the pages' folder, or their source, read by its path | the pages are a map of names read at the start; `..` or a name not in it gives 404; `.ce` files are left out | admin `isPagesServedWithTheirHeaders` |
 | a flood through the pages | every action passes the limits of the address, the user and the tenant; the screens of a session (16) and their shows (64) are bounded | app `isLimited`; live `isRefusedWithoutRights` |
 
-What L1 does not do yet: the third wall, a token of Cepheus per role that reads only its kinds (G16), for roles that
-must never see some kinds (an outside accountant); multi-factor and passkeys (L3); checking a new password against the
-lists of leaked ones. The neutral answer of a sign-up came with L2 (`SignUpAnswer`, with mail).
+The threats of L3 (signing in with a provider, passkeys, the second factor, the keys of programs, the languages),
+each with its test in `tests/oidc.test.ce` (oidc), `tests/passkeys.test.ce` (passkeys), `tests/second.test.ce`
+(second), `tests/keys.test.ce` (keys), `tests/people.test.ce` (people), `tests/words.test.ce` (words), and
+`examples/invoices/tests/l3.test.ce` (l3):
+
+| threat | defense | test |
+|---|---|---|
+| token substitution: an ID token of another app, or of another sign-in | `aud` this app's client, and `azp` when there are several; `nonce` a BLAKE2b of the secret of this browser's cookie | oidc `isTokenOfAnotherAppOrSignInRefused` |
+| mix-up: a provider's answer that another provider named | the answer's `iss` checked when given, and asked when the provider says it gives it (RFC 9207); the code sent only to the token endpoint of the flow's provider, from its own discovery document | oidc `isMixUpRefused`, `isIssuerAskedWhenPromised` |
+| replay of a flow: a finish sent twice | the flow ends at its first finish, by a write that expects it | oidc `isFinishedOnce` |
+| CSRF of the callback, login CSRF: a sign-in started in the attacker's browser, finished in the victim's | `state` a BLAKE2b of the secret of the cookie of the browser that started (`__Host-oidc`, `SameSite=Strict`), compared in constant time; the finish refused from another site; the callback writes nothing | oidc `isLoginCsrfRefused`, `isCallbackPassedOn`, `isFlowCookieGuarded` |
+| open redirect of `Return` | a path of the app only: a `/` not followed by another, no `\` nor control character, 2,000 bytes at most; else `/` | oidc `isReturnKeptInTheApp` |
+| JWKS spoofing: keys a token names in itself, `alg: none`, HS256 with the provider's public key | the algorithms the app's (RS256, PS256, ES256, EdDSA); `none` and HMACs refused; the key from the provider's set by `kid` and type; `jwk`, `jku`, `x5u`, `x5c` never read | oidc `isForgedTokenRefused`; the keys turned, read again: `isRotationRead` |
+| an expired token, or one of the future | `exp` and `iat`, a minute of skew | oidc `isTokenOfAnotherAppOrSignInRefused` |
+| an unverified address used to take an account | an account linked only by an address the provider says is verified, as `OidcLink` says; Microsoft's `xms_edov` | oidc `isLinkedOnlyByAVerifiedAddress`, `isMicrosoftAndAppleRead`, `isAddressCheckedByTheProvider` |
+| a provider's text shown to the user | only the error codes of OAuth 2.0 and OpenID Connect named | oidc `isProviderTextNotShown` |
+| TOTP brute force | `StepTries` codes a ticket; the user's failures in Cepheus with the delay that doubles; `SignInPerIp` | second `isGuessingStopped` |
+| TOTP replay: a code seen and typed again | the step of the last code taken kept; a code of that step or an earlier one refused; the write expects the old step | second `isCodeTakenOnce` |
+| recovery code reuse | each code ended when used, by a write that expects it | second `isRecoveryCodeOnce` |
+| a ticket of the second step forged, of another step, or late | `id.secret`, its hash kept, compared in constant time; `StepTime` | second `isTicketForgedRefused` |
+| the secrets of TOTP and the recovery codes read in a copy of the database | the secret sealed (XSalsa20-Poly1305), the codes a keyed BLAKE2b, under a key of `APP_SECRET` | second `isSecretSealed` |
+| TOTP turned off by who holds a session only | a code of the app or a recovery code asked | second `isTurnedOffOnlyWithACode`; set up again at the next sign-in when the settings ask it, `isTurnedOffThenSetUpAgainWhenAsked` |
+| a passkey's answer from a phishing site, for another relying party, of another ceremony, in a frame | the origin (`APP_ORIGIN`, `PasskeyOrigins`), the SHA-256 of `RpId`, the type and the challenge of the ceremony, `crossOrigin` and `topOrigin` | passkeys `isPhishingRefused`, `isMadeOnlyHere`, `isTicketAndAssertionOnce` |
+| a cloned passkey: its counter rolled back | a counter that must grow when either side counts; an event `passkey-cloned`; refused with `PasskeyCounter = refuse` | passkeys `isClonedKeyRefused`, `isCounterOfZeroTaken` |
+| user verification skipped | `PasskeyCheck = required`: a device that verified nobody refused; else the second step | passkeys `isVerificationAsked` |
+| an API key leaked in a log | no header in a log line; the events name the key's id, never its secret | keys `isKeyNeverInLogsNorEvents` |
+| a key copied from the database | the BLAKE2b of its secret only | keys `isKeyOfTheDatabaseUseless` |
+| a key used past its roles | its roles those of its maker's it was given and he still has, checked at each endpoint; a maker disabled or gone ends it | keys `isKeyBoundToItsRoles`; l3 `isPartnerApiWithItsKey`, `isKeyBoundToItsMaker` |
+| a key used on the accounts | the door refuses a key on the endpoints of the module of the accounts | keys `isKeyNoPerson` |
+| a key used past its end | `Ends` read at each request | keys `isKeyEnded` |
+| a key used after it was revoked | its facts retracted; at once in this process, within `APP_SESSION_CACHE` seconds in the others | keys `isKeyRevokedEverywhere`; people `isKeysSeenAndRevokedBySuper` |
+| a flood from a program | `KeyLimit` a minute for each key, and the limits of the address and of the tenant | keys `isKeyLimitedApart` |
+| language header injection: a line end, a script, 5,000 languages in `Accept-Language` | the header read as tags only, 400 bytes and 20 languages; one of `Langs` in `Content-Language` | words `isLanguageHeaderInjectionHarmless` |
+| a second factor skipped by another way in | the step after a password, a provider, a passkey its device didn't verify, the link of a check, a new password, a tenant entered, an invitation taken | second `isAskedOnEveryWayIn`; oidc `isSecondFactorAfterTheProvider`; passkeys `isVerificationAsked`; l3 `isPasskeyAndTwoFactor` |
+| the code of an invitation read in an answer or the database | with `Mail`, a job makes it and mails it; its hash kept | people `isTenantAdminInvitingByMail`, `isInvitedByMail` |
+
+What Centauri does not do yet: the third wall, a token of Cepheus per role that reads only its kinds (G16), for roles
+that must never see some kinds (an outside accountant); checking a new password against the lists of leaked ones. The
+neutral answer of a sign-up came with L2 (`SignUpAnswer`, with mail); multi-factor and passkeys (L3) are done now:
+TOTP and recovery codes, passkeys, signing in with a provider, and the second factor on every way in.
