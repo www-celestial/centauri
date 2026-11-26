@@ -70,9 +70,10 @@ MemberRow = check.Record({User: check.Id(), Email: check.Email(), Name: check.Te
 Members = Get("/auth/members", out = Page(MemberRow, 50), role = "admin", about = "The members of this tenant.")
 
 (** An invitation to the tenant of the session, with roles: its code comes back once (only its hash is kept), and
-    lasts the setting InviteTime. L2 sends it by mail. *)
-Invite = Post("/auth/invites", body = check.Record({Email: check.Email(), Roles: check.List(check.Text(1, 40), 1, 20)}),
-  out = check.Record({Code: check.Text(1, 200), Ends: check.Time()}), role = "admin", about = "Invites someone to this tenant.")
+    lasts the setting InviteTime. With Mail, a job makes the code and mails its link (InvitePage) instead, and the
+    answer is a 202 without a code: the code is then in no answer and in no database. *)
+Invite = Post("/auth/invites", body = check.Record({Email: check.Email(), Roles: check.List(check.Text(1, 40), 1, 20), Mail: check.Bool(optional = true, default = false)}),
+  out = check.Record({Code: check.Text(1, 200, optional = true), Ends: check.Time(optional = true)}), role = "admin", about = "Invites someone to this tenant.")
 
 (** The roles of a member of the tenant of the session; only an owner gives or takes the role owner. *)
 SetRoles = Put("/auth/members/:id/roles", body = check.Record({Roles: check.List(check.Text(1, 40), 0, 20)}), out = MemberRow,

@@ -55,50 +55,85 @@ Settings = {
   ResetTime: check.Int(300, 86400, optional = true, default = 3600),
   CheckPage: check.Text(1, 200, optional = true, default = "/check-email"),
   ResetPage: check.Text(1, 200, optional = true, default = "/reset-password"),
+  InvitePage: check.Text(1, 200, optional = true, default = "/join"),
   MailsPerHour: check.Int(1, 1000, optional = true, default = 5),
   KeyLimit: check.Int(1, 1000000, optional = true, default = 600),
+  Passwords: check.OneOf(["on", "off"], optional = true, default = "on"),
+  TwoFactor: check.OneOf(["off", "optional", "required"], optional = true, default = "optional"),
+  TwoFactorRoles: check.Text(0, 400, optional = true, default = ""),
+  TotpAlgorithm: check.OneOf(["SHA1", "SHA256"], optional = true, default = "SHA1"),
+  TotpDigits: check.Int(6, 8, optional = true, default = 6),
+  TotpPeriod: check.Int(15, 120, optional = true, default = 30),
+  TotpSkew: check.Int(0, 3, optional = true, default = 1),
+  TotpIssuer: check.Text(1, 120, optional = true),
+  StepTime: check.Int(60, 1800, optional = true, default = 300),
+  StepTries: check.Int(1, 20, optional = true, default = 5),
+  Passkeys: check.OneOf(["on", "off"], optional = true, default = "on"),
+  PasskeyCheck: check.OneOf(["required", "preferred", "discouraged"], optional = true, default = "required"),
+  PasskeyTime: check.Int(30, 1800, optional = true, default = 300),
+  PasskeyCounter: check.OneOf(["refuse", "allow"], optional = true, default = "refuse"),
+  PasskeyOrigins: check.Text(0, 2000, optional = true, default = ""),
+  RpId: check.Text(1, 255, optional = true),
+  RpName: check.Text(1, 120, optional = true),
 }
 
 (** The mails of the accounts, as an app may write them in its own words: each a function of {Link, Name, Email, App,
-    Hours, Lang, Say} that gives {Subject, Text}, and Html if it has one; Lang is the language of the user (his own, else
+    Hours, Lang, Say} (Invite: of {Link, Tenant, By, App, Days, Email, Lang, Say}) that gives {Subject, Text}, and Html if it has one; Lang is the language of the user (his own, else
     the app's first), and Say(template) the template in it, from the app's catalogue, its {Names} filled from x. Check is the link that checks an address, Reset the
     one that sets a new password, Taken the mail to the owner of an address that someone tried to sign up with again,
     when the sign-up answers the same for every address (SignUpAnswer neutral). *)
 Mails = {
   Check: x -> {Subject: x.Say("Check your e-mail address for {App}"), Text: x.Say("Hello {Name},\n\nTo check that this address is yours, open this link within {Hours} hours:\n\n{Link}\n\nIf you didn't sign up for {App}, ignore this mail.\n")},
   Reset: x -> {Subject: x.Say("A new password for {App}"), Text: x.Say("Hello {Name},\n\nTo set a new password, open this link within {Hours} hours:\n\n{Link}\n\nIf you didn't ask for it, ignore this mail: your password stays as it is.\n")},
+  Invite: x -> {Subject: x.Say("You are invited to {Tenant} on {App}"), Text: x.Say("Hello,\n\n{By} invites you to {Tenant} on {App}. To accept, open this link within {Days} days:\n\n{Link}\n\nIf you don't know {App}, ignore this mail.\n")},
   Taken: x -> {Subject: x.Say("Someone tried to sign up with your address at {App}"), Text: x.Say("Hello {Name},\n\nSomeone tried to sign up for {App} with this address, which has an account already. If it was you, sign in, or set a new password here:\n\n{Link}\n\nIf it wasn't you, ignore this mail: nothing changed.\n")},
 }
 
-defn Module(signUp = api.SignUp, facts = missing, mails = Mails)
+defn Module(signUp = api.SignUp, facts = missing, mails = Mails, providers = [])
   (** The module of the accounts: its kinds, its endpoints (api.Accounts and api.AdminOfAccounts), the session of
       each request (Who, kept SessionCache seconds by the state of the process under SessionKey), its settings, and a
       keeper that forgets ended sessions, challenges, invitations and codes. signUp is api.SignUp or one of
       api.SignUpOf; mails the texts of its mails (Mails, or the app's own, as dict.Put("Check", f, auth.Mails)),
-      sent by the jobs of the module of jobs, which the app lists with this one. *)
+      sent by the jobs of the module of jobs, which the app lists with this one; providers, the providers of OpenID
+      Connect of the app's own (Provider), beside Google, Microsoft, Apple, GitHub and the one of the settings. *)
   m = dict.Merge(Mails, mails)
   checking = jobs.Kind("centauri.check", check.Record({User: check.Id(optional = true), Email: check.Email(optional = true)}), (job, env) -> checkJob(job, env, m.Check), tries = 10, lease = 120)
   resetting = jobs.Kind("centauri.reset", check.Record({Email: check.Email()}), (job, env) -> resetJob(job, env, m.Reset), tries = 10, lease = 120)
   taken = jobs.Kind("centauri.taken", check.Record({Email: check.Email()}), (job, env) -> takenJob(job, env, m.Taken), tries = 10, lease = 120)
-  kinds = {Check: checking, Reset: resetting, Taken: taken}
+  inviting = jobs.Kind("centauri.invite", check.Record({Tenant: check.Id(), Email: check.Email(), Roles: check.List(check.Text(1, 40), 1, 20), By: check.Id(optional = true)}),
+    (job, env) -> inviteJob(job, env, m.Invite), tries = 10, lease = 120)
+  kinds = {Check: checking, Reset: resetting, Taken: taken, Invite: inviting}
   serve = [app.Serve(signUp, (r, x) -> signingUp(r, x, facts, kinds)), app.Serve(api.SignIn, (r, x) -> signingIn(r, x, kinds)), app.Serve(api.SignOut, signingOut),
     app.Serve(api.SignOutAll, signingOutAll), app.Serve(api.Me, me), app.Serve(api.Sessions, sessions), app.Serve(api.EndSession, endSession),
     app.Serve(api.ChangePassword, changePassword), app.Serve(api.Challenge, challenge), app.Serve(api.Members, members),
-    app.Serve(api.Invite, invite), app.Serve(api.Join, joining), app.Serve(api.SetRoles, setRoles), app.Serve(api.RemoveMember, removeMember),
+    app.Serve(api.Invite, (r, x) -> invite(r, x, kinds)), app.Serve(api.AdminInvite, (r, x) -> adminInvite(r, x, kinds)), app.Serve(api.Join, joining), app.Serve(api.SetRoles, setRoles), app.Serve(api.RemoveMember, removeMember),
     app.Serve(api.MyTenants, myTenants), app.Serve(api.SwitchTenant, switchTenant), app.Serve(api.CheckEmail, checkEmail),
     app.Serve(api.SendCheck, (r, x) -> sendCheck(r, x, kinds)), app.Serve(api.Forgot, (r, x) -> forgot(r, x, kinds)), app.Serve(api.Reset, resetPassword),
-    app.Serve(api.SetLang, setLang), app.Serve(api.NewKey, newKey), app.Serve(api.Keys, keys), app.Serve(api.RevokeKey, revokeKey)]
+    app.Serve(api.SetLang, setLang), app.Serve(api.NewKey, newKey), app.Serve(api.Keys, keys), app.Serve(api.RevokeKey, revokeKey),
+    app.Serve(api.MyFactors, factors), app.Serve(api.TotpStart, totpStart), app.Serve(api.TotpConfirm, totpConfirm), app.Serve(api.TotpOff, totpOff),
+    app.Serve(api.NewRecovery, newRecovery), app.Serve(api.Second, second), app.Serve(api.SecondSetup, secondSetup),
+    app.Serve(api.PasskeyNew, passkeyNew), app.Serve(api.PasskeyAdd, passkeyAdd), app.Serve(api.Passkeys, passkeys), app.Serve(api.PasskeyRemove, passkeyRemove),
+    app.Serve(api.PasskeyStart, passkeyStart), app.Serve(api.PasskeySignIn, passkeySignIn), app.Serve(api.PasskeySignUpStart, passkeySignUpStart),
+    app.Serve(api.PasskeySignUp, (r, x) -> passkeySignUp(r, x, facts, kinds)),
+    app.Serve(api.Providers, providerList), app.Serve(api.OidcStart, oidcStart), app.Serve(api.OidcBack, oidcBack), app.Serve(api.OidcBackPost, oidcBackPost),
+    app.Serve(api.OidcFinish, (r, x) -> oidcFinish(r, x, facts, kinds)), app.Serve(api.Unlink, unlink)]
   made = app.Module("auth", kinds = Kinds, serve = list.Concat(serve, adminOfAccounts()), who = Who, key = SessionKey, ends = Ends,
-    settings = dict.Merge(Settings, mail.Settings), start = keep, jobs = [checking, resetting, taken, mail.Job], verify = verified)
-  dict.Put("Runner", jobs.Module(), made)
+    settings = dict.Merge(dict.Merge(dict.Merge(Settings, mail.Settings), OidcSettings), settingsOf(providers)), start = keep,
+    jobs = [checking, resetting, taken, inviting, mail.Job], verify = verified)
+  dict.Put("Runner", jobs.Module(), made) then dict.Put("Providers", providers)
 end
 
 defn verified(env)
   (** The settings of the accounts at the start: a neutral sign-up needs addresses checked before a session (it can't
-      give one to an address it doesn't tell is new), and mails need their transport. *)
+      give one to an address it doesn't tell is new), each provider of SignInWith its settings, and mails their
+      transport. *)
   s = env.Settings
   if s.SignUpAnswer == "neutral" and s.EmailCheck != "required"
     return result.Err(["APP_SIGN_UP_ANSWER: neutral needs APP_EMAIL_CHECK=required: a sign-up that answers the same for a new address and a taken one gives a session to neither."])
+  end
+  wrong = verifiedProviders(env)
+  if value.Len(wrong) > 0
+    return result.Err(wrong)
   end
   if s.EmailCheck == "off"
     return result.Ok(missing)
@@ -241,8 +276,12 @@ end
    answer is neutral. *)
 waiting = app.Reply({}, status = 202)
 
-defn signingUp(r, x, facts, kinds)
-  (** POST /auth/signup. *)
+defn signingUp(r, x, facts, kinds, hash = missing, handle = missing, checked = false, extra = missing, pow = true)
+  (** POST /auth/signup, and the sign-ups of a passkey and of a provider: hash, the hash of the password, given as ""
+      for an account without one (the password of x is then not read); handle, the handle of the user's passkey;
+      checked, an address that the provider checked; extra(user, thing), the operations of more facts (a passkey, an
+      identity) with the user new and thing their first number in the group; pow, whether a proof of work may be
+      asked. *)
   env = r.Env
   s = r.Settings
   if s.SignUp == "closed"
@@ -256,17 +295,31 @@ defn signingUp(r, x, facts, kinds)
     return app.Fail(422, "Check the fields.")
   end
   gate("signup:$(r.Ip)", s.SignUpPerIp, 3600, r)?
-  proven(x, s.Pow == "always" or (s.Pow == "attack" and app.Failures(env.State) >= s.PowAfter), r)?
-  if text.ByteLength(x.Password) < s.PasswordMin
-    return app.Fail(422, "Check the fields.", fields = {Password: "A password of $(s.PasswordMin) to 128 bytes."})
+  if pow
+    proven(x, s.Pow == "always" or (s.Pow == "attack" and app.Failures(env.State) >= s.PowAfter), r)?
   end
-  hash = hashed(x.Password, env)?
+  if value.IsMissing(hash)
+    if s.Passwords == "off"
+      return app.Fail(403, "Signing up with a password is off: use a passkey or a provider.")
+    end
+    if text.ByteLength(x.Password) < s.PasswordMin
+      return app.Fail(422, "Check the fields.", fields = {Password: "A password of $(s.PasswordMin) to 128 bytes."})
+    end
+    hash = hashed(x.Password, env)?
+  end
   now = env.Now()
   neutral = s.SignUpAnswer == "neutral"
   if neutral and value.Len(cepheus.Find(1, u -> {Where: [[u, User.Email, x.Email]], Give: {U: u}}, env.Db)?) > 0
     return takenAnswer(x, r, kinds)
   end
-  ops = app.Facts(User, cepheus.New(1), newUser(x.Email, x.Name, hash, now, r))
+  fields = newUser(x.Email, x.Name, hash, now, r)
+  if not value.IsMissing(handle)
+    fields.Handle = handle
+  end
+  if checked
+    fields.Checked = now
+  end
+  ops = app.Facts(User, cepheus.New(1), fields)
   next = 2
   tenant = missing
   roles = []
@@ -296,13 +349,16 @@ defn signingUp(r, x, facts, kinds)
   end
   member = next
   ops = list.Concat(ops, app.Facts(Member, cepheus.New(member), {User: cepheus.New(1), Tenant: tenant, Roles: roles, Created: now}))
-  required = s.EmailCheck == "required"
+  required = s.EmailCheck == "required" and not checked
   session = NewSession(cepheus.New(1), cepheus.New(member), tenant, r, env, thing = member + 1)
   if not required
     ops = list.Concat(ops, session.Ops)
   end
-  if s.EmailCheck != "off"
+  if s.EmailCheck != "off" and not checked
     ops = list.Concat(ops, jobs.Later(kinds.Check, {User: cepheus.New(1)}, thing = member + 2))
+  end
+  if not value.IsMissing(extra)
+    ops = list.Concat(ops, extra(cepheus.New(1), member + 3))
   end
   if not value.IsMissing(facts)
     ops = list.Concat(ops, facts(cepheus.New(1), tenant, x))
@@ -396,6 +452,9 @@ defn signingIn(r, x, kinds)
   env = r.Env
   s = r.Settings
   gate("signin:$(r.Ip)", s.SignInPerIp, 60, r)?
+  if s.Passwords == "off"
+    return app.Fail(403, "Signing in with a password is off: use a passkey or a provider.")
+  end
   key = "login:$(x.Email)"
   f = failureOf(key, env.Db)?
   if not value.IsMissing(f)
@@ -408,7 +467,7 @@ defn signingIn(r, x, kinds)
   under = s.Pow == "always" or (s.Pow == "attack" and (app.Failures(env.State) >= s.PowAfter or (not value.IsMissing(f) and f.Count >= 3)))
   proven(x, under, r)?
   found = cepheus.Find(2, (u, h) -> {Where: [[u, User.Email, x.Email], [u, User.Hash, h]], Give: {User: u, Hash: h}}, env.Db)?
-  ok = matches(x.Password, if value.Len(found) == 1 found[1].Hash else decoy end, env)?
+  ok = matches(x.Password, if value.Len(found) == 1 and found[1].Hash != "" found[1].Hash else decoy end, env)? and value.Len(found) == 1 and found[1].Hash != ""
   u = if value.Len(found) == 1 cepheus.Get(User, found[1].User, env.Db)? else missing end
   if not ok or value.IsMissing(u) or u.Disabled == true
     failing(key, f, r)
@@ -427,6 +486,10 @@ defn signingIn(r, x, kinds)
   m = membershipOf(user, x.Tenant, env.Db)?
   if value.IsMissing(m) and not value.IsMissing(x.Tenant)
     return app.Fail(403, "You are no member of this tenant.")
+  end
+  need = secondNeeded(user, if value.IsMissing(m) [] else app.Expand(m.Roles, env.Roles) end, u.Super == true, r)?
+  if not value.IsMissing(need)
+    return stepped(user, m, r, need)
   end
   opened(user, m, r, "signin")
 end
@@ -710,6 +773,11 @@ defn Sweep(env)
   end
   for c in cepheus.Find(2, (c, e) -> {Where: [[c, Code.Ends, e], cepheus.Below(e, now)], Give: {Id: c}, Limit: 500}, env.Db)?
     ops = list.Concat(ops, app.Gone(Code, c.Id, env.Db)?)
+  end
+  for k in [Step, Ceremony, Flow]
+    for c in cepheus.Find(2, (c, e) -> {Where: [[c, k.Ends, e], cepheus.Below(e, now)], Give: {Id: c}, Limit: 500}, env.Db)?
+      ops = list.Concat(ops, app.Gone(k, c.Id, env.Db)?)
+    end
   end
   if value.Len(ops) > 0
     cepheus.Write(ops, env.Db, why = "challenges and invitations ended")?

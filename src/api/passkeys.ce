@@ -1,0 +1,49 @@
+(* The contracts of the passkeys (WebAuthn, Web Authentication Level 3 of the W3C): a key pair that the user's device
+   keeps (iCloud Keychain, Google Password Manager, Windows Hello, a security key), whose public key alone the server
+   keeps, so there is nothing to steal, and nothing to type, so nothing to phish. Each ceremony is two calls: the
+   options, which the page gives to navigator.credentials (PublicKeyCredential.parseCreationOptionsFromJSON or
+   parseRequestOptionsFromJSON of Options), with a ticket, then the credential the device made, as its toJSON() gives
+   it (JSON.stringify), with the ticket. *)
+use std/check
+
+(** The options of a ceremony: a ticket to send back with its answer, and Options, the JSON of WebAuthn's options. *)
+Ceremony = check.Record({Ticket: check.Text(1, 200), Options: check.Text(2, 20000)})
+
+(** A passkey of the user, as he sees the list of his own. Verified: the device checked who held it (a fingerprint, a
+    face, a PIN) when it was made. *)
+PasskeyRow = check.Record({Id: check.Id(), Name: check.Text(0, 120), Created: check.Time(), Last: check.Time(optional = true), Verified: check.Bool()})
+
+(** The options to make a passkey of the signed-in user. *)
+PasskeyNew = Post("/auth/passkeys/options", out = Ceremony, role = Signed, about = "The options to make a passkey.")
+
+(** A passkey made by the device of the user: Credential is the JSON of its credential, Name what he calls it. *)
+PasskeyAdd = Post("/auth/passkeys", body = check.Record({Ticket: check.Text(1, 200), Credential: check.Text(2, 100000), Name: check.Text(0, 120, optional = true, default = "")}),
+  out = PasskeyRow, role = Signed, about = "Keeps a passkey that the device of the user made.")
+
+(** The passkeys of the user. *)
+Passkeys = Get("/auth/passkeys", out = check.List(PasskeyRow, 0, 100), role = Signed, about = "The passkeys of the user.")
+
+(** A passkey of the user taken away; refused when it is his last way to sign in. *)
+PasskeyRemove = Delete("/auth/passkeys/:id", role = Signed, about = "Takes away a passkey of the user.")
+
+(** The options to sign in with a passkey: no e-mail asked, the device offers the passkeys it holds for the site. *)
+PasskeyStart = Post("/auth/passkey/options", out = Ceremony, role = Public, about = "The options to sign in with a passkey.")
+
+(** A sign-in with a passkey: the ticket of the options, the JSON of the assertion of the device, and the tenant to
+    enter when the user belongs to several. A session comes back. *)
+PasskeySignIn = Post("/auth/passkey", body = check.Record({Ticket: check.Text(1, 200), Credential: check.Text(2, 100000), Tenant: check.Id(optional = true)}),
+  out = Account, role = Public, about = "Signs in with a passkey.")
+
+(** The options to sign up with a passkey and no password: the fields of signing up, as SignUp takes them, without
+    Password. *)
+PasskeySignUpStart = Post("/auth/signup/passkey/options", body = check.Record({Email: check.Email(), Name: check.Text(1, 120), Tenant: check.Text(1, 120, optional = true),
+  Invite: check.Text(1, 200, optional = true), Proof: check.Text(1, 400, optional = true)}), out = Ceremony, role = Public,
+  about = "The options to sign up with a passkey.")
+
+(** A sign-up with a passkey: the account is made with it, without a password, and signed in (or waits for the check
+    of its address, as SignUp does). *)
+PasskeySignUp = Post("/auth/signup/passkey", body = check.Record({Ticket: check.Text(1, 200), Credential: check.Text(2, 100000)}), out = Account,
+  role = Public, about = "Signs up with a passkey, without a password.")
+
+(** The endpoints of the passkeys. *)
+PasskeyEndpoints = [PasskeyNew, PasskeyAdd, Passkeys, PasskeyRemove, PasskeyStart, PasskeySignIn, PasskeySignUpStart, PasskeySignUp]

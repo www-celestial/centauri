@@ -58,7 +58,7 @@ defn Problem(e, id, detailed = false)
   if value.IsDict(fields) and value.Len(fields) > 0
     body.errors = fields
   end
-  for extra in ["Challenge", "Retry"]
+  for extra in ["Challenge", "Retry", "Second"]
     if value.IsDict(e) and dict.Has(extra, e)
       body[text.Lower(extra)] = e[extra]
     end

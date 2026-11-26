@@ -1,0 +1,132 @@
+(* The tokens of OpenID Connect: a JSON Web Token signed (JWS, RFC 7515, compact form), its keys published by the
+   provider as a JSON Web Key Set (JWK, RFC 7517). Only what an ID token needs, and only the safe part of it (RFC 8725,
+   the best practices of JWT): the algorithms are the app's, never the token's own choice (RS256, PS256, ES256, EdDSA;
+   none and the HMACs are refused, so a public key can't be used as a secret: no confusion of algorithms); the key
+   is one of the provider's set, chosen by kid and checked against the token's algorithm; the keys a token names in
+   itself (jwk, jku, x5u, x5c) are never read, so a token signed by its own key proves nothing. *)
+use std/crypto
+use std/dict
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+(* The algorithms an ID token may be signed with. *)
+signing = ["RS256", "PS256", "ES256", "EdDSA"]
+
+defn JwtParts(token)
+  (** A JWS of compact form read, nothing checked: an Ok of {Header, Claims, Signed, Signature}, Signed the bytes its
+      signature covers, or an Err. At most 16 KB, three parts of base64url, a header and claims that are JSON objects. *)
+  bad = result.Err({Kind: "jwt", Message: "This is no token of three parts."})
+  if not value.IsText(token) or text.ByteLength(token) > 16384
+    return bad
+  end
+  cut = text.Split(".", token)
+  if value.Len(cut) != 3
+    return bad
+  end
+  h = Unb64u(cut[1])
+  c = Unb64u(cut[2])
+  s = Unb64u(cut[3])
+  if result.IsErr(h) or result.IsErr(c) or result.IsErr(s)
+    return bad
+  end
+  header = json.Parse(h.Value)
+  claims = json.Parse(c.Value)
+  if result.IsErr(header) or result.IsErr(claims) or not value.IsDict(header.Value) or not value.IsDict(claims.Value)
+    return bad
+  end
+  result.Ok({Header: header.Value, Claims: claims.Value, Signed: "$(cut[1]).$(cut[2])", Signature: s.Value})
+end
+
+defn KeyOf(jwk)
+  (** A key of a set read for checking signatures: an Ok of {Kid, Alg, Kty, Key}, Key the DER of an RSA or P-256 key or
+      the 32 bytes of an Ed25519 key, or an Err for a key of no use here (an encryption key, a private part, another
+      curve). *)
+  if not value.IsDict(jwk) or (dict.Has("use", jwk) and jwk["use"] != "sig") or dict.Has("d", jwk)
+    return result.Err({Kind: "jwt", Message: "No key of signature."})
+  end
+  kty = dict.Get("kty", jwk)
+  out = {Kid: dict.Get("kid", jwk), Alg: dict.Get("alg", jwk), Kty: kty}
+  if kty == "RSA" and value.IsText(dict.Get("n", jwk)) and value.IsText(dict.Get("e", jwk))
+    out.Key = crypto.RsaKey(Unb64u(jwk.n)?, Unb64u(jwk.e)?)?
+    return result.Ok(out)
+  end
+  if kty == "EC" and dict.Get("crv", jwk) == "P-256" and value.IsText(dict.Get("x", jwk)) and value.IsText(dict.Get("y", jwk))
+    out.Key = crypto.EcKey(Unb64u(jwk.x)?, Unb64u(jwk.y)?)?
+    return result.Ok(out)
+  end
+  if kty == "OKP" and dict.Get("crv", jwk) == "Ed25519" and value.IsText(dict.Get("x", jwk))
+    out.Key = Unb64u(jwk.x)?
+    return if text.ByteLength(out.Key) == 32 result.Ok(out) else result.Err({Kind: "jwt", Message: "No key of Ed25519."}) end
+  end
+  result.Err({Kind: "jwt", Message: "No key of a type this app checks."})
+end
+
+(** The keys of a set (its JSON object {keys: [...]}) that serve to check signatures, as KeyOf reads them. *)
+KeysOf(set) = if value.IsDict(set) and value.IsArray(dict.Get("keys", set)) [k.Value for k in [KeyOf(j) for j in set["keys"]] if result.IsOk(k)] else [] end
+
+(* The type of key of each algorithm. *)
+ktyOf = {RS256: "RSA", PS256: "RSA", ES256: "EC", EdDSA: "OKP"}
+
+defn holds(p, key, env)
+  (** Does the signature of a token's parts hold under a key, by the token's algorithm: an Ok of a bool. *)
+  alg = p.Header.alg
+  if alg == "EdDSA"
+    return result.Ok(crypto.Verify(p.Signature, p.Signed, key.Key, env.Keys))
+  end
+  sig = if alg == "ES256" crypto.EcdsaDer(p.Signature) else result.Ok(p.Signature) end
+  if result.IsErr(sig)
+    return result.Ok(false)
+  end
+  result.Ok(crypto.VerifyWith(sig.Value, p.Signed, key.Key, alg, sslOf(env)?))
+end
+
+defn VerifyJwt(token, keys, env, algs = signing)
+  (** The claims of a token whose signature holds under one of keys (KeysOf), its algorithm one of algs: an Ok of
+      {Claims, Header, Kid}, or an Err that says which check failed; the claims are not checked here. The key is the
+      one of the token's kid, else each key of its algorithm's type; a key that names its own alg must name the
+      token's. *)
+  p = JwtParts(token)?
+  alg = dict.Get("alg", p.Header)
+  if not value.IsText(alg) or not (alg in algs) or not (alg in signing)
+    return result.Err({Kind: "jwt", Code: "alg", Message: "The token's algorithm is none of those this app takes."})
+  end
+  kid = dict.Get("kid", p.Header)
+  candidates = [k for k in keys if k.Kty == ktyOf[alg] and (value.IsMissing(k.Alg) or k.Alg == alg) and (not value.IsText(kid) or k.Kid == kid)]
+  if value.Len(candidates) == 0
+    return result.Err({Kind: "jwt", Code: "kid", Message: "No key of the provider is the token's."})
+  end
+  for k in candidates
+    if holds(p, k, env)?
+      return result.Ok({Claims: p.Claims, Header: p.Header, Kid: kid})
+    end
+  end
+  result.Err({Kind: "jwt", Code: "signature", Message: "The token's signature is wrong."})
+end
+
+defn SignJwt(claims, secret, alg, env, kid = missing)
+  (** A JWS of compact form of claims, signed with a DER PKCS#8 secret key (crypto.KeyPair's Secret) by alg, RS256,
+      PS256 or ES256 (its signature as JOSE writes it, r and s, 64 bytes): Sign in with Apple's client secret, and the
+      tokens of a test's provider. An Ok of the token. *)
+  header = if value.IsMissing(kid) {alg: alg, typ: "JWT"} else {alg: alg, kid: kid, typ: "JWT"} end
+  signed = "$(B64u(json.Text(header))).$(B64u(json.Text(claims)))"
+  sig = crypto.SignWith(signed, secret, alg, sslOf(env)?)?
+  raw = if alg == "ES256" crypto.EcdsaRaw(sig)? else sig end
+  result.Ok("$signed.$(B64u(raw))")
+end
+
+defn PemDer(pem)
+  (** The DER of a key written in PEM (the -----BEGIN ...----- lines of a .p8 or a .pem), its line ends real or written
+      \n as a variable of the environment holds them, or its base64 alone: an Ok of its bytes, or an Err.
+
+        PemDer("-----BEGIN PRIVATE KEY-----\naGk=\n-----END PRIVATE KEY-----\n") --> result.Ok("hi")
+        PemDer("-----BEGIN PRIVATE KEY-----\\naGk=\\n-----END PRIVATE KEY-----") --> result.Ok("hi")
+        PemDer("aGk=") --> result.Ok("hi") *)
+  lines = [text.Trim(l) for l in text.Lines(text.Replace("\\n", "\n", pem)) if text.Trim(l) != "" and not text.StartsWith("-----", text.Trim(l))]
+  if value.Len(lines) == 0
+    return result.Err({Kind: "jwt", Message: "No key in PEM."})
+  end
+  Unb64u(text.Join("", lines))
+end

@@ -1,0 +1,152 @@
+(** The passkeys against what an attacker tries: an answer of a phishing site (another origin), of another site's
+    passkey (another relying party), of another ceremony (its challenge, its type), made in a frame of another site, a
+    ticket or an assertion used twice, a signature changed, the user handle of another, a cloned key whose counter goes
+    back, a device that verifies nobody when the app asks it. And a sign-up with a passkey and no password at all. A
+    device in software plays the phone (apptest.Device). *)
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/dict
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+App = app.Of([auth.Module()], name = "keys")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+defn registered(t, alg = "ES256")
+  (** Ana signed up by password, then a passkey of a new device made: {Client, Device}. *)
+  a = t.SignUp(ana)?
+  d = apptest.Device(t, alg = alg)?
+  c = a.Call(api.PasskeyNew)?
+  m = apptest.Made(d, c.Options, t)
+  row = a.Call(api.PasskeyAdd, {Ticket: c.Ticket, Credential: m.Credential, Name: "Ana's phone"})?
+  bug.Assert(row.Name == "Ana's phone" and row.Verified, "kept: $row")
+  result.Ok({Client: a, Device: m.Device})
+end
+
+defn signIn(t, d, count = 1, origin = missing, rpId = missing, kind = "webauthn.get", uv = missing, handle = missing, tamper = false)
+  (** A sign-in with a device: the answer of the endpoint. *)
+  c = t.Anyone().Call(api.PasskeyStart)!
+  t.Anyone().Call(api.PasskeySignIn, {Ticket: c.Ticket, Credential: apptest.Signed(d, c.Options, t, count = count, origin = origin, rpId = rpId, kind = kind,
+    uv = uv, handle = handle, tamper = tamper)})
+end
+
+status(got) = if result.IsOk(got) 200 else got.Error.Status end
+
+defn isMadeThenSignedInEs256()
+  t = apptest.Start(App)?
+  w = registered(t)?
+  got = signIn(t, w.Device)
+  bug.Assert(result.IsOk(got) and got.Value.Email == ana.Email, "signed in: $got")
+  f = w.Client.Call(api.MyFactors)?
+  value.Len(f.Passkeys) == 1 and value.IsText(f.Passkeys[1].Last) and f.Password
+end
+
+defn isEdDsaToo()
+  t = apptest.Start(App)?
+  w = registered(t, alg = "EdDSA")?
+  result.IsOk(signIn(t, w.Device))
+end
+
+defn isPhishingRefused()
+  t = apptest.Start(App)?
+  w = registered(t)?
+  codes = [status(signIn(t, w.Device, origin = "https://app.test.evil.example")), status(signIn(t, w.Device, rpId = "evil.example")),
+    status(signIn(t, w.Device, kind = "webauthn.create")), status(signIn(t, w.Device, tamper = true)), status(signIn(t, w.Device, handle = "c29tZW9uZSBlbHNl"))]
+  value.Equal(codes, [400, 400, 400, 401, 400])
+end
+
+defn isMadeOnlyHere()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  d = apptest.Device(t)?
+  answers = []
+  for change in [{Origin: "https://evil.example"}, {RpId: "evil.example"}, {Kind: "webauthn.get"}, {Cross: true}]
+    c = a.Call(api.PasskeyNew)?
+    m = apptest.Made(d, c.Options, t, origin = dict.Get("Origin", change), rpId = dict.Get("RpId", change), kind = dict.GetOr("Kind", "webauthn.create", change),
+      cross = dict.Get("Cross", change) == true)
+    answers = list.Append(status(a.Call(api.PasskeyAdd, {Ticket: c.Ticket, Credential: m.Credential})), answers)
+  end
+  value.Equal(answers, [400, 400, 400, 400]) and value.Len(a.Call(api.Passkeys)?) == 0
+end
+
+defn isTicketAndAssertionOnce()
+  t = apptest.Start(App)?
+  w = registered(t)?
+  c = t.Anyone().Call(api.PasskeyStart)?
+  answer = apptest.Signed(w.Device, c.Options, t, count = 1)
+  first = t.Anyone().Call(api.PasskeySignIn, {Ticket: c.Ticket, Credential: answer})
+  again = t.Anyone().Call(api.PasskeySignIn, {Ticket: c.Ticket, Credential: answer})
+  other = t.Anyone().Call(api.PasskeyStart)?
+  replayed = t.Anyone().Call(api.PasskeySignIn, {Ticket: other.Ticket, Credential: answer})
+  result.IsOk(first) and again.Error.Status == 403 and replayed.Error.Status == 400
+end
+
+defn isClonedKeyRefused()
+  t = apptest.Start(App)?
+  w = registered(t)?
+  bug.Assert(result.IsOk(signIn(t, w.Device, count = 5)), "5")
+  back = signIn(t, w.Device, count = 3)
+  boss = t.Super()?
+  events = boss.Call(api.AdminEvents, {Kind: "passkey-cloned"})?
+  same = signIn(t, w.Device, count = 5)
+  back.Error.Status == 401 and value.Len(events.Rows) == 1 and same.Error.Status == 401 and result.IsOk(signIn(t, w.Device, count = 6))
+end
+
+defn isCounterOfZeroTaken()
+  t = apptest.Start(App)?
+  w = registered(t)?
+  result.IsOk(signIn(t, w.Device, count = 0)) and result.IsOk(signIn(t, w.Device, count = 0))
+end
+
+defn isVerificationAsked()
+  t = apptest.Start(App)?
+  w = registered(t)?
+  lax = apptest.Start(App, settings = {PasskeyCheck: "preferred", TwoFactorRoles: "owner"})?
+  v = registered(lax)?
+  stepped = signIn(lax, v.Device, uv = false)
+  signIn(t, w.Device, uv = false).Error.Status == 400 and stepped.Error.Status == 401 and stepped.Error.Problem.second.Setup == true and result.IsOk(signIn(lax, v.Device, count = 2))
+end
+
+defn isSignedUpWithoutPassword()
+  t = apptest.Start(App)?
+  d = apptest.Device(t)?
+  c = t.Anyone().Call(api.PasskeySignUpStart, {Email: "bo@example.com", Name: "Bo"})?
+  m = apptest.Made(d, c.Options, t)
+  out = t.Anyone().Send(api.PasskeySignUp, {Ticket: c.Ticket, Credential: m.Credential})
+  bug.Assert(out.Status == 201, "an account and a session: $(out.Status) $(out.Body)")
+  bo = t.SignIn("bo@example.com", "any password at all")
+  again = signIn(t, m.Device)
+  bo.Error.Status == 401 and result.IsOk(again) and json.Parse(out.Body)?.Roles[1] == "owner"
+end
+
+defn isLastWayKept()
+  t = apptest.Start(App)?
+  d = apptest.Device(t)?
+  c = t.Anyone().Call(api.PasskeySignUpStart, {Email: "bo@example.com", Name: "Bo"})?
+  m = apptest.Made(d, c.Options, t)
+  t.Anyone().Call(api.PasskeySignUp, {Ticket: c.Ticket, Credential: m.Credential})?
+  s = t.Anyone().Call(api.PasskeyStart)?
+  signedIn = t.Anyone().Send(api.PasskeySignIn, {Ticket: s.Ticket, Credential: apptest.Signed(m.Device, s.Options, t)})
+  cookie = text.Split(";", [h.Value for h in signedIn.Headers if h.Name == "set-cookie"][1])[1]
+  mine = t.Raw("GET", "/auth/passkeys", headers = [{Name: "cookie", Value: cookie}])
+  id = json.Parse(mine.Body)?[1].Id
+  gone = t.Raw("DELETE", "/auth/passkeys/$id", headers = [{Name: "cookie", Value: cookie}])
+  gone.Status == 409
+end
+
+defn isOffMeansOff()
+  t = apptest.Start(App, settings = {Passkeys: "off"})?
+  t.Anyone().Call(api.PasskeyStart).Error.Status == 403
+end
+
+defn isPasswordOff()
+  t = apptest.Start(App, settings = {Passwords: "off"})?
+  t.Anyone().Call(api.SignUp, ana).Error.Status == 403 and t.Anyone().Call(api.SignIn, {Email: ana.Email, Password: ana.Password}).Error.Status == 403
+end

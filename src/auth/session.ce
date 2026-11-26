@@ -154,3 +154,6 @@ end
 (** The sessions of a user, as {Id, Started, Seen, Ip, Agent}, the newest first. *)
 SessionsOf(user, db) = cepheus.Find(5, (s, st, se, ip, ag) -> {Where: [[s, Session.User, user], [s, Session.Started, st], [s, Session.Seen, se],
   [s, Session.Ip, ip], [s, Session.Agent, ag]], Give: {Id: s, Started: st, Seen: se, Ip: ip, Agent: ag}, Sort: [cepheus.Desc(st), cepheus.Desc(s)]}, db)
+
+(** The kinds of package auth (this file is read last of the package: each kind is defined before). *)
+Kinds = [User, Tenant, Member, Session, Invite, Failure, Proof, Code, Key, Totp, Recovery, Step, Passkey, Ceremony, Identity, Flow]

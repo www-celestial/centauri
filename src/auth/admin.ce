@@ -4,6 +4,7 @@
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use src/app
+use src/jobs
 use std/dict
 use std/list
 use std/metrics
@@ -16,7 +17,8 @@ defn adminOfAccounts()
   [app.Serve(api.AdminStats, adminStats), app.Serve(api.AdminUsers, adminUsers), app.Serve(api.AdminUser, adminUser),
    app.Serve(api.AdminDisable, r -> disabled(r, true)), app.Serve(api.AdminEnable, r -> disabled(r, false)),
    app.Serve(api.AdminSignOut, adminSignOut), app.Serve(api.AdminSuper, adminSuper), app.Serve(api.AdminTenants, adminTenants),
-   app.Serve(api.AdminTenant, adminTenant), app.Serve(api.AdminRoles, adminRoles)]
+   app.Serve(api.AdminTenant, adminTenant), app.Serve(api.AdminRoles, adminRoles), app.Serve(api.AdminEndSession, adminEndSession),
+   app.Serve(api.AdminResetFactors, adminResetFactors), app.Serve(api.AdminKeys, adminKeys), app.Serve(api.AdminRevokeKey, adminRevokeKey)]
 end
 
 defn count(n, question, db)
@@ -69,7 +71,56 @@ defn adminUser(r)
   end
   ms = cepheus.Find(2, (m, t) -> {Where: [[m, Member.User, id], [m, Member.Tenant, t]], Give: {Member: m, Tenant: t}, Sort: [t]}, r.Db)?
   {User: userRow(id, r.Db)?, Tenants: [{Tenant: m.Tenant, Name: tenantName(m.Tenant, r.Db), Roles: cepheus.Get(Member, m.Member, r.Db)?.Roles} for m in ms],
-    Sessions: [dict.Put("Current", false, s) for s in SessionsOf(id, r.Db)?]}
+    Sessions: [dict.Put("Current", false, s) for s in SessionsOf(id, r.Db)?], Factors: factorsOf(id, r.Env)?}
+end
+
+defn adminEndSession(r)
+  (** DELETE /admin/sessions/:id: one session ends, the user's others go on. *)
+  id = app.IdOf(r.Params.id)
+  s = if value.IsMissing(id) missing else cepheus.Get(Session, id, r.Db)? end
+  if value.IsMissing(s) or value.IsMissing(dict.Get("Hash", s))
+    return app.Missing()
+  end
+  EndSessions([id], r.User.Id, r.Why, r.Db)?
+  app.ForgetSessions(r.Env.State)
+  note(r, "signout", "Session $id of user $(s.User) ended by a super-admin.", user = r.User.Id, every = 0)
+  result.Ok(missing)
+end
+
+defn adminResetFactors(r, x)
+  (** POST /admin/users/:id/factors/reset: his TOTP and recovery codes, his passkeys, as asked. *)
+  id = target(r)?
+  if x.Totp
+    gone(id, r.User.Id, r.Why, r.Env)?
+  end
+  if x.Passkeys
+    ops = []
+    for p in passkeysOf(id, r.Db)?
+      ops = list.Concat(ops, app.Gone(Passkey, p.Id, r.Db)?)
+    end
+    if value.Len(ops) > 0
+      cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)?
+    end
+  end
+  note(r, "factors-reset", "The second factors of user $id were taken away (TOTP $(x.Totp), passkeys $(x.Passkeys)).", user = r.User.Id, every = 0)
+  result.Ok(missing)
+end
+
+defn adminInvite(r, x, kinds)
+  (** POST /admin/tenants/:id/invites: the job of an invitation by mail to a tenant. *)
+  tenant = app.IdOf(r.Params.id)
+  t = if value.IsMissing(tenant) missing else cepheus.Get(Tenant, tenant, r.Db)? end
+  if value.IsMissing(t) or value.IsMissing(t.Created)
+    return app.Missing()
+  end
+  for role in x.Roles
+    if not dict.Has(role, r.Env.Roles)
+      return app.Fail(422, "Check the fields.", fields = {Roles: "$role is no role of this app."})
+    end
+  end
+  cepheus.Write(jobs.Later(kinds.Invite, {Tenant: tenant, Email: x.Email, Roles: x.Roles, By: r.User.Id}), r.Db, by = r.User.Id, why = r.Why)?
+  note(r, "invite", "$(x.Email) invited to $tenant as $(x.Roles), by mail.", user = r.User.Id, tenant = tenant, every = 0)
+  app.Reply(missing, status = 202)
 end
 
 defn target(r)

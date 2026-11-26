@@ -189,7 +189,8 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s), SessionKeyOf: sessionKey,
     WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards),
-    KeyRate: keyRate, Catalog: words.Catalog, Langs: words.Langs, Lang: words.Lang, Translating: words.Translating}
+    KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]),
+    Catalog: words.Catalog, Langs: words.Langs, Lang: words.Lang, Translating: words.Translating}
   result.Ok(env)
 end
 

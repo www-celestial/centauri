@@ -7,9 +7,9 @@ use src/app
 (** A user: his e-mail (unique), his name, the Argon2id hash of his password ("" for none: he signs in with a passkey
     or a provider), Super for an administrator of the whole platform, Disabled for one who may no longer sign in, when
     he signed up, when his address was checked (by the link of a mail: missing before), and his language (one of the
-    setting Langs; missing: his browser's). *)
+    setting Langs; missing: his browser's), and the handle his passkeys know him by (16 random bytes, base64url). *)
 User = app.Kind("centauri_user", {Email: cepheus.Text(unique = true), Name: cepheus.Text(), Hash: cepheus.Text(), Super: cepheus.Bool(),
-  Disabled: cepheus.Bool(), Created: cepheus.Date(), Checked: cepheus.Date(), Lang: cepheus.Text()}, secret = ["Hash"])
+  Disabled: cepheus.Bool(), Created: cepheus.Date(), Checked: cepheus.Date(), Lang: cepheus.Text(), Handle: cepheus.Text()}, secret = ["Hash"])
 
 (** A tenant: its name, its name in small letters for a search by its start, when it was made, its first owner, and
     Key, unique, for the one tenant of a single-tenant app ("single"). *)
@@ -42,6 +42,3 @@ Proof = app.Kind("centauri_proof", {Key: cepheus.Text(unique = true), Ends: ceph
 (** A code sent by mail, to check an address or to set a new password: its user, its kind ("check" or "reset"), the
     hash of the code (unique: the mail holds the code, the database never), and when it ends. A code serves once. *)
 Code = app.Kind("centauri_code", {User: cepheus.Link(), Kind: cepheus.Text(), Hash: cepheus.Text(unique = true), Ends: cepheus.Date()}, secret = ["Hash"])
-
-(** The kinds of package auth. *)
-Kinds = [User, Tenant, Member, Session, Invite, Failure, Proof, Code, Key]

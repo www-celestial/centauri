@@ -1,0 +1,444 @@
+(* The second factor. TOTP (RFC 6238 over HOTP, RFC 4226): the user's authenticator app and the server share a secret
+   of 20 random bytes, and each 30 seconds both compute a code of 6 digits from it and the time; the server accepts
+   the codes of TotpSkew steps around now, each once (the counter of the last one used is kept: a code seen is never
+   taken again). Recovery codes stand in for the app, 10 of them, each once. The secret is kept sealed
+   (XSalsa20-Poly1305) under a key drawn from the app's Secret, the recovery codes as a BLAKE2b keyed by it: a copy of
+   the database alone gives neither. A sign-in that needs a second factor (the user turned it on, or the settings ask
+   it: TwoFactor, TwoFactorRoles) ends its first step with a 401 that holds a ticket, id.secret as a session's
+   cookie, good for StepTime seconds and StepTries codes; the second step gives the ticket and a code, and opens the
+   session. Wrong codes count as failed sign-ins of the user, with the same delay that doubles. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use std/crypto
+use std/dict
+use std/encode
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+(** The TOTP of a user: Key, unique, "totp:" and his id; the secret, sealed, in base64; On once a code confirmed it;
+    Last, the counter of the last code taken; when it began. *)
+Totp = app.Kind("centauri_totp", {User: cepheus.Link(), Key: cepheus.Text(unique = true), Secret: cepheus.Text(), On: cepheus.Bool(),
+  Last: cepheus.Int(), Created: cepheus.Date()}, secret = ["Secret"])
+
+(** A recovery code of a user: its keyed hash only. *)
+Recovery = app.Kind("centauri_recovery", {User: cepheus.Link(), Hash: cepheus.Text(), Created: cepheus.Date()}, secret = ["Hash"])
+
+(** A sign-in waiting for its second step: its user, membership and tenant, the hash of its ticket's secret, when it
+    ends, the codes tried, and Setup when the settings ask a second factor of a user who has none yet. *)
+Step = app.Kind("centauri_step", {User: cepheus.Link(), Member: cepheus.Link(), Tenant: cepheus.Link(), Hash: cepheus.Text(), Ends: cepheus.Date(),
+  Tries: cepheus.Int(), Setup: cepheus.Bool()}, secret = ["Hash"])
+
+alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"   (* The letters of base32, RFC 4648. *)
+
+defn Base32(bytes)
+  (** Bytes in base32 (RFC 4648), without its padding, as authenticator apps take a secret.
+
+        Base32("12345678901234567890") --> "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" *)
+  out = []
+  acc = 0
+  bits = 0
+  letters = text.Bytes(alphabet)
+  for b in text.Bytes(bytes)
+    acc = acc * 256 + b
+    bits += 8
+    while bits >= 5
+      bits -= 5
+      out = list.Append(letters[math.Div(acc, pow2(bits)) + 1], out)
+      acc = math.Mod(acc, pow2(bits))
+    end
+  end
+  if bits > 0
+    out = list.Append(letters[acc * pow2(5 - bits) + 1], out)
+  end
+  text.FromBytes(out)
+end
+
+defn Unbase32(t)
+  (** The bytes of a text in base32, any case, spaces and padding ignored, or missing when it is no base32.
+
+        Unbase32("gezd gnbv gy3t qojq gezd gnbv gy3t qojq") --> "12345678901234567890" *)
+  out = []
+  acc = 0
+  bits = 0
+  for b in text.Bytes(text.Upper(t))
+    if b != 32 and b != 61
+      k = text.ByteFind(text.FromBytes([b]), 1, alphabet)
+      if value.IsMissing(k)
+        return missing
+      end
+      acc = acc * 32 + k - 1
+      bits += 5
+      if bits >= 8
+        bits -= 8
+        out = list.Append(math.Div(acc, pow2(bits)), out)
+        acc = math.Mod(acc, pow2(bits))
+      end
+    end
+  end
+  text.FromBytes(out)
+end
+
+defn sslOf(env)
+  (** OpenSSL's libcrypto, loaded once a process at its first use, for HMAC-SHA1 and the signatures of RSA and ECDSA:
+      an app that uses none of them needs no permission ffi=crypto. *)
+  kept = app.Recall("centauri openssl", env.State)
+  if not value.IsMissing(kept)
+    return result.Ok(kept)
+  end
+  o = crypto.OpenSsl()?
+  app.Remember("centauri openssl", o, env.Now() + 1e12, env.State)
+  result.Ok(o)
+end
+
+(* The integer below a number of seconds, as an integer: a counter of TOTP. *)
+whole(x) = text.Number(text.Decimals(0, math.Floor(x)))
+
+defn counterBytes(n)
+  (** A counter of HOTP as its 8 bytes, the highest first. *)
+  out = list.Fill(0, 8)
+  x = n
+  for k in 1..8
+    out[9 - k] = math.Mod(x, 256)
+    x = math.Div(x, 256)
+  end
+  text.FromBytes(out)
+end
+
+defn hotp(secret, counter, env)
+  (** The code of HOTP (RFC 4226) of a secret at a counter, of TotpDigits digits, by the HMAC of TotpAlgorithm. *)
+  s = env.Settings
+  m = counterBytes(counter)
+  h = text.Bytes(if s.TotpAlgorithm == "SHA256" crypto.HmacSha256(secret, m, env.Keys) else crypto.HmacSha1(secret, m, sslOf(env)?) end)
+  o = math.Mod(h[value.Len(h)], 16) + 1
+  n = math.Mod(h[o], 128) * 16777216 + h[o + 1] * 65536 + h[o + 2] * 256 + h[o + 3]
+  code = "$(math.Mod(n, pow10(s.TotpDigits)))"
+  result.Ok("$(text.Repeat(s.TotpDigits - text.ByteLength(code), "0"))$code")
+end
+
+defn pow10(k)
+  out = 1
+  for i in 1..k
+    out = out * 10
+  end
+  out
+end
+
+defn TotpCode(secret, at, env)
+  (** The code of an authenticator app at a time for a secret in base32, as the settings compute it (TotpAlgorithm,
+      TotpDigits, TotpPeriod): what a test types in place of the app. An Ok of the code. *)
+  raw = Unbase32(secret)
+  if value.IsMissing(raw)
+    return result.Err({Kind: "auth", Message: "The secret is no base32."})
+  end
+  hotp(raw, whole(at / env.Settings.TotpPeriod), env)
+end
+
+defn matched(secret, code, last, env)
+  (** The counter whose code is this one, among TotpSkew steps around now, and above last (a code is taken once), or
+      missing. Each code is compared in constant time, all of them. *)
+  s = env.Settings
+  if not value.IsText(code) or text.ByteLength(code) != s.TotpDigits or not value.IsMissing(text.ByteFindAny("0123456789", 1, code, not = true))
+    return result.Ok(missing)
+  end
+  now = whole(env.Now() / s.TotpPeriod)
+  found = missing
+  for c in now - s.TotpSkew..now + s.TotpSkew
+    if crypto.IsSame(hotp(secret, c, env)?, code, env.Keys) and c > last and value.IsMissing(found)
+      found = c
+    end
+  end
+  result.Ok(found)
+end
+
+(* The key that seals the secrets of TOTP: a BLAKE2b of the app's key, itself drawn from its Secret. *)
+sealKey(env) = crypto.Blake2b("centauri totp\n$(env.Key)", env.Keys)
+
+(* The recovery code as it is compared: small letters, no - nor space. *)
+plain(code) = text.Replace(" ", "", text.Replace("-", "", text.Lower(text.Trim(code))))
+
+(* What the database keeps of a recovery code: a BLAKE2b keyed by the app's key. *)
+recoveryHash(code, env) = encode.Hex(crypto.Blake2b("centauri recovery\n$(env.Key)\n$(plain(code))", env.Keys))
+
+defn newCodes(env)
+  (** 10 recovery codes, each 10 letters of base32 (50 bits from the kernel), written xxxxx-xxxxx. *)
+  out = []
+  for k in 1..10
+    c = text.Lower(text.ByteSlice(1, 10, Base32(crypto.Random(8, env.Keys))))
+    out = list.Append("$(text.ByteSlice(1, 5, c))-$(text.ByteSlice(6, 10, c))", out)
+  end
+  out
+end
+
+defn totpOf(user, env)
+  (** The TOTP of a user: an Ok of {Id, On, Last, Secret (the raw bytes)}, or of missing. *)
+  found = cepheus.Find(1, t -> {Where: [[t, Totp.Key, "totp:$user"]], Give: {Id: t}}, env.Db)?
+  if value.Len(found) == 0
+    return result.Ok(missing)
+  end
+  t = cepheus.Get(Totp, found[1].Id, env.Db)?
+  raw = encode.Unbase64(dict.GetOr("Secret", "", t))
+  secret = if result.IsOk(raw) crypto.Unseal(raw.Value, sealKey(env), env.Keys) else raw end
+  result.Ok({Id: found[1].Id, On: t.On == true, Last: dict.GetOr("Last", 0, t), Secret: if result.IsOk(secret) secret.Value else missing end})
+end
+
+defn recoveryOf(user, db)
+  (** The ids of the recovery codes of a user. *)
+  result.Ok([x.Id for x in cepheus.Find(1, c -> {Where: [[c, Recovery.User, user]], Give: {Id: c}}, db)?])
+end
+
+defn uriOf(secret, email, env)
+  (** The otpauth:// address of a secret (the Key Uri Format of Google Authenticator), which a QR code holds. *)
+  s = env.Settings
+  issuer = if value.IsText(dict.Get("TotpIssuer", s)) s.TotpIssuer else env.App.Name end
+  "otpauth://totp/$(encode.UrlEncode("$issuer:$email"))?secret=$(Base32(secret))&issuer=$(encode.UrlEncode(issuer))&algorithm=$(s.TotpAlgorithm)&digits=$(s.TotpDigits)&period=$(s.TotpPeriod)"
+end
+
+defn setupFor(user, email, env, by, why)
+  (** A new secret of TOTP for a user, not on until a code confirms it, and 10 new recovery codes, the old ones gone:
+      an Ok of {Secret, Uri, Codes}, or a 409 when his TOTP is on already. *)
+  t = totpOf(user, env)?
+  if not value.IsMissing(t) and t.On
+    return app.Fail(409, "Two-factor is on already: turn it off first, with a code.")
+  end
+  secret = crypto.Random(20, env.Keys)
+  ops = if value.IsMissing(t) [] else app.Gone(Totp, t.Id, env.Db)? end
+  for id in recoveryOf(user, env.Db)?
+    ops = list.Concat(ops, app.Gone(Recovery, id, env.Db)?)
+  end
+  now = env.Now()
+  ops = list.Concat(ops, app.Facts(Totp, cepheus.New(1), {User: user, Key: "totp:$user", Secret: encode.Base64(crypto.Seal(secret, sealKey(env), env.Keys)),
+    On: false, Last: 0, Created: now}))
+  codes = newCodes(env)
+  for k in 1..value.Len(codes)
+    ops = list.Concat(ops, app.Facts(Recovery, cepheus.New(k + 1), {User: user, Hash: recoveryHash(codes[k], env), Created: now}))
+  end
+  cepheus.Write(ops, env.Db, by = by, why = why)?
+  result.Ok({Secret: Base32(secret), Uri: uriOf(secret, email, env), Codes: codes})
+end
+
+defn taken(user, code, env, by, why, recovery = true, confirm = false)
+  (** A second factor of a user checked and used: "totp" for a code of his app (its counter kept, so it is never
+      taken again; confirm turns TOTP on), "recovery" for one of his recovery codes (ended), in an Ok, or an Ok of
+      missing for a wrong one. Two requests with one code at once: the write of the counter of one of them fails
+      (Expect), and so does its check. *)
+  t = totpOf(user, env)?
+  if value.IsMissing(t) or value.IsMissing(t.Secret) or not value.IsText(code)
+    return result.Ok(missing)
+  end
+  if confirm or t.On
+    c = matched(t.Secret, text.Trim(code), t.Last, env)?
+    if not value.IsMissing(c)
+      ops = [cepheus.Expect(t.Id, Totp.Last, t.Last), cepheus.Add(t.Id, Totp.Last, c)]
+      if confirm
+        ops = list.Append(cepheus.Add(t.Id, Totp.On, true), ops)
+      end
+      done = cepheus.Write(ops, env.Db, by = by, why = why)
+      return result.Ok(if result.IsOk(done) "totp" else missing end)
+    end
+  end
+  if not recovery or not t.On or text.ByteLength(code) > 40
+    return result.Ok(missing)
+  end
+  h = recoveryHash(code, env)
+  found = cepheus.Find(1, x -> {Where: [[x, Recovery.User, user], [x, Recovery.Hash, h]], Give: {Id: x}}, env.Db)?
+  if value.Len(found) == 0
+    return result.Ok(missing)
+  end
+  done = cepheus.Write(list.Concat([cepheus.Expect(found[1].Id, Recovery.Hash, h)], app.Gone(Recovery, found[1].Id, env.Db)?), env.Db, by = by, why = why)
+  result.Ok(if result.IsOk(done) "recovery" else missing end)
+end
+
+defn asked(roles, super, s)
+  (** Do the settings ask a second factor of a user of these roles: of everyone (TwoFactor required), or of the roles
+      of TwoFactorRoles ("super" for the super-admins). *)
+  wanted = roleList(s.TwoFactorRoles)
+  s.TwoFactor == "required" or list.Any([x in wanted for x in roles]) or (super and "super" in wanted)
+end
+
+defn secondNeeded(user, roles, super, r)
+  (** Does a sign-in of a user need a second step: an Ok of missing when it doesn't, else of {Setup}, Setup when the
+      settings ask a second factor of him and he has none yet. *)
+  s = r.Settings
+  if s.TwoFactor == "off"
+    return result.Ok(missing)
+  end
+  t = totpOf(user, r.Env)?
+  if not value.IsMissing(t) and t.On
+    return result.Ok({Setup: false})
+  end
+  result.Ok(if asked(roles, super, s) {Setup: true} else missing end)
+end
+
+defn stepped(user, m, r, need)
+  (** The end of a first step: a ticket of the second, in the Err of a 401 (its Problem Details hold it as
+      second: {Ticket, Methods, Setup}). *)
+  env = r.Env
+  secret = encode.Hex(crypto.Random(32, env.Keys))
+  fields = {User: user, Hash: hashOf(secret, env.Keys), Ends: env.Now() + r.Settings.StepTime, Tries: 0, Setup: need.Setup}
+  if not value.IsMissing(m)
+    fields.Member = m.Member
+    fields.Tenant = m.Tenant
+  end
+  id = cepheus.Insert(Step, fields, env.Db, by = user, why = r.Why)?
+  note(r, "second", "A second factor was asked.", user = user, every = 0)
+  result.Err({Kind: "api", Status: 401, Message: if need.Setup "Set up a second factor first: your app's code is asked from now on." else "A second factor is needed: send the code of your app." end,
+    Second: {Ticket: "$id.$secret", Methods: if need.Setup ["totp"] else ["totp", "recovery"] end, Setup: need.Setup}})
+end
+
+defn stepOf(ticket, env)
+  (** The step of a ticket, still open: an Ok of its fields and Id, or a 403. *)
+  bad = app.Fail(403, "This sign-in has ended: sign in again.")
+  p = parts(ticket)
+  if value.IsMissing(p)
+    return bad
+  end
+  s = cepheus.Get(Step, p.Id, env.Db)?
+  if value.IsMissing(s) or not value.IsText(dict.Get("Hash", s)) or not crypto.IsSame(hashOf(p.Secret, env.Keys), s.Hash, env.Keys) or s.Ends <= env.Now()
+    return bad
+  end
+  s.Id = p.Id
+  result.Ok(s)
+end
+
+defn second(r, x)
+  (** POST /auth/second: the code of the second step; the session opens. *)
+  env = r.Env
+  s = r.Settings
+  gate("signin:$(r.Ip)", s.SignInPerIp, 60, r)?
+  st = stepOf(x.Ticket, env)?
+  key = "second:$(st.User)"
+  f = failureOf(key, env.Db)?
+  if not value.IsMissing(f)
+    wait = f.Last + lockWait(f, s) - env.Now()
+    if wait > 0
+      note(r, "locked", key)
+      return result.Err({Kind: "api", Status: 429, Message: "Too many failed sign-ins: wait $(math.Ceil(wait)) seconds.", Retry: math.Ceil(wait)})
+    end
+  end
+  u = cepheus.Get(User, st.User, env.Db)?
+  if value.IsMissing(u) or u.Disabled == true or st.Tries >= s.StepTries
+    _ = cepheus.Write(app.Gone(Step, st.Id, env.Db)?, env.Db, why = r.Why)
+    return app.Fail(403, "This sign-in has ended: sign in again.")
+  end
+  got = taken(st.User, x.Code, env, st.User, r.Why, recovery = st.Setup != true, confirm = st.Setup == true)?
+  if value.IsMissing(got)
+    _ = cepheus.Write([cepheus.Expect(st.Id, Step.Tries, st.Tries), cepheus.Add(st.Id, Step.Tries, st.Tries + 1)], env.Db, why = r.Why)
+    failing(key, f, r)
+    return app.Fail(401, "This code is not the right one.")
+  end
+  done = cepheus.Write(list.Concat([cepheus.Expect(st.Id, Step.Tries, st.Tries)], app.Gone(Step, st.Id, env.Db)?), env.Db, by = st.User, why = r.Why)
+  if result.IsErr(done)
+    return app.Fail(403, "This sign-in has ended: sign in again.")
+  end
+  if not value.IsMissing(f) and f.Count > 0
+    _ = cepheus.Write([cepheus.Add(f.Id, Failure.Count, 0)], env.Db, why = "signed in")
+  end
+  if got == "recovery"
+    note(r, "recovery", "A recovery code was used.", user = st.User, every = 0)
+  end
+  m = membershipOf(st.User, dict.Get("Tenant", st), env.Db)?
+  opened(st.User, m, r, "signin")
+end
+
+defn secondSetup(r, x)
+  (** POST /auth/second/setup: the secret and the recovery codes of a step that asks a second factor of a user who has
+      none. *)
+  st = stepOf(x.Ticket, r.Env)?
+  if st.Setup != true
+    return app.Fail(409, "Two-factor is on already: turn it off first, with a code.")
+  end
+  u = cepheus.Get(User, st.User, r.Env.Db)?
+  setupFor(st.User, u.Email, r.Env, st.User, r.Why)
+end
+
+defn factorsOf(user, env)
+  (** The second factors of a user, as api.Factors shows them. *)
+  t = totpOf(user, env)?
+  on = not value.IsMissing(t) and t.On
+  u = cepheus.Get(User, user, env.Db)?
+  result.Ok({Totp: on, Recovery: if on value.Len(recoveryOf(user, env.Db)?) else 0 end, Password: dict.GetOr("Hash", "", u) != "",
+    Passkeys: passkeysOf(user, env.Db)?, Identities: identitiesOf(user, env.Db)?})
+end
+
+(* GET /auth/factors. *)
+factors(r) = factorsOf(r.User.Id, r.Env)
+
+defn totpStart(r)
+  (** POST /auth/totp. *)
+  if r.Settings.TwoFactor == "off"
+    return app.Fail(403, "Two-factor is off in this app.")
+  end
+  setupFor(r.User.Id, r.User.Email, r.Env, r.User.Id, r.Why)
+end
+
+defn totpConfirm(r, x)
+  (** POST /auth/totp/confirm: a code of the app turns TOTP on. *)
+  t = totpOf(r.User.Id, r.Env)?
+  if value.IsMissing(t)
+    return app.Fail(409, "Begin first: POST /auth/totp gives the secret.")
+  end
+  if t.On
+    return factorsOf(r.User.Id, r.Env)
+  end
+  got = taken(r.User.Id, x.Code, r.Env, r.User.Id, r.Why, recovery = false, confirm = true)?
+  if value.IsMissing(got)
+    return app.Fail(422, "Check the fields.", fields = {Code: "This code is not the right one."})
+  end
+  note(r, "totp", "Two-factor turned on.", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  factorsOf(r.User.Id, r.Env)
+end
+
+defn totpOff(r, x)
+  (** POST /auth/totp/off: with a code of the app or a recovery code, unless the settings ask it of the user. *)
+  t = totpOf(r.User.Id, r.Env)?
+  if value.IsMissing(t) or not t.On
+    return factorsOf(r.User.Id, r.Env)
+  end
+  if asked(r.User.Roles, r.User.Super, r.Settings)
+    return app.Fail(403, "Two-factor is asked of you by this app: it stays on.")
+  end
+  if value.IsMissing(taken(r.User.Id, x.Code, r.Env, r.User.Id, r.Why)?)
+    return app.Fail(422, "Check the fields.", fields = {Code: "This code is not the right one."})
+  end
+  gone(r.User.Id, r.User.Id, r.Why, r.Env)?
+  note(r, "totp", "Two-factor turned off.", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  factorsOf(r.User.Id, r.Env)
+end
+
+defn gone(user, by, why, env)
+  (** The TOTP and the recovery codes of a user taken away. *)
+  t = totpOf(user, env)?
+  ops = if value.IsMissing(t) [] else app.Gone(Totp, t.Id, env.Db)? end
+  for id in recoveryOf(user, env.Db)?
+    ops = list.Concat(ops, app.Gone(Recovery, id, env.Db)?)
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, env.Db, by = by, why = why)?
+  end
+  result.Ok(missing)
+end
+
+defn newRecovery(r, x)
+  (** POST /auth/recovery: 10 new codes with a code of the app; the old ones end. *)
+  t = totpOf(r.User.Id, r.Env)?
+  if value.IsMissing(t) or not t.On
+    return app.Fail(409, "Turn two-factor on first.")
+  end
+  if value.IsMissing(taken(r.User.Id, x.Code, r.Env, r.User.Id, r.Why, recovery = false)?)
+    return app.Fail(422, "Check the fields.", fields = {Code: "This code is not the right one."})
+  end
+  ops = []
+  for id in recoveryOf(r.User.Id, r.Db)?
+    ops = list.Concat(ops, app.Gone(Recovery, id, r.Db)?)
+  end
+  codes = newCodes(r.Env)
+  for k in 1..value.Len(codes)
+    ops = list.Concat(ops, app.Facts(Recovery, cepheus.New(k), {User: r.User.Id, Hash: recoveryHash(codes[k], r.Env), Created: r.Now}))
+  end
+  cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)?
+  note(r, "recovery", "New recovery codes.", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  {Codes: codes}
+end

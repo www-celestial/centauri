@@ -2,10 +2,13 @@
    takes a role that he hasn't himself (an admin makes no owner), and a tenant always keeps one owner. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/app
+use src/jobs
+use src/mail
 use std/crypto
 use std/dict
 use std/encode
 use std/list
+use std/math
 use std/result
 use std/value
 
@@ -35,15 +38,51 @@ defn owners(tenant, db)
   result.Ok(if value.Len(rows) == 0 0 else rows[1].N end)
 end
 
-defn invite(r, x)
-  (** POST /auth/invites: a code, shown once, for this e-mail and these roles. *)
+defn invite(r, x, kinds)
+  (** POST /auth/invites: a code, shown once, for this e-mail and these roles; with Mail, the job of its mail. *)
   grantable(x.Roles, r)?
+  if x.Mail == true
+    cepheus.Write(jobs.Later(kinds.Invite, {Tenant: r.User.Tenant, Email: x.Email, Roles: x.Roles, By: r.User.Id}), r.Db, by = r.User.Id, why = r.Why)?
+    note(r, "invite", "Invited $(x.Email) as $(x.Roles), by mail.", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+    return app.Reply({}, status = 202)
+  end
   code = encode.Hex(crypto.Random(24, r.Env.Keys))
   ends = r.Now + r.Settings.InviteTime
   cepheus.Insert(Invite, {Tenant: r.User.Tenant, Email: x.Email, Roles: x.Roles, Hash: hashOf(code, r.Env.Keys), Ends: ends, By: r.User.Id}, r.Db,
     by = r.User.Id, why = r.Why)?
   note(r, "invite", "Invited $(x.Email) as $(x.Roles).", user = r.User.Id, tenant = r.User.Tenant, every = 0)
   {Code: code, Ends: ends}
+end
+
+defn inviteJob(job, env, texts)
+  (** The job of an invitation by mail: its code made and its hash kept, then its link mailed to the address, in the
+      app's first language (the invitee has no account yet). A tenant gone gets no mail. *)
+  t = cepheus.Get(Tenant, job.Tenant, env.Db)?
+  if value.IsMissing(t) or value.IsMissing(dict.Get("Created", t))
+    return result.Ok(missing)
+  end
+  code = encode.Hex(crypto.Random(24, env.Keys))
+  ends = env.Now() + env.Settings.InviteTime
+  fields = {Tenant: job.Tenant, Email: job.Email, Roles: job.Roles, Hash: hashOf(code, env.Keys), Ends: ends}
+  by = dict.Get("By", job)
+  if not value.IsMissing(by)
+    fields.By = by
+  end
+  cepheus.Insert(Invite, fields, env.Db, why = env.Why)?
+  who = if value.IsMissing(by) missing else cepheus.Get(User, by, env.Db)? end
+  x = {Link: link(env, env.Settings.InvitePage, code), Tenant: dict.GetOr("Name", "", t), By: if value.IsDict(who) dict.GetOr("Name", "", who) else "" end,
+    App: env.App.Name, Days: math.Ceil(env.Settings.InviteTime / 86400), Email: job.Email, Lang: env.Lang}
+  x.Say = s -> app.SayIn(env, env.Lang, s, args = x)
+  words = texts(x)
+  m = {To: [job.Email], Subject: words.Subject, Text: words.Text}
+  if dict.Has("Html", words)
+    m.Html = words.Html
+  end
+  sent = mail.Send(env, m)
+  if result.IsErr(sent) and dict.Get("Code", sent.Error) == "refused"
+    return jobs.Stop(sent.Error.Message)
+  end
+  sent
 end
 
 defn Join(user, tenant, roles, by, why, db, now)

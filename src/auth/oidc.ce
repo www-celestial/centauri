@@ -1,0 +1,628 @@
+(* Signing in with another provider: the app is a client (relying party) of OpenID Connect 1.0, with the flow of the
+   authorization code and PKCE (RFC 7636), as the best practices of OAuth 2.0 ask (RFC 9700). The start draws a secret
+   of 32 random bytes and keeps its hash in a flow of Cepheus and the secret in a cookie of this browser (__Host-oidc,
+   HttpOnly, SameSite=Strict, OidcTime seconds): the state, the nonce and the verifier of PKCE are each a BLAKE2b of the
+   secret, so the database keeps none of them, and only this browser can finish. The callback passes the provider's
+   answer to the page in the fragment of an address; the page sends it to the finish, which ends the flow (once),
+   checks the state against the cookie (no sign-in started elsewhere: the CSRF of a sign-in), the issuer the provider
+   names (RFC 9207: no mix-up of providers), sends the code and the verifier to the provider's own token endpoint
+   (the one of its discovery document), and checks the ID token: its signature by a key of the provider's set (JWKS,
+   kept in the memory of the process for the time its Cache-Control gives, read again at most once a minute for a
+   key it doesn't know: the rotation of keys), its issuer, its audience (this app, and azp when it has several), its
+   time (exp, iat), its nonce (the token of this sign-in, not one taken from another). An account is found by the
+   provider and the subject (sub); else, by an e-mail address that the provider says is verified, linked as the
+   setting OidcLink says; else made, as signing up does. The session that ends it is the same as a password's. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use std/check
+use std/crypto
+use std/dict
+use std/encode
+use std/http
+use std/json
+use std/list
+use std/log
+use std/math
+use std/result
+use std/text
+use std/value
+
+(** A provider the user signed in with: his user, the provider's name, Key (unique: the provider, the issuer and the
+    subject), the e-mail it gave, when it was linked and last used. *)
+Identity = app.Kind("centauri_identity", {User: cepheus.Link(), Provider: cepheus.Text(), Key: cepheus.Text(unique = true), Email: cepheus.Text(),
+  Created: cepheus.Date(), Last: cepheus.Date()})
+
+(** A sign-in with a provider under way: its provider, the hash of the secret of its cookie, the path to go back to,
+    an invitation, the user who links it (none for a sign-in), when it ends. *)
+Flow = app.Kind("centauri_oidc", {Provider: cepheus.Text(), Hash: cepheus.Text(), Return: cepheus.Text(), Invite: cepheus.Text(), User: cepheus.Link(),
+  Ends: cepheus.Date()}, secret = ["Hash"])
+
+defn Provider(name, title = missing, issuer = missing, scopes = "openid email profile")
+  (** A provider of OpenID Connect of the app's own (Okta, Keycloak, Auth0, the Entra ID of one company...), beside
+      those Centauri knows: its name (small letters; its settings are its name with a capital and Id, Secret: "okta"
+      reads APP_OKTA_ID and APP_OKTA_SECRET), its title, its issuer (its discovery document is at
+      issuer/.well-known/openid-configuration) and its scopes. SignInWith lists it to turn it on.
+
+        Provider("okta", issuer = "https://acme.okta.com").Id --> "OktaId" *)
+  cap = "$(text.Upper(text.ByteSlice(1, 1, name)))$(text.ByteSlice(2, text.ByteLength(name), name))"
+  {Name: name, Title: if value.IsMissing(title) cap else title end, Kind: "oidc", Issuer: issuer, Issuers: [], Scopes: scopes, Mode: "query",
+    Id: "$(cap)Id", Secret: "$(cap)Secret", Email: "verified", Apple: false}
+end
+
+(** Google: its accounts of Gmail and of Google Workspace. Its ID tokens name it https://accounts.google.com, or
+    accounts.google.com. Settings GoogleId, GoogleSecret. *)
+Google = Provider("google", title = "Google", issuer = "https://accounts.google.com") then dict.Put("Issuers", ["accounts.google.com"])
+
+(** Microsoft: Entra ID (work and school accounts) and personal accounts, as MicrosoftTenant says (common,
+    organizations, consumers, or the id of one tenant). An address is taken as verified only when the token says its
+    domain's owner verified it (xms_edov) or for a personal account: elsewhere Microsoft's email claim may be any
+    text a tenant's admin typed. Settings MicrosoftId, MicrosoftSecret, MicrosoftTenant. *)
+Microsoft = Provider("microsoft", title = "Microsoft", issuer = "https://login.microsoftonline.com/{tenant}/v2.0") then dict.Put("Email", "microsoft")
+
+(** Apple: Sign in with Apple, which posts its answer (form_post) and asks a client secret that the app signs itself
+    with its key (ES256): settings AppleId (the Services ID), AppleTeam, AppleKeyId and AppleKey (the .p8, in PEM). *)
+Apple = Provider("apple", title = "Apple", issuer = "https://appleid.apple.com", scopes = "openid name email") then dict.Put("Mode", "form_post") then dict.Put("Apple", true)
+
+(** GitHub: OAuth 2.0 without OpenID Connect: the user and his verified primary address are read from its API.
+    Settings GithubId, GithubSecret. *)
+Github = Provider("github", title = "GitHub") then dict.Put("Kind", "github") then dict.Put("Scopes", "read:user user:email") then dict.Put("Email", "github")
+
+(* The provider of OpenID Connect of the settings alone: OidcIssuer, OidcId, OidcSecret, OidcName, OidcScopes. *)
+generic = Provider("oidc")
+
+(** The settings of the providers. *)
+OidcSettings = {
+  SignInWith: check.Text(0, 400, optional = true, default = ""),
+  OidcLink: check.OneOf(["verified", "never"], optional = true, default = "verified"),
+  OidcSignUp: check.OneOf(["on", "off"], optional = true, default = "on"),
+  OidcPage: check.Text(1, 200, optional = true, default = "/signin/callback"),
+  OidcTime: check.Int(60, 3600, optional = true, default = 600),
+  GoogleId: check.Text(1, 400, optional = true), GoogleSecret: check.Secret(1, 400, optional = true),
+  MicrosoftId: check.Text(1, 400, optional = true), MicrosoftSecret: check.Secret(1, 400, optional = true),
+  MicrosoftTenant: check.Text(1, 100, optional = true, default = "common"),
+  AppleId: check.Text(1, 400, optional = true), AppleTeam: check.Text(1, 40, optional = true), AppleKeyId: check.Text(1, 40, optional = true),
+  AppleKey: check.Secret(1, 4000, optional = true),
+  GithubId: check.Text(1, 400, optional = true), GithubSecret: check.Secret(1, 400, optional = true),
+  OidcIssuer: check.Url(https = true, optional = true), OidcId: check.Text(1, 400, optional = true), OidcSecret: check.Secret(1, 400, optional = true),
+  OidcName: check.Text(1, 120, optional = true, default = "SSO"), OidcScopes: check.Text(1, 400, optional = true, default = "openid email profile"),
+}
+
+(* The providers Centauri knows, by name. *)
+known = [Google, Microsoft, Apple, Github, generic]
+
+defn settingsOf(providers)
+  (** The settings of the providers of the app's own: each one's Id and Secret. *)
+  out = {}
+  for p in providers
+    out[p.Id] = check.Text(1, 400, optional = true)
+    out[p.Secret] = check.Secret(1, 400, optional = true)
+  end
+  out
+end
+
+(* The providers the setting SignInWith turns on, by name. *)
+listedOf(s) = [text.Lower(text.Trim(n)) for n in text.Split(",", dict.GetOr("SignInWith", "", s)) if text.Trim(n) != ""]
+
+defn resolved(p, s)
+  (** A provider with what its settings give: Client and ClientSecret (missing when not set), its issuer, its title. *)
+  out = p
+  out.Client = dict.Get(p.Id, s)
+  out.ClientSecret = dict.Get(p.Secret, s)
+  if p.Name == "oidc"
+    out.Issuer = dict.Get("OidcIssuer", s)
+    out.Title = dict.GetOr("OidcName", "SSO", s)
+    out.Scopes = dict.GetOr("OidcScopes", p.Scopes, s)
+  end
+  if p.Name == "microsoft"
+    out.Issuer = text.Replace("{tenant}", dict.GetOr("MicrosoftTenant", "common", s), p.Issuer)
+  end
+  out
+end
+
+defn providersOf(env)
+  (** The providers turned on, resolved, in the order of SignInWith. *)
+  all = list.Concat(known, ownProviders(env))
+  out = []
+  for name in listedOf(env.Settings)
+    for p in all
+      if p.Name == name
+        out = list.Append(resolved(p, env.Settings), out)
+      end
+    end
+  end
+  out
+end
+
+defn ownProviders(env)
+  (** The providers of the app's own, from its module of the accounts. *)
+  for m in env.App.Modules
+    if m.Name == "auth"
+      return dict.GetOr("Providers", [], m)
+    end
+  end
+  []
+end
+
+defn verifiedProviders(env)
+  (** The lines that stop the start when a provider of SignInWith is unknown or lacks a setting. *)
+  all = list.Concat(known, ownProviders(env))
+  s = env.Settings
+  wrong = []
+  for name in listedOf(s)
+    found = [p for p in all if p.Name == name]
+    if value.Len(found) == 0
+      wrong = list.Append("APP_SIGN_IN_WITH: $name is no provider (google, microsoft, apple, github, oidc, or one of the app's).", wrong)
+    else
+      p = resolved(found[1], s)
+      needs = if p.Apple [p.Id, "AppleTeam", "AppleKeyId", "AppleKey"] else [p.Id, p.Secret] end
+      if p.Name == "oidc"
+        needs = list.Append("OidcIssuer", needs)
+      end
+      if p.Kind == "oidc" and p.Name != "oidc" and not value.IsText(p.Issuer)
+        wrong = list.Append("The provider $name has no issuer.", wrong)
+      end
+      for n in needs
+        if value.IsMissing(dict.Get(n, s))
+          wrong = list.Append("$(app.Env(n)): needed to sign in with $name.", wrong)
+        end
+      end
+    end
+  end
+  wrong
+end
+
+defn providerNamed(name, env)
+  (** A provider turned on, by name: an Ok, or a 404. *)
+  for p in providersOf(env)
+    if p.Name == name
+      return result.Ok(p)
+    end
+  end
+  app.Fail(404, "There is no such provider in this app.")
+end
+
+(* The cookie of a flow: __Host-oidc over https, oidc over plain http. *)
+cookieName(env) = if env.Https "__Host-oidc" else "oidc" end
+
+defn flowCookie(content, env, age)
+  (** The Set-Cookie header of a flow, or of its end (age 0). *)
+  secure = if env.Https "; Secure" else "" end
+  {Name: "set-cookie", Value: "$(cookieName(env))=$content; Path=/; Max-Age=$age; HttpOnly; SameSite=Strict$secure"}
+end
+
+(* The state, the nonce and the verifier of PKCE of a flow: each a BLAKE2b of the secret of its cookie. *)
+derived(what, secret, env) = B64u(crypto.Blake2b("centauri oidc $what\n$secret", env.Keys))
+
+(* The address the providers send the browser back to. *)
+redirectOf(env) = "$(env.Settings.Origin)/auth/oidc/callback"
+
+defn SafeReturn(t)
+  (** A path to go back to after a sign-in: a path of the app (one /, then no / nor \), else /: no redirect to another
+      site, however it is written.
+
+        SafeReturn("/invoices?late=1") --> "/invoices?late=1"
+        SafeReturn("//evil.example") --> "/"
+        SafeReturn("https://evil.example") --> "/"
+        SafeReturn("/\\evil.example") --> "/" *)
+  if not value.IsText(t) or text.ByteLength(t) > 2000 or not text.StartsWith("/", t) or text.StartsWith("//", t) or text.Contains("\\", t)
+    return "/"
+  end
+  if list.Any([b < 32 or b == 127 for b in text.Bytes(t)]) "/" else t end
+end
+
+defn discovered(p, env)
+  (** The discovery document of a provider of OpenID Connect (the endpoints of GitHub for it), kept a day in the memory
+      of the process: an Ok of its map, its issuer checked against the provider's. *)
+  if p.Kind == "github"
+    return result.Ok({"issuer": "https://github.com", "authorization_endpoint": "https://github.com/login/oauth/authorize",
+      "token_endpoint": "https://github.com/login/oauth/access_token"})
+  end
+  key = "centauri oidc conf $(p.Issuer)"
+  kept = app.Recall(key, env.State)
+  if not value.IsMissing(kept)
+    return result.Ok(kept)
+  end
+  got = app.Call("$(p.Issuer)/.well-known/openid-configuration", env, headers = [{Name: "accept", Value: "application/json"}])
+  conf = if result.IsOk(got) and got.Value.Status == 200 json.Parse(got.Value.Body) else result.Err(missing) end
+  if result.IsErr(conf) or not value.IsDict(conf.Value) or not value.IsText(dict.Get("token_endpoint", conf.Value)) or not value.IsText(dict.Get("jwks_uri", conf.Value))
+    return app.Fail(503, "The provider's discovery document can't be read: try again in a moment.")
+  end
+  if not sameIssuer(dict.Get("issuer", conf.Value), p.Issuer)
+    return app.Fail(503, "The provider's discovery document names another issuer.")
+  end
+  app.Remember(key, conf.Value, env.Now() + 86400, env.State)
+  result.Ok(conf.Value)
+end
+
+defn sameIssuer(given, expected)
+  (** Is an issuer the one expected: the same text, or Microsoft's template {tenantid} for common, organizations and
+      consumers. *)
+  value.IsText(given) and (given == expected or (text.Contains("{tenantid}", given) and text.StartsWith("https://login.microsoftonline.com/", expected)))
+end
+
+defn maxAge(headers)
+  (** The seconds a set of keys may be kept: Cache-Control's max-age, from 5 minutes to a day, an hour without one. *)
+  c = http.HeaderValue("cache-control", headers)
+  if value.IsText(c)
+    for part in text.Split(",", c)
+      p = text.Trim(part)
+      if text.StartsWith("max-age=", p)
+        n = text.Number(text.ByteSlice(9, text.ByteLength(p), p))
+        if value.IsNumber(n)
+          return list.Min([86400, list.Max([300, n])])
+        end
+      end
+    end
+  end
+  3600
+end
+
+defn jwks(uri, env, again = false)
+  (** The keys of a provider's set, from the memory of the process, else read; again reads them anew (a key the token
+      names is not in the set: the provider turned its keys), at most once a minute. An Ok of the keys (KeysOf). *)
+  key = "centauri jwks $uri"
+  kept = app.Recall(key, env.State)
+  if not value.IsMissing(kept) and not (again and app.Fresh("jwks again $uri", 60, env.State))
+    return result.Ok(kept)
+  end
+  got = app.Call(uri, env, headers = [{Name: "accept", Value: "application/json"}])
+  set = if result.IsOk(got) and got.Value.Status == 200 json.Parse(got.Value.Body) else result.Err(missing) end
+  if result.IsErr(set)
+    return if value.IsMissing(kept) app.Fail(503, "The provider's keys can't be read: try again in a moment.") else result.Ok(kept) end
+  end
+  keys = KeysOf(set.Value)
+  app.Remember(key, keys, env.Now() + maxAge(got.Value.Headers), env.State)
+  result.Ok(keys)
+end
+
+defn ClientSecret(name, env)
+  (** The client secret that the token endpoint of a provider turned on takes: its setting, or Apple's JWT. An Ok. *)
+  clientSecretOf(providerNamed(name, env)?, env)
+end
+
+defn clientSecretOf(p, env)
+  (** The client secret a provider's token endpoint takes: the setting, or for Apple a JWT of 5 minutes signed with
+      the app's key (ES256), as Apple asks. *)
+  if not p.Apple
+    return result.Ok(p.ClientSecret)
+  end
+  s = env.Settings
+  now = whole(env.Now())
+  SignJwt({iss: s.AppleTeam, iat: now, exp: now + 300, aud: "https://appleid.apple.com", sub: p.Client}, PemDer(s.AppleKey)?, "ES256", env, kid = s.AppleKeyId)
+end
+
+(* A body of application/x-www-form-urlencoded, of the fields that are texts. *)
+form(fields) = text.Join("&", ["$(p.Key)=$(encode.UrlEncode(p.Value))" for p in dict.Pairs(fields) if value.IsText(p.Value)])
+
+defn exchanged(p, conf, code, verifier, env)
+  (** The tokens of a code, from the provider's token endpoint: an Ok of its JSON, or an Err. *)
+  secret = clientSecretOf(p, env)?
+  body = form({"grant_type": "authorization_code", "code": code, "redirect_uri": redirectOf(env), "client_id": p.Client, "client_secret": secret, "code_verifier": verifier})
+  got = app.Call(conf["token_endpoint"], env, method = "POST", body = body, tries = 1,
+    headers = [{Name: "content-type", Value: "application/x-www-form-urlencoded"}, {Name: "accept", Value: "application/json"}])
+  if result.IsErr(got)
+    return app.Fail(503, "The provider can't be reached: try again in a moment.")
+  end
+  tokens = json.Parse(got.Value.Body)
+  if got.Value.Status != 200 or result.IsErr(tokens) or not value.IsDict(tokens.Value)
+    log.Warn("a provider refused a code", {Provider: p.Name, Status: got.Value.Status, Error: if result.IsOk(tokens) and value.IsDict(tokens.Value) value.Text(dict.Get("error", tokens.Value), most = 100) else missing end})
+    return app.Fail(401, "The provider refused the code: sign in again.")
+  end
+  result.Ok(tokens.Value)
+end
+
+(* The tenant of Microsoft's personal accounts, whose address is the account itself. *)
+personal = "9188040d-6c67-4c5b-b112-36a304b66dad"
+
+defn Claimed(claims, p, conf, nonce, now)
+  (** The claims of an ID token checked against a provider (OpenID Connect Core 3.1.3.7): its issuer (the provider's,
+      Microsoft's template with the token's tid), its audience (this app's client, and azp when there are several), its
+      time (exp after now, iat not in the future, a minute of skew), its nonce (this sign-in's). An Ok of {Subject,
+      Issuer, Email, Verified, Name}, or an Err that names the check. *)
+  bad = what -> result.Err({Kind: "api", Status: 401, Message: "The provider's token is not valid: $what"})
+  iss = dict.Get("iss", claims)
+  expected = list.Concat([p.Issuer], dict.GetOr("Issuers", [], p))
+  if text.Contains("{tenantid}", dict.GetOr("issuer", "", conf)) and value.IsText(dict.Get("tid", claims)) and not text.Contains("/", claims.tid)
+    expected = list.Append(text.Replace("{tenantid}", claims.tid, conf.issuer), expected)
+  end
+  if not (iss in expected)
+    return bad("its issuer.")
+  end
+  aud = dict.Get("aud", claims)
+  auds = if value.IsArray(aud) aud else [aud] end
+  if not (p.Client in auds) or (value.Len(auds) > 1 and dict.Get("azp", claims) != p.Client)
+    return bad("it is for another app.")
+  end
+  exp = dict.Get("exp", claims)
+  iat = dict.Get("iat", claims)
+  if not value.IsNumber(exp) or exp <= now - 60 or (value.IsNumber(iat) and iat > now + 60)
+    return bad("its time.")
+  end
+  if not value.IsText(dict.Get("nonce", claims)) or claims.nonce != nonce
+    return bad("its nonce is not this sign-in's.")
+  end
+  sub = dict.Get("sub", claims)
+  if not value.IsText(sub) or sub == "" or text.ByteLength(sub) > 255
+    return bad("its subject.")
+  end
+  v = dict.Get("email_verified", claims)
+  verified = v == true or v == "true"
+  if p.Email == "microsoft"
+    edov = dict.Get("xms_edov", claims)
+    verified = edov == true or edov == "true" or edov == 1 or dict.Get("tid", claims) == personal
+  end
+  email = dict.Get("email", claims)
+  name = dict.Get("name", claims)
+  result.Ok({Subject: sub, Issuer: iss, Email: if value.IsText(email) text.Lower(email) else missing end, Verified: verified and value.IsText(email),
+    Name: if value.IsText(name) name else "" end})
+end
+
+defn githubUser(tokens, env)
+  (** The user of GitHub of an access token: {Subject, Issuer, Email (his verified primary one), Verified, Name}. *)
+  t = dict.Get("access_token", tokens)
+  if not value.IsText(t)
+    return app.Fail(401, "The provider refused the code: sign in again.")
+  end
+  h = [{Name: "authorization", Value: "Bearer $t"}, {Name: "accept", Value: "application/vnd.github+json"}, {Name: "user-agent", Value: "centauri"}]
+  u = app.Call("https://api.github.com/user", env, headers = h)?
+  e = app.Call("https://api.github.com/user/emails", env, headers = h)?
+  user = json.Parse(u.Body)
+  emails = json.Parse(e.Body)
+  if u.Status != 200 or result.IsErr(user) or not value.IsDict(user.Value) or not value.IsNumber(dict.Get("id", user.Value))
+    return app.Fail(401, "GitHub didn't give the user.")
+  end
+  primary = if result.IsOk(emails) and value.IsArray(emails.Value) [x for x in emails.Value if value.IsDict(x) and dict.Get("primary", x) == true and dict.Get("verified", x) == true] else [] end
+  email = if value.Len(primary) > 0 and value.IsText(dict.Get("email", primary[1])) text.Lower(primary[1].email) else missing end
+  name = dict.Get("name", user.Value)
+  result.Ok({Subject: "$(user.Value.id)", Issuer: "https://github.com", Email: email, Verified: not value.IsMissing(email),
+    Name: if value.IsText(name) name else dict.GetOr("login", "", user.Value) end})
+end
+
+(* GET /auth/providers. *)
+providerList(r) = [{Name: p.Name, Title: p.Title} for p in providersOf(r.Env)]
+
+defn oidcStart(r, x)
+  (** POST /auth/oidc/start: a flow, its cookie, and the address of the provider's page. *)
+  env = r.Env
+  gate("signin:$(r.Ip)", r.Settings.SignInPerIp, 60, r)?
+  p = providerNamed(text.Lower(x.Provider), env)?
+  if x.Link == true and value.IsMissing(r.User)
+    return app.Fail(401, "Sign in first.")
+  end
+  if x.Link == true and dict.Has("Key", r.User)
+    return app.Fail(403, "A key of a program calls the app's endpoints, not those of the accounts.")
+  end
+  conf = discovered(p, env)?
+  secret = encode.Hex(crypto.Random(32, env.Keys))
+  f = {Provider: p.Name, Hash: hashOf(secret, env.Keys), Return: SafeReturn(dict.Get("Return", x)), Ends: env.Now() + r.Settings.OidcTime}
+  if not value.IsMissing(dict.Get("Invite", x))
+    f.Invite = x.Invite
+  end
+  if x.Link == true
+    f.User = r.User.Id
+  end
+  id = cepheus.Insert(Flow, f, env.Db, why = r.Why)?
+  q = {"response_type": "code", "client_id": p.Client, "redirect_uri": redirectOf(env), "scope": p.Scopes, "state": derived("state", secret, env),
+    "code_challenge": B64u(crypto.Sha256(derived("pkce", secret, env), env.Keys)), "code_challenge_method": "S256"}
+  if p.Kind == "oidc"
+    q.nonce = derived("nonce", secret, env)
+  end
+  if p.Mode == "form_post"
+    q["response_mode"] = "form_post"
+  end
+  at = conf["authorization_endpoint"]
+  app.Reply({Url: "$at$(if text.Contains("?", at) "&" else "?" end)$(form(q))"}, headers = [flowCookie("$id.$secret", env, r.Settings.OidcTime)])
+end
+
+defn bounced(fields, env)
+  (** The answer of the callback: 303 to the page of OidcPage, what the provider gave in the fragment. Only the fields
+      of OAuth's answer pass, each 4,000 bytes at most. *)
+  kept = {}
+  for name in ["code", "state", "error", "iss", "user"]
+    v = dict.Get(name, fields)
+    if value.IsText(v) and text.ByteLength(v) <= 4000
+      kept[name] = v
+    end
+  end
+  app.Raw({Status: 303, Body: "", Headers: [{Name: "location", Value: "$(env.Settings.Origin)$(env.Settings.OidcPage)#$(form(kept))"},
+    {Name: "content-type", Value: "text/plain"}, {Name: "referrer-policy", Value: "no-referrer"}]})
+end
+
+(* GET /auth/oidc/callback. *)
+oidcBack(r) = bounced(if value.IsDict(r.Query) r.Query else {} end, r.Env)
+
+(* POST /auth/oidc/callback: the form the provider posted. *)
+oidcBackPost(r) = bounced(if text.ByteLength(r.Body) <= 20000 encode.ParseQuery(r.Body) else {} end, r.Env)
+
+defn flowOf(r)
+  (** The flow of the cookie of this browser, still open, ended at once: an Ok of its fields, Id and Secret, or a 403. *)
+  bad = app.Fail(403, "This sign-in was not started in this browser, or it has ended: start it again.")
+  raw = if value.IsDict(r.Cookies) dict.Get(cookieName(r.Env), r.Cookies) else missing end
+  p = parts(raw)
+  if value.IsMissing(p)
+    return bad
+  end
+  f = cepheus.Get(Flow, p.Id, r.Db)?
+  if value.IsMissing(f) or not value.IsText(dict.Get("Hash", f)) or not crypto.IsSame(hashOf(p.Secret, r.Env.Keys), f.Hash, r.Env.Keys) or f.Ends <= r.Env.Now()
+    return bad
+  end
+  done = cepheus.Write(list.Concat([cepheus.Expect(p.Id, Flow.Hash, f.Hash)], app.Gone(Flow, p.Id, r.Db)?), r.Db, why = r.Why)
+  if result.IsErr(done)
+    return bad
+  end
+  f.Id = p.Id
+  f.Secret = p.Secret
+  result.Ok(f)
+end
+
+(* The errors of OAuth 2.0 (RFC 6749 4.1.2.1) and OpenID Connect (Core 3.1.2.6) that a refusal may name; any other
+   text the provider gave is not shown. *)
+oauthErrors = ["invalid_request", "unauthorized_client", "access_denied", "unsupported_response_type", "invalid_scope", "server_error",
+  "temporarily_unavailable", "interaction_required", "login_required", "account_selection_required", "consent_required"]
+
+(* The key of an identity: the provider, the issuer and the subject. *)
+identityKey(p, who) = "$(p.Name)|$(who.Issuer)|$(who.Subject)"
+
+defn oidcFinish(r, x, facts, kinds)
+  (** POST /auth/oidc/finish. *)
+  env = r.Env
+  gate("signin:$(r.Ip)", r.Settings.SignInPerIp, 60, r)?
+  f = flowOf(r)?
+  ended = [flowCookie("", env, 0)]
+  if not crypto.IsSame(x.State, derived("state", f.Secret, env), env.Keys)
+    note(r, "oidc-state", "A sign-in with a provider came back with another state.")
+    return app.Fail(403, "This sign-in was not started in this browser, or it has ended: start it again.")
+  end
+  if not value.IsMissing(dict.Get("Error", x))
+    return app.Fail(401, if x.Error in oauthErrors "The provider refused: $(x.Error)." else "The provider refused." end)
+  end
+  if value.IsMissing(dict.Get("Code", x))
+    return app.Fail(422, "Check the fields.", fields = {Code: "Required."})
+  end
+  p = providerNamed(f.Provider, env)?
+  conf = discovered(p, env)?
+  if not value.IsMissing(dict.Get("Iss", x)) and not sameIssuer(x.Iss, dict.GetOr("issuer", p.Issuer, conf)) and x.Iss != p.Issuer
+    note(r, "oidc-mixup", "A sign-in with $(p.Name) came back named by another issuer.")
+    return app.Fail(401, "The provider's answer names another issuer.")
+  end
+  tokens = exchanged(p, conf, x.Code, derived("pkce", f.Secret, env), env)?
+  who = missing
+  if p.Kind == "github"
+    who = githubUser(tokens, env)?
+  else
+    t = dict.Get("id_token", tokens)
+    if not value.IsText(t)
+      return app.Fail(401, "The provider gave no ID token.")
+    end
+    keys = jwks(conf["jwks_uri"], env)?
+    checked = VerifyJwt(t, keys, env)
+    if result.IsErr(checked) and dict.Get("Code", checked.Error) == "kid"
+      checked = VerifyJwt(t, jwks(conf["jwks_uri"], env, again = true)?, env)
+    end
+    if result.IsErr(checked)
+      note(r, "oidc-token", "An ID token of $(p.Name) was refused: $(checked.Error.Message)")
+      return app.Fail(401, "The provider's token is not valid: $(checked.Error.Message)")
+    end
+    claimed = Claimed(checked.Value.Claims, p, conf, derived("nonce", f.Secret, env), env.Now())
+    if result.IsErr(claimed)
+      note(r, "oidc-token", "An ID token of $(p.Name) was refused: $(claimed.Error.Message)")
+      return claimed
+    end
+    who = claimed.Value
+  end
+  if p.Apple and value.IsText(dict.Get("User", x)) and who.Name == ""
+    named = json.Parse(x.User)
+    if result.IsOk(named) and value.IsDict(named.Value) and value.IsDict(dict.Get("name", named.Value))
+      who.Name = text.Trim("$(dict.GetOr("firstName", "", named.Value.name)) $(dict.GetOr("lastName", "", named.Value.name))")
+    end
+  end
+  signed = accountOf(r, p, who, f, facts, kinds)
+  if result.IsErr(signed)
+    return signed
+  end
+  out = if value.IsDict(signed) and dict.Has("CentauriReply", signed) signed else signed.Value end
+  if value.IsDict(out) and dict.Has("CentauriReply", out)
+    v = out.Value
+    if value.IsDict(v)
+      v.Return = f.Return
+    end
+    out.Value = v
+    out.Headers = list.Concat(out.Headers, ended)
+    return result.Ok(out)
+  end
+  app.Reply(dict.Put("Return", f.Return, out), headers = ended)
+end
+
+defn accountOf(r, p, who, f, facts, kinds)
+  (** The account of an identity of a provider: linked to the user of the flow when it links; else the account of
+      its identity; else one of its verified address, as OidcLink says; else a new one, as OidcSignUp and SignUp say.
+      Then its session, or the step of its second factor. *)
+  env = r.Env
+  s = r.Settings
+  key = identityKey(p, who)
+  found = cepheus.Find(1, i -> {Where: [[i, Identity.Key, key]], Give: {Id: i}}, env.Db)?
+  now = env.Now()
+  if not value.IsMissing(dict.Get("User", f))
+    if value.Len(found) > 0
+      i = cepheus.Get(Identity, found[1].Id, env.Db)?
+      if not value.Equal(i.User, f.User)
+        return app.Fail(409, "This account of $(p.Title) is linked to another user.")
+      end
+    else
+      cepheus.Insert(Identity, {User: f.User, Provider: p.Name, Key: key, Email: if value.IsText(who.Email) who.Email else "" end, Created: now, Last: now}, env.Db,
+        by = f.User, why = r.Why)?
+      note(r, "oidc-link", "$(p.Title) was linked.", user = f.User, every = 0)
+    end
+    m = membershipOf(f.User, missing, env.Db)?
+    return account1(f.User, m, env)
+  end
+  user = missing
+  if value.Len(found) > 0
+    user = cepheus.Get(Identity, found[1].Id, env.Db)?.User
+    _ = cepheus.Write([cepheus.Add(found[1].Id, Identity.Last, now)], env.Db, by = user, why = r.Why)
+  else if who.Verified
+    owner = userOf(who.Email, env.Db)?
+    if not value.IsMissing(owner)
+      if s.OidcLink != "verified"
+        return app.Fail(409, "An account has this address: sign in to it, then link $(p.Title) from your account.")
+      end
+      cepheus.Insert(Identity, {User: owner, Provider: p.Name, Key: key, Email: who.Email, Created: now, Last: now}, env.Db, by = owner, why = r.Why)?
+      note(r, "oidc-link", "$(p.Title) was linked by its verified address.", user = owner, every = 0)
+      user = owner
+    end
+  end
+  if value.IsMissing(user)
+    if not who.Verified
+      return app.Fail(403, "$(p.Title) doesn't say that this address is yours: sign up another way.")
+    end
+    if s.OidcSignUp != "on"
+      return app.Fail(403, "Signing up with $(p.Title) is off: sign up another way.")
+    end
+    fields = {Email: who.Email, Name: if who.Name == "" text.Split("@", who.Email)[1] else text.ByteSlice(1, list.Min([120, text.ByteLength(who.Name)]), who.Name) end,
+      Tenant: missing, Invite: dict.Get("Invite", f), Proof: missing}
+    return signingUp(r, fields, facts, kinds, hash = "", checked = true, pow = false,
+      extra = (u, thing) -> app.Facts(Identity, cepheus.New(thing), {User: u, Provider: p.Name, Key: key, Email: who.Email, Created: now, Last: now}))
+  end
+  u = cepheus.Get(User, user, env.Db)?
+  if value.IsMissing(u) or u.Disabled == true
+    return app.Fail(403, "This account may not sign in.")
+  end
+  m = membershipOf(user, missing, env.Db)?
+  need = secondNeeded(user, if value.IsMissing(m) [] else app.Expand(m.Roles, env.Roles) end, u.Super == true, r)?
+  if not value.IsMissing(need)
+    return stepped(user, m, r, need)
+  end
+  opened(user, m, r, "oidc")
+end
+
+defn account1(user, m, env)
+  (** The Account of a user in his membership, without a new session: what linking a provider answers. *)
+  account(user, if value.IsMissing(m) missing else m.Tenant end, if value.IsMissing(m) [] else m.Roles end, env.Db, env.Roles)
+end
+
+defn identitiesOf(user, db)
+  (** The providers of a user, as api.Factors shows them. *)
+  rows = cepheus.Find(2, (i, c) -> {Where: [[i, Identity.User, user], [i, Identity.Created, c]], Give: {Id: i, Created: c}, Sort: [c, i]}, db)?
+  out = []
+  for x in rows
+    i = cepheus.Get(Identity, x.Id, db)?
+    out = list.Append({Id: x.Id, Created: x.Created, Provider: i.Provider, Email: dict.GetOr("Email", "", i)}, out)
+  end
+  result.Ok(out)
+end
+
+defn unlink(r)
+  (** DELETE /auth/identities/:id: one of the user's own, unless it is his last way to sign in. *)
+  id = app.IdOf(r.Params.id)
+  i = if value.IsMissing(id) missing else cepheus.Get(Identity, id, r.Db)? end
+  if value.IsMissing(i) or not value.Equal(dict.Get("User", i), r.User.Id)
+    return app.Missing()
+  end
+  u = cepheus.Get(User, r.User.Id, r.Db)?
+  if dict.GetOr("Hash", "", u) == "" and value.Len(identitiesOf(r.User.Id, r.Db)?) <= 1 and value.Len(passkeysOf(r.User.Id, r.Db)?) == 0
+    return app.Fail(409, "This is your last way to sign in: add another first.")
+  end
+  cepheus.Write(app.Gone(Identity, id, r.Db)?, r.Db, by = r.User.Id, why = r.Why)?
+  note(r, "oidc-unlink", "$(i.Provider) was unlinked.", user = r.User.Id, every = 0)
+  result.Ok(missing)
+end

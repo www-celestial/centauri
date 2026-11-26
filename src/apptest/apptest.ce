@@ -113,7 +113,40 @@ defn Request(e, x)
     q = query(rest)
     return {Method: e.Method, Path: if q == "" path else "$path?$q" end, Body: ""}
   end
-  {Method: e.Method, Path: path, Body: if value.IsMissing(e.In) and value.Len(rest) == 0 "" else json.Text(rest) end}
+  {Method: e.Method, Path: path, Body: if value.IsMissing(e.In) and value.Len(rest) == 0 "" else if clean(rest) json.Text(rest) else rawJson(rest) end}
+end
+
+defn clean(x)
+  (** Does a value hold only texts of UTF-8, which JSON can carry. *)
+  if value.IsText(x)
+    return text.IsUtf8(x)
+  end
+  if value.IsDict(x)
+    return list.All([clean(p.Key) and clean(p.Value) for p in dict.Pairs(x)])
+  end
+  if value.IsArray(x)
+    return list.All([clean(v) for v in x])
+  end
+  true
+end
+
+defn rawJson(x)
+  (** The JSON of a value whose texts may be no UTF-8, their bytes as they are: what a broken or hostile client sends,
+      and json.Text refuses to write. *)
+  if value.IsText(x)
+    out = []
+    for b in text.Bytes(x)
+      out = list.Append(if b == 34 "\\\"" else if b == 92 "\\\\" else if b < 32 "\\u00$(encode.Hex(text.FromBytes([b])))" else text.FromBytes([b]) end, out)
+    end
+    return "\"$(text.Join("", out))\""
+  end
+  if value.IsDict(x)
+    return "{$(text.Join(",", ["$(rawJson(value.Text(p.Key))):$(rawJson(p.Value))" for p in dict.Pairs(x)]))}"
+  end
+  if value.IsArray(x)
+    return "[$(text.Join(",", [rawJson(v) for v in x]))]"
+  end
+  json.Text(x)
 end
 
 defn Drained(response)
@@ -176,7 +209,9 @@ defn CodeOf(t, email)
   (** The code of the last link mailed to an address (after #code=), or missing. *)
   for m in list.Reverse(app.Mails(t.Env.State))
     if email in m.To and text.Contains("#code=", m.Text)
-      return text.ByteSlice(1, 64, text.Split("#code=", m.Text)[2])
+      rest = text.Split("#code=", m.Text)[2]
+      stop = text.ByteFindAny("0123456789abcdef", 1, rest, not = true)
+      return if value.IsMissing(stop) rest else text.ByteSlice(1, stop - 1, rest) end
     end
   end
   missing
@@ -254,7 +289,7 @@ end
 (* The endpoints that the generated tests leave alone: those that end or move the session that calls them, and those
    that make accounts, which the tests make themselves. *)
 skipped = [api.SignUp.Name, api.SignIn.Name, api.SignOut.Name, api.SignOutAll.Name, api.SwitchTenant.Name, api.Join.Name, api.ChangePassword.Name,
-  api.CheckEmail.Name, api.Reset.Name]
+  api.CheckEmail.Name, api.Reset.Name, api.Second.Name, api.PasskeySignIn.Name, api.PasskeySignUp.Name, api.OidcFinish.Name]
 
 defn ownKinds(t)
   (** The kinds of the app's modules that belong to a tenant: those of app.Kind with a field Tenant. *)
@@ -316,17 +351,18 @@ end
 
 defn Isolated(a, settings = {}, cases = 3)
   (** The test that no tenant reads or changes another's data, on every endpoint of the app. Tenant A is filled with
-      things marked "zqa": of each kind of the app's modules that has a Tenant (written straight), and made by every
+      things marked "zqa.": of each kind of the app's modules that has a Tenant (written straight), and made by every
       POST and PUT. Then a user of tenant B, with every role of the app, calls every endpoint with the ids of A's
       things in the paths and in the inputs. An Ok of true when no answer holds a mark of A and A's things are as they
-      were; else an Err of each endpoint that leaked or changed A's data. This is a property test (QuickCheck, Claessen
-      and Hughes 2000) of the access control, OWASP's A01. *)
+      were; else an Err of each endpoint that leaked or changed A's data. The mark ends with a dot, which no random
+      token of an answer holds (hex, base64url), so that a ticket or a challenge never passes for a leak. This is a
+      property test (QuickCheck, Claessen and Hughes 2000) of the access control, OWASP's A01. *)
   t = Start(a, settings = dict.Merge(settings, {Tenancy: "multi"}))?
-  ua = t.SignUp({Email: "zqa-owner@example.com", Password: "correct horse zqa", Name: "zqa owner", Tenant: "zqa tenant"})?
+  ua = t.SignUp({Email: "zqa.owner@example.com", Password: "correct horse zqa", Name: "zqa.owner", Tenant: "zqa.tenant"})?
   ub = t.SignUp({Email: "b-owner@example.com", Password: "correct horse b", Name: "b owner", Tenant: "b tenant"})?
   t.As(ua, everyRole(t))?
   t.As(ub, everyRole(t))?
-  ids = seed(t, ua, "zqa", cases)?
+  ids = seed(t, ua, "zqa.", cases)?
   before = snapshot(t, ids)
   leaks = []
   for e in t.App.Endpoints
@@ -338,7 +374,7 @@ defn Isolated(a, settings = {}, cases = 3)
           x[name] = ids[1 + math.Mod(n, value.Len(ids))]
         end
         out = ub.Send(e, x)
-        if text.Contains("zqa", text.Lower(out.Body))
+        if text.Contains("zqa.", text.Lower(out.Body))
           leaks = list.Append("$(e.Name): an answer to tenant B holds data of tenant A ($(text.ByteSlice(1, list.Min([200, text.ByteLength(out.Body)]), out.Body))).", leaks)
         end
       end
@@ -381,7 +417,7 @@ defn Fuzz(a, settings = {}, cases = 5)
         end
         out = c.Send(e, y)
         if out.Status >= 500 and out.Status != 503
-          bad = list.Append("$(e.Name) gave $(out.Status) for $(text.ByteSlice(1, list.Min([160, text.ByteLength(json.Text(y))]), json.Text(y))).", bad)
+          bad = list.Append("$(e.Name) gave $(out.Status) for $(value.Text(y, most = 160)).", bad)
         end
       end
       for body in ["{", "[]", "null", "\"x\"", text.FromBytes([123, 255, 125]), text.Repeat(100, "[")]

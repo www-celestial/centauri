@@ -69,7 +69,7 @@ defn front(base, req, env)
   end
   if value.IsMissing(out)
     site = Site(req, s.Origin, env.Cors)
-    if site == "other" and Changes(req)
+    if site == "other" and Changes(req) and not (value.Len(env.Cross) > 0 and dict.Has(req.Path, env.Cross))
       metrics.Add("centauri_refused_total", labels = {reason: "origin"})
       noted(env, "origin", "ip:$ip", "A request that changes something came from another site.", missing, missing, ip, req.Method)
       out = refuse(403, "This request comes from another site than the app's.", rid, env)

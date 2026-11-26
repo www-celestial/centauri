@@ -77,10 +77,35 @@ UserRow = check.Record({Id: check.Id(), Email: check.Email(), Name: check.Text(0
 AdminUsers = Get("/admin/users", query = check.Record({Search: check.Text(0, 254, optional = true), Tenant: check.Id(optional = true)}),
   out = Page(UserRow, 50), role = Super, about = "The users.")
 
-(** A user, his tenants with his roles, and his sessions. *)
+(** A user, his tenants with his roles, his sessions, and his second factors and ways of signing in. *)
 AdminUser = Get("/admin/users/:id", out = check.Record({User: UserRow, Tenants: check.List(check.Record({Tenant: check.Id(),
-  Name: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40)}), 0, 1000), Sessions: check.List(SessionRow, 0, 1000)}),
-  role = Super, about = "A user, his tenants and his sessions.")
+  Name: check.Text(0, 120), Roles: check.List(check.Text(1, 40), 0, 40)}), 0, 1000), Sessions: check.List(SessionRow, 0, 1000),
+  Factors: check.Record(Factors.Fields, optional = true)}),
+  role = Super, about = "A user, his tenants, his sessions and his second factors.")
+
+(** One session of a user ends, by its id. *)
+AdminEndSession = Delete("/admin/sessions/:id", role = Super, about = "Ends one session.")
+
+(** The second factors of a user taken away, when he lost his device: his TOTP and recovery codes (Totp), his
+    passkeys (Passkeys). His sessions go on; his next sign-in is by password (or a provider) alone, unless the
+    settings ask a second factor, which he then sets up. *)
+AdminResetFactors = Post("/admin/users/:id/factors/reset", body = check.Record({Totp: check.Bool(optional = true, default = false),
+  Passkeys: check.Bool(optional = true, default = false)}), role = Super, about = "Takes away the second factors of a user who lost them.")
+
+(** An invitation to a tenant sent by mail: a job makes its code and mails its link (the setting InvitePage), so that
+    the code is never in the database nor in an answer. *)
+AdminInvite = Post("/admin/tenants/:id/invites", body = check.Record({Email: check.Email(), Roles: check.List(check.Text(1, 40), 1, 20)}),
+  role = Super, about = "Invites someone to a tenant, by mail.")
+
+(** A key of a program as the admin sees it: KeyRow and its tenant. *)
+AdminKeyRow = check.Record(dict.Merge(KeyRow.Fields, {Tenant: check.Id(optional = true)}))
+
+(** The keys of programs of every tenant, or of one, the newest first. *)
+AdminKeys = Get("/admin/keys", query = check.Record({Tenant: check.Id(optional = true)}), out = Page(AdminKeyRow, 50), role = Super,
+  about = "The keys of programs.")
+
+(** A key of a program revoked by a super-admin. *)
+AdminRevokeKey = Delete("/admin/keys/:id", role = Super, about = "Revokes a key of a program.")
 
 (** A user may no longer sign in, and his sessions end. *)
 AdminDisable = Post("/admin/users/:id/disable", role = Super, about = "Disables a user: his sessions end.")
@@ -155,4 +180,5 @@ AdminShows = [AdminSeries, AdminTail, AdminLogTail]
 AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData, AdminEdit]
 
 (** The endpoints of the accounts' part, served by package auth. *)
-AdminOfAccounts = [AdminStats, AdminUsers, AdminUser, AdminDisable, AdminEnable, AdminSignOut, AdminSuper, AdminTenants, AdminTenant, AdminRoles]
+AdminOfAccounts = [AdminStats, AdminUsers, AdminUser, AdminDisable, AdminEnable, AdminSignOut, AdminSuper, AdminTenants, AdminTenant, AdminRoles,
+  AdminEndSession, AdminResetFactors, AdminInvite, AdminKeys, AdminRevokeKey]

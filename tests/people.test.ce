@@ -1,0 +1,89 @@
+(** The administration of L3: the keys of programs of every tenant, seen and revoked by a super-admin; one session
+    ended and not the others; the second factors of a user who lost his device, seen and taken away; invitations sent
+    by mail, by a super-admin and by a tenant's admin, whose code is in no answer and no database. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+App = app.Of([auth.Module()], name = "people")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+bearer(key) = [{Name: "authorization", Value: "Bearer $key"}]
+
+defn isKeysSeenAndRevokedBySuper()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  made = a.Call(api.NewKey, {Name: "robot", Roles: ["member"]})?
+  boss = t.Super()?
+  page = boss.Send(api.AdminKeys)
+  rows = json.Parse(page.Body)?.Rows
+  bug.Assert(value.Len(rows) == 1 and rows[1].Tenant == a.Tenant and not text.Contains(text.Split(".", made.Key)[2], page.Body), "listed, no secret: $(page.Body)")
+  boss.Call(api.AdminRevokeKey, {id: made.Id})?
+  t.Raw("GET", "/auth/factors", headers = bearer(made.Key)).Status == 401
+end
+
+defn isOneSessionEnded()
+  t = apptest.Start(App)?
+  t.SignUp(ana)?
+  one = t.SignIn(ana.Email, ana.Password)?
+  t.Advance(1)
+  two = t.SignIn(ana.Email, ana.Password)?
+  boss = t.Super()?
+  u = boss.Call(api.AdminUser, {id: one.User})?
+  boss.Call(api.AdminEndSession, {id: u.Sessions[1].Id})?
+  missingOne = boss.Send(api.AdminEndSession, {id: 99999999})
+  result.IsOk(one.Call(api.Me)) and two.Call(api.Me).Error.Status == 401 and missingOne.Status == 404
+end
+
+defn isFactorsShownAndReset()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  s = a.Call(api.TotpStart)?
+  a.Call(api.TotpConfirm, {Code: auth.TotpCode(s.Secret, t.Env.Now(), t.Env)?})?
+  d = apptest.Device(t)?
+  c = a.Call(api.PasskeyNew)?
+  a.Call(api.PasskeyAdd, {Ticket: c.Ticket, Credential: apptest.Made(d, c.Options, t).Credential})?
+  boss = t.Super()?
+  f = boss.Call(api.AdminUser, {id: a.User})?.Factors
+  bug.Assert(f.Totp and f.Recovery == 10 and value.Len(f.Passkeys) == 1, "seen: $f")
+  bug.Assert(t.SignIn(ana.Email, ana.Password).Error.Status == 401, "a second step before")
+  boss.Call(api.AdminResetFactors, {id: a.User, Totp: true, Passkeys: true})?
+  g = boss.Call(api.AdminUser, {id: a.User})?.Factors
+  not g.Totp and value.Len(g.Passkeys) == 0 and result.IsOk(t.SignIn(ana.Email, ana.Password))
+end
+
+defn isInvitedByMail()
+  t = apptest.Start(App, settings = {InvitePage: "/welcome"})?
+  a = t.SignUp(ana)?
+  boss = t.Super()?
+  out = boss.Send(api.AdminInvite, {id: a.Tenant, Email: "bo@example.com", Roles: ["admin"]})
+  bug.Assert(out.Status == 202, "a job: $(out.Status) $(out.Body)")
+  t.RunJobs()?
+  code = t.Code("bo@example.com")
+  m = t.Mails()[value.Len(t.Mails())]
+  bug.Assert(text.Contains("http://app.test/welcome#code=", m.Text) and m.Subject == "You are invited to Ana on people", "the mail: $(m.Subject) $(m.Text)")
+  bo = t.SignUp({Email: "bo@example.com", Password: "correct horse bo", Name: "Bo", Invite: code})?
+  bo.Tenant == a.Tenant and "admin" in bo.Account.Roles
+end
+
+defn isTenantAdminInvitingByMail()
+  t = apptest.Start(App)?
+  a = t.SignUp(ana)?
+  out = a.Send(api.Invite, {Email: "cy@example.com", Roles: ["member"], Mail: true})
+  bug.Assert(out.Status == 202 and not text.Contains("Code", out.Body), "no code in the answer: $(out.Body)")
+  t.RunJobs()?
+  code = t.Code("cy@example.com")
+  facts = json.Text([cepheus.Get(auth.Invite, id, t.Db) for id in 1..200])
+  bug.Assert(not value.IsMissing(code) and not text.Contains(code, facts), "the code only in the mail")
+  cy = t.SignUp({Email: "cy@example.com", Password: "correct horse cy", Name: "Cy", Invite: code})?
+  cy.Tenant == a.Tenant
+end

@@ -1,0 +1,476 @@
+(* The passkeys: the server side of WebAuthn (Web Authentication Level 3, W3C, sections 7.1 and 7.2). A ceremony
+   begins with its options and a ticket, id.secret, whose secret is the challenge itself (32 random bytes of the
+   kernel; the database keeps its hash only), good once for PasskeyTime seconds. Its end checks what the device sent:
+   the type of the ceremony, the challenge, the origin (the app's Origin, or one of PasskeyOrigins), no frame of another
+   site, the hash of the relying party's id (RpId), the user present, the user verified when PasskeyCheck is required,
+   then for a new passkey its public key (ES256, EdDSA, RS256 or PS256, a COSE key in CBOR) and its id never seen, and
+   for a sign-in the signature of the device over its data and the hash of the client's data, and its counter, which
+   must grow when either side counts (a counter that goes back is a cloned key: refused, PasskeyCounter). The
+   attestation asked is "none": the brand of the device is not checked, its key is. A passkey whose device verified its
+   user (UV) is two factors at once (something held, something known or been): it signs in without TOTP's step. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/app
+use std/cbor
+use std/crypto
+use std/dict
+use std/encode
+use std/json
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+(** A passkey: its user, the id of its credential (base64url, unique), its public key (base64 of its DER, or of the 32
+    bytes of an Ed25519 key), its algorithm (COSE: -7 ES256, -8 EdDSA, -257 RS256, -37 PS256), its counter, Verified
+    when its device verified the user when it was made, Backup and Backed the flags BE and BS (a passkey that can be,
+    and is, synced to other devices), its transports, the name the user gave it, when it was made and last used. *)
+Passkey = app.Kind("centauri_passkey", {User: cepheus.Link(), Credential: cepheus.Text(unique = true), Key: cepheus.Text(), Alg: cepheus.Int(),
+  Count: cepheus.Int(), Verified: cepheus.Bool(), Backup: cepheus.Bool(), Backed: cepheus.Bool(), Transports: cepheus.Text(many = true),
+  Name: cepheus.Text(), Created: cepheus.Date(), Last: cepheus.Date()})
+
+(** A ceremony of WebAuthn under way: its kind ("create", "get" or "signup"), its user (none for "get"), the user
+    handle it gave the device, the hash of its challenge, when it ends, and for a sign-up the fields of it, as JSON. *)
+Ceremony = app.Kind("centauri_ceremony", {Kind: cepheus.Text(), User: cepheus.Link(), Handle: cepheus.Text(), Hash: cepheus.Text(), Ends: cepheus.Date(),
+  Fields: cepheus.Text()}, secret = ["Hash"])
+
+(* The algorithms of COSE that a passkey may have, in the order of our preference: ES256, EdDSA, RS256, PS256. *)
+algs = [-7, -8, -257, -37]
+
+defn B64u(bytes)
+  (** Bytes in base64url without padding (RFC 4648 section 5), as WebAuthn's JSON writes them.
+
+        B64u("hi?>") --> "aGk_Pg" *)
+  text.Replace("=", "", text.Replace("/", "_", text.Replace("+", "-", encode.Base64(bytes))))
+end
+
+defn Unb64u(t)
+  (** The bytes of a text in base64url, padded or not: an Ok, or an Err.
+
+        Unb64u("aGk_Pg") --> result.Ok("hi?>") *)
+  if not value.IsText(t) or text.ByteLength(t) > 200000
+    return result.Err({Kind: "auth", Message: "No base64url."})
+  end
+  s = text.Replace("=", "", text.Replace("_", "/", text.Replace("-", "+", t)))
+  encode.Unbase64("$s$(text.Repeat(math.Mod(4 - math.Mod(text.ByteLength(s), 4), 4), "="))")
+end
+
+defn rpOf(env)
+  (** The relying party: its id (RpId, else the host of Origin) and its name (RpName, else the app's). *)
+  s = env.Settings
+  host = text.Split("/", text.Split("://", s.Origin)[2])[1]
+  {Id: if value.IsText(dict.Get("RpId", s)) s.RpId else text.Split(":", host)[1] end, Name: if value.IsText(dict.Get("RpName", s)) s.RpName else env.App.Name end}
+end
+
+defn origins(env)
+  (** The origins a ceremony may come from: the app's, and those of PasskeyOrigins (an app of Android, a site of the
+      same relying party). *)
+  list.Concat([env.Settings.Origin], [text.Trim(o) for o in text.Split(",", env.Settings.PasskeyOrigins) if text.Trim(o) != ""])
+end
+
+defn enabled(r)
+  (** An Ok when the passkeys are on in this app, else a 403. *)
+  if r.Settings.Passkeys == "on" result.Ok(true) else app.Fail(403, "Passkeys are off in this app.") end
+end
+
+defn begun(kind, user, handle, fields, options, r)
+  (** A ceremony made: its challenge, its ticket, and the JSON of its options with the challenge in them. *)
+  env = r.Env
+  challenge = crypto.Random(32, env.Keys)
+  c = {Kind: kind, Handle: handle, Hash: hashOf(encode.Hex(challenge), env.Keys), Ends: env.Now() + r.Settings.PasskeyTime}
+  if not value.IsMissing(user)
+    c.User = user
+  end
+  if not value.IsMissing(fields)
+    c.Fields = json.Text(fields)
+  end
+  id = cepheus.Insert(Ceremony, c, env.Db, why = r.Why)?
+  o = options
+  o.challenge = B64u(challenge)
+  o.timeout = r.Settings.PasskeyTime * 1000
+  result.Ok({Ticket: "$id.$(encode.Hex(challenge))", Options: json.Text(o)})
+end
+
+defn ceremonyOf(ticket, kind, env)
+  (** The ceremony of a ticket, of this kind and still open, ended at once (a ticket serves once): an Ok of its fields,
+      Id and Challenge (its bytes), or a 403. *)
+  bad = app.Fail(403, "This ceremony has ended: ask its options again.")
+  p = parts(ticket)
+  if value.IsMissing(p)
+    return bad
+  end
+  c = cepheus.Get(Ceremony, p.Id, env.Db)?
+  if value.IsMissing(c) or not value.IsText(dict.Get("Hash", c)) or not crypto.IsSame(hashOf(p.Secret, env.Keys), c.Hash, env.Keys) or c.Kind != kind or c.Ends <= env.Now()
+    return bad
+  end
+  done = cepheus.Write(list.Concat([cepheus.Expect(p.Id, Ceremony.Hash, c.Hash)], app.Gone(Ceremony, p.Id, env.Db)?), env.Db, why = "ceremony ended")
+  if result.IsErr(done)
+    return bad
+  end
+  c.Id = p.Id
+  c.Challenge = encode.Unhex(p.Secret)?
+  result.Ok(c)
+end
+
+wrong(why) = app.Fail(400, "This passkey's answer is not valid: $why")   (* What a bad answer of a device gets. *)
+
+(* Is the bit of value 2^k of a byte set. *)
+bit(flags, k) = math.Mod(math.Div(flags, pow2(k)), 2) == 1
+
+defn number(bytes)
+  (** The integer that big-endian bytes write. *)
+  n = 0
+  for b in text.Bytes(bytes)
+    n = n * 256 + b
+  end
+  n
+end
+
+defn AuthData(bytes)
+  (** The authenticator data of WebAuthn (section 6.1): an Ok of {RpIdHash, Up, Uv, Be, Bs, At, Ed, Count}, and with
+      At, Credential (the id of the credential) and Key (its COSE key, a map), or an Err. *)
+  size = text.ByteLength(bytes)
+  if size < 37
+    return wrong("its authenticator data is too short.")
+  end
+  flags = text.Bytes(text.ByteSlice(33, 33, bytes))[1]
+  out = {RpIdHash: text.ByteSlice(1, 32, bytes), Up: bit(flags, 0), Uv: bit(flags, 2), Be: bit(flags, 3), Bs: bit(flags, 4), At: bit(flags, 6),
+    Ed: bit(flags, 7), Count: number(text.ByteSlice(34, 37, bytes))}
+  if not out.At
+    return result.Ok(out)
+  end
+  if size < 55
+    return wrong("its attested credential data is too short.")
+  end
+  n = number(text.ByteSlice(54, 55, bytes))
+  if n < 1 or n > 1023 or size < 55 + n + 1
+    return wrong("the length of its credential's id.")
+  end
+  out.Credential = text.ByteSlice(56, 55 + n, bytes)
+  key = cbor.Read(bytes, at = 56 + n)
+  if result.IsErr(key) or not value.IsDict(key.Value.Value)
+    return wrong("its public key is no COSE key.")
+  end
+  if key.Value.Next <= size and not out.Ed
+    return wrong("bytes after its public key.")
+  end
+  out.Key = key.Value.Value
+  result.Ok(out)
+end
+
+defn CoseKey(m)
+  (** The key of a COSE key (RFC 9052, 9053): an Ok of {Alg, Key}, Key the DER of the public key for ES256, RS256 and
+      PS256, or its 32 bytes for EdDSA, or an Err for any other algorithm, curve or form. *)
+  alg = dict.Get(3, m)
+  kty = dict.Get(1, m)
+  if alg == -7 and kty == 2 and dict.Get(-1, m) == 1 and value.IsText(dict.Get(-2, m)) and value.IsText(dict.Get(-3, m))
+    k = crypto.EcKey(m[-2], m[-3])
+    return if result.IsOk(k) result.Ok({Alg: alg, Key: k.Value}) else wrong("its EC key.") end
+  end
+  if alg == -8 and kty == 1 and dict.Get(-1, m) == 6 and value.IsText(dict.Get(-2, m)) and text.ByteLength(m[-2]) == 32
+    return result.Ok({Alg: alg, Key: m[-2]})
+  end
+  if (alg == -257 or alg == -37) and kty == 3 and value.IsText(dict.Get(-1, m)) and value.IsText(dict.Get(-2, m)) and text.ByteLength(m[-1]) >= 256
+    k = crypto.RsaKey(m[-1], m[-2])
+    return if result.IsOk(k) result.Ok({Alg: alg, Key: k.Value}) else wrong("its RSA key.") end
+  end
+  wrong("its key is of no algorithm this app takes (ES256, EdDSA, RS256, PS256).")
+end
+
+defn clientData(raw, kind, challenge, env)
+  (** The client's data of a ceremony checked (WebAuthn 7.1 steps 7 to 12, 7.2 steps 10 to 15): its type, its
+      challenge, its origin, and no frame of another site. An Ok of its hash, or an Err. *)
+  parsed = json.Parse(raw)
+  if result.IsErr(parsed) or not value.IsDict(parsed.Value)
+    return wrong("its client data is no JSON.")
+  end
+  c = parsed.Value
+  if dict.Get("type", c) != kind
+    return wrong("its client data is of another ceremony.")
+  end
+  if not value.IsText(dict.Get("challenge", c)) or not crypto.IsSame(c.challenge, B64u(challenge), env.Keys)
+    return wrong("its challenge is not this ceremony's.")
+  end
+  if not (dict.Get("origin", c) in origins(env))
+    return wrong("it comes from another site than the app's.")
+  end
+  if dict.Get("crossOrigin", c) == true or not value.IsMissing(dict.Get("topOrigin", c))
+    return wrong("it was made in a frame of another site.")
+  end
+  result.Ok(crypto.Sha256(raw, env.Keys))
+end
+
+defn credentialOf(given)
+  (** The JSON of a credential as the page sent it: an Ok of its map, or an Err. *)
+  parsed = json.Parse(given)
+  if result.IsErr(parsed) or not value.IsDict(parsed.Value) or dict.Get("type", parsed.Value) != "public-key" or not value.IsDict(dict.Get("response", parsed.Value))
+    return wrong("its credential is no JSON of a public key.")
+  end
+  result.Ok(parsed.Value)
+end
+
+defn field(m, name)
+  (** The bytes of a field of base64url of a credential: an Ok, or an Err. *)
+  v = dict.Get(name, m)
+  if not value.IsText(v)
+    return wrong("it lacks $name.")
+  end
+  got = Unb64u(v)
+  if result.IsErr(got) wrong("its $name is no base64url.") else got end
+end
+
+defn made(c, credential, r)
+  (** The new passkey of a ceremony "create" or "signup" checked (WebAuthn 7.1): an Ok of the fields of the passkey,
+      or an Err. *)
+  env = r.Env
+  cred = credentialOf(credential)?
+  resp = cred.response
+  raw = field(resp, "clientDataJSON")?
+  clientData(raw, "webauthn.create", c.Challenge, env)?
+  att = cbor.Decode(field(resp, "attestationObject")?)
+  if result.IsErr(att) or not value.IsDict(att.Value) or not value.IsText(dict.Get("authData", att.Value)) or not value.IsText(dict.Get("fmt", att.Value))
+    return wrong("its attestation object.")
+  end
+  d = AuthData(att.Value.authData)?
+  if not crypto.IsSame(d.RpIdHash, crypto.Sha256(rpOf(env).Id, env.Keys), env.Keys)
+    return wrong("it is for another site.")
+  end
+  if not d.Up
+    return wrong("nobody was present.")
+  end
+  if r.Settings.PasskeyCheck == "required" and not d.Uv
+    return wrong("its device didn't verify its user, which this app asks.")
+  end
+  if not d.At
+    return wrong("it holds no credential.")
+  end
+  if dict.Get("rawId", cred) != B64u(d.Credential)
+    return wrong("its id is not its credential's.")
+  end
+  k = CoseKey(d.Key)?
+  transports = dict.Get("transports", resp)
+  result.Ok({Credential: B64u(d.Credential), Key: encode.Base64(k.Key), Alg: k.Alg, Count: d.Count, Verified: d.Uv, Backup: d.Be, Backed: d.Bs,
+    Transports: if value.IsArray(transports) [t for t in list.Take(10, transports) if value.IsText(t) and text.ByteLength(t) <= 40] else [] end, Created: env.Now()})
+end
+
+defn handleOf(user, db)
+  (** The user handle of a user (WebAuthn's user.id): 16 random bytes, in base64url, kept on him from his first
+      passkey; missing before. No e-mail nor name is in it. *)
+  u = cepheus.Get(User, user, db)?
+  result.Ok(dict.Get("Handle", u))
+end
+
+defn passkeyNew(r)
+  (** POST /auth/passkeys/options. *)
+  enabled(r)?
+  env = r.Env
+  handle = handleOf(r.User.Id, r.Db)?
+  if value.IsMissing(handle)
+    handle = B64u(crypto.Random(16, env.Keys))
+  end
+  rp = rpOf(env)
+  mine = cepheus.Find(2, (p, c) -> {Where: [[p, Passkey.User, r.User.Id], [p, Passkey.Credential, c]], Give: {Id: c}}, r.Db)?
+  begun("create", r.User.Id, handle, missing, {rp: {id: rp.Id, name: rp.Name}, user: {id: handle, name: r.User.Email, displayName: r.User.Name},
+    pubKeyCredParams: [{type: "public-key", alg: a} for a in algs], excludeCredentials: [{type: "public-key", id: x.Id} for x in mine],
+    authenticatorSelection: {residentKey: "required", requireResidentKey: true, userVerification: r.Settings.PasskeyCheck}, attestation: "none"}, r)
+end
+
+defn passkeyAdd(r, x)
+  (** POST /auth/passkeys: the passkey of the ceremony kept. *)
+  enabled(r)?
+  c = ceremonyOf(x.Ticket, "create", r.Env)?
+  if not value.Equal(dict.Get("User", c), r.User.Id)
+    return app.Fail(403, "This ceremony has ended: ask its options again.")
+  end
+  p = made(c, x.Credential, r)?
+  p.User = r.User.Id
+  p.Name = if x.Name == "" "Passkey" else x.Name end
+  ops = app.Facts(Passkey, cepheus.New(1), p)
+  if value.IsMissing(handleOf(r.User.Id, r.Db)?)
+    ops = list.Append(cepheus.Add(r.User.Id, User.Handle, c.Handle), ops)
+  end
+  done = cepheus.Write(ops, r.Db, by = r.User.Id, why = r.Why)
+  if result.IsErr(done) and done.Error.Code == "unique"
+    return app.Fail(409, "This passkey is kept already.")
+  end
+  id = done?.Things[1]
+  note(r, "passkey", "A passkey was added: $(p.Name).", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  result.Ok({Id: id, Name: p.Name, Created: p.Created, Verified: p.Verified})
+end
+
+defn passkeysOf(user, db)
+  (** The passkeys of a user, as PasskeyRow shows them, the newest first. *)
+  rows = cepheus.Find(2, (p, c) -> {Where: [[p, Passkey.User, user], [p, Passkey.Created, c]], Give: {Id: p, Created: c}, Sort: [cepheus.Desc(c), cepheus.Desc(p)]}, db)?
+  out = []
+  for x in rows
+    p = cepheus.Get(Passkey, x.Id, db)?
+    row = {Id: x.Id, Name: dict.GetOr("Name", "", p), Created: x.Created, Verified: p.Verified == true}
+    if not value.IsMissing(dict.Get("Last", p))
+      row.Last = p.Last
+    end
+    out = list.Append(row, out)
+  end
+  result.Ok(out)
+end
+
+(* GET /auth/passkeys. *)
+passkeys(r) = passkeysOf(r.User.Id, r.Db)
+
+defn passkeyRemove(r)
+  (** DELETE /auth/passkeys/:id: one of the user's own, unless it is his last way to sign in. *)
+  id = app.IdOf(r.Params.id)
+  p = if value.IsMissing(id) missing else cepheus.Get(Passkey, id, r.Db)? end
+  if value.IsMissing(p) or not value.Equal(dict.Get("User", p), r.User.Id)
+    return app.Missing()
+  end
+  u = cepheus.Get(User, r.User.Id, r.Db)?
+  if dict.GetOr("Hash", "", u) == "" and value.Len(passkeysOf(r.User.Id, r.Db)?) <= 1 and value.Len(identitiesOf(r.User.Id, r.Db)?) == 0
+    return app.Fail(409, "This is your last way to sign in: add another first.")
+  end
+  cepheus.Write(app.Gone(Passkey, id, r.Db)?, r.Db, by = r.User.Id, why = r.Why)?
+  note(r, "passkey", "A passkey was taken away: $(dict.GetOr("Name", "", p)).", user = r.User.Id, tenant = r.User.Tenant, every = 0)
+  result.Ok(missing)
+end
+
+defn passkeyStart(r)
+  (** POST /auth/passkey/options: a ceremony "get", without an e-mail: the device offers its passkeys of the site. *)
+  enabled(r)?
+  gate("signin:$(r.Ip)", r.Settings.SignInPerIp, 60, r)?
+  begun("get", missing, "", missing, {rpId: rpOf(r.Env).Id, allowCredentials: [], userVerification: r.Settings.PasskeyCheck}, r)
+end
+
+defn asserted(c, credential, r)
+  (** The passkey of an assertion checked (WebAuthn 7.2): an Ok of {Id, User, Uv}, its counter and its time of use
+      written, or an Err. *)
+  env = r.Env
+  s = r.Settings
+  cred = credentialOf(credential)?
+  resp = cred.response
+  rawId = field(cred, "rawId")?
+  found = cepheus.Find(1, p -> {Where: [[p, Passkey.Credential, B64u(rawId)]], Give: {Id: p}}, env.Db)?
+  if value.Len(found) == 0
+    return app.Fail(401, "This passkey is not known here.")
+  end
+  id = found[1].Id
+  p = cepheus.Get(Passkey, id, env.Db)?
+  handle = handleOf(p.User, env.Db)?
+  given = dict.Get("userHandle", resp)
+  if value.IsText(given) and given != "" and not (value.IsText(handle) and given == handle)
+    return wrong("its user is not this passkey's.")
+  end
+  raw = field(resp, "clientDataJSON")?
+  hash = clientData(raw, "webauthn.get", c.Challenge, env)?
+  data = field(resp, "authenticatorData")?
+  d = AuthData(data)?
+  if not crypto.IsSame(d.RpIdHash, crypto.Sha256(rpOf(env).Id, env.Keys), env.Keys)
+    return wrong("it is for another site.")
+  end
+  if not d.Up
+    return wrong("nobody was present.")
+  end
+  if s.PasskeyCheck == "required" and not d.Uv
+    return wrong("its device didn't verify its user, which this app asks.")
+  end
+  if d.Be != (p.Backup == true)
+    return wrong("its flag of backup changed.")
+  end
+  sig = field(resp, "signature")?
+  key = encode.Unbase64(p.Key)?
+  signed = "$data$hash"
+  ok = if p.Alg == -8 crypto.Verify(sig, signed, key, env.Keys)
+    else crypto.VerifyWith(sig, signed, key, if p.Alg == -7 "ES256" else if p.Alg == -257 "RS256" else "PS256" end, sslOf(env)?) end
+  if not ok
+    return app.Fail(401, "This passkey's signature is wrong.")
+  end
+  count = dict.GetOr("Count", 0, p)
+  if (count > 0 or d.Count > 0) and d.Count <= count
+    _ = app.Note(env, "passkey-cloned", "The counter of passkey $id went back, from $count to $(d.Count): a copy of the key?", user = p.User, ip = r.Ip, route = r.Route)
+    if s.PasskeyCounter == "refuse"
+      return app.Fail(401, "This passkey's counter went back: it may be a copy. Use another way to sign in.")
+    end
+  end
+  done = cepheus.Write([cepheus.Expect(id, Passkey.Count, count), cepheus.Add(id, Passkey.Count, d.Count), cepheus.Add(id, Passkey.Last, env.Now()),
+    cepheus.Add(id, Passkey.Backed, d.Bs)], env.Db, by = p.User, why = r.Why)
+  if result.IsErr(done)
+    return app.Fail(401, "This passkey was used at the same moment: sign in again.")
+  end
+  result.Ok({Id: id, User: p.User, Uv: d.Uv})
+end
+
+defn passkeySignIn(r, x)
+  (** POST /auth/passkey: the session of a passkey; a second step only when its device didn't verify its user and he
+      has a second factor or the settings ask one. *)
+  enabled(r)?
+  env = r.Env
+  gate("signin:$(r.Ip)", r.Settings.SignInPerIp, 60, r)?
+  c = ceremonyOf(x.Ticket, "get", env)?
+  got = asserted(c, x.Credential, r)
+  if result.IsErr(got)
+    app.Failed(env.State)
+    note(r, "signin-failed", "A passkey was refused.")
+    return got
+  end
+  u = cepheus.Get(User, got.Value.User, env.Db)?
+  if value.IsMissing(u) or u.Disabled == true
+    return app.Fail(401, "This passkey is not known here.")
+  end
+  if r.Settings.EmailCheck == "required" and value.IsMissing(dict.Get("Checked", u))
+    return app.Fail(403, "Check your e-mail address first: open the link of the mail we sent you.")
+  end
+  m = membershipOf(got.Value.User, x.Tenant, env.Db)?
+  if value.IsMissing(m) and not value.IsMissing(x.Tenant)
+    return app.Fail(403, "You are no member of this tenant.")
+  end
+  if not got.Value.Uv
+    need = secondNeeded(got.Value.User, if value.IsMissing(m) [] else app.Expand(m.Roles, env.Roles) end, u.Super == true, r)?
+    if not value.IsMissing(need)
+      return stepped(got.Value.User, m, r, need)
+    end
+  end
+  opened(got.Value.User, m, r, "passkey")
+end
+
+defn passkeySignUpStart(r, x)
+  (** POST /auth/signup/passkey/options: the checks of a sign-up (closed, by invitation, the trap field, the limits,
+      the proof of work), then a ceremony "signup" that keeps its fields. *)
+  enabled(r)?
+  s = r.Settings
+  if s.SignUp == "closed"
+    return app.Fail(403, "Signing up is closed: ask an administrator.")
+  end
+  if s.SignUp == "invite" and value.IsMissing(x.Invite)
+    return app.Fail(403, "Signing up is by invitation only: use the link of yours.")
+  end
+  if honeypot(r)
+    note(r, "bot", "The trap field of signing up was filled.")
+    return app.Fail(422, "Check the fields.")
+  end
+  gate("signup:$(r.Ip)", s.SignUpPerIp, 3600, r)?
+  proven(x, s.Pow == "always" or (s.Pow == "attack" and app.Failures(r.Env.State) >= s.PowAfter), r)?
+  handle = B64u(crypto.Random(16, r.Env.Keys))
+  rp = rpOf(r.Env)
+  fields = {Email: x.Email, Name: x.Name}
+  for f in ["Tenant", "Invite"]
+    if not value.IsMissing(dict.Get(f, x))
+      fields[f] = x[f]
+    end
+  end
+  begun("signup", missing, handle, fields, {rp: {id: rp.Id, name: rp.Name}, user: {id: handle, name: x.Email, displayName: x.Name},
+    pubKeyCredParams: [{type: "public-key", alg: a} for a in algs], excludeCredentials: [],
+    authenticatorSelection: {residentKey: "required", requireResidentKey: true, userVerification: s.PasskeyCheck}, attestation: "none"}, r)
+end
+
+defn passkeySignUp(r, x, facts, kinds)
+  (** POST /auth/signup/passkey: the account made with its passkey and no password, as signing up does. *)
+  enabled(r)?
+  c = ceremonyOf(x.Ticket, "signup", r.Env)?
+  p = made(c, x.Credential, r)?
+  p.Name = "Passkey"
+  fields = json.Parse(c.Fields)?
+  for f in ["Tenant", "Invite", "Proof"]
+    if not dict.Has(f, fields)
+      fields[f] = missing
+    end
+  end
+  signingUp(r, fields, facts, kinds, hash = "", handle = c.Handle, extra = (user, thing) -> app.Facts(Passkey, cepheus.New(thing), dict.Put("User", user, p)))
+end

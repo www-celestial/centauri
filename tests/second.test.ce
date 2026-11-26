@@ -1,0 +1,155 @@
+(** The second factor against what an attacker tries: a password stolen (the code of the app is asked), a code seen
+    over a shoulder and typed again (taken once), codes guessed (5 a ticket, then the delay that doubles), a recovery
+    code used twice, a ticket forged, a factor turned off by who holds a session only, the database copied (the
+    secrets sealed, the recovery codes keyed). And the settings that ask it of everyone or of some roles. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+App = app.Of([auth.Module()], name = "second")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+code(t, secret) = auth.TotpCode(secret, t.Env.Now(), t.Env)?
+
+defn withTotp(t)
+  (** Ana signed up, her TOTP on: {Client, Secret, Codes}. *)
+  a = t.SignUp(ana)?
+  s = a.Call(api.TotpStart)?
+  on = a.Call(api.TotpConfirm, {Code: code(t, s.Secret)})?
+  bug.Assert(on.Totp and on.Recovery == 10, "on, 10 codes: $on")
+  result.Ok({Client: a, Secret: s.Secret, Codes: s.Codes})
+end
+
+defn ticket(t)
+  (** The first step of Ana's sign-in: the ticket its 401 holds. *)
+  out = t.Anyone().Send(api.SignIn, {Email: ana.Email, Password: ana.Password})
+  p = json.Parse(out.Body)?
+  bug.Assert(out.Status == 401 and p.second.Setup == false and value.Equal(p.second.Methods, ["totp", "recovery"]), "a second step: $(out.Body)")
+  result.Ok(p.second.Ticket)
+end
+
+defn isPasswordAloneNotEnough()
+  t = apptest.Start(App)?
+  w = withTotp(t)?
+  t.Advance(31)
+  k = ticket(t)?
+  done = t.Anyone().Call(api.Second, {Ticket: k, Code: code(t, w.Secret)})
+  result.IsOk(done) and done.Value.Email == ana.Email
+end
+
+defn isCodeTakenOnce()
+  t = apptest.Start(App)?
+  w = withTotp(t)?
+  t.Advance(31)
+  c = code(t, w.Secret)
+  first = t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: c})
+  again = t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: c})
+  t.Advance(30)
+  next = t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: code(t, w.Secret)})
+  result.IsOk(first) and again.Error.Status == 401 and result.IsOk(next)
+end
+
+defn isGuessingStopped()
+  t = apptest.Start(App, settings = {StepTries: "5", LockAfter: "8"})?
+  w = withTotp(t)?
+  k = ticket(t)?
+  codes = [status(t.Anyone().Call(api.Second, {Ticket: k, Code: "000000"})) for n in 1..6]
+  bug.Assert(value.Equal(codes, [401, 401, 401, 401, 401, 403]), "5 tries a ticket: $codes")
+  more = [status(t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: "000001"})) for n in 1..4]
+  bug.Assert(more[4] == 429, "then the delay of the user's failures: $more")
+  t.Advance(3600)
+  result.IsOk(t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: code(t, w.Secret)}))
+end
+
+status(got) = if result.IsOk(got) 200 else got.Error.Status end
+
+defn isRecoveryCodeOnce()
+  t = apptest.Start(App)?
+  w = withTotp(t)?
+  first = t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: text.Upper(w.Codes[3])})
+  again = t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: w.Codes[3]})
+  left = first.Value
+  result.IsOk(first) and again.Error.Status == 401 and w.Client.Call(api.MyFactors)?.Recovery == 9
+end
+
+defn isTicketForgedRefused()
+  t = apptest.Start(App)?
+  w = withTotp(t)?
+  k = ticket(t)?
+  id = text.Split(".", k)[1]
+  forged = t.Anyone().Call(api.Second, {Ticket: "$id.$(text.Repeat(64, "0"))", Code: code(t, w.Secret)})
+  other = t.Anyone().Call(api.Second, {Ticket: "1.$(text.Split(".", k)[2])", Code: code(t, w.Secret)})
+  t.Advance(301)
+  late = t.Anyone().Call(api.Second, {Ticket: k, Code: code(t, w.Secret)})
+  forged.Error.Status == 403 and other.Error.Status == 403 and late.Error.Status == 403
+end
+
+defn isTurnedOffOnlyWithACode()
+  t = apptest.Start(App)?
+  w = withTotp(t)?
+  wrong = w.Client.Call(api.TotpOff, {Code: "123456"})
+  bug.Assert(wrong.Error.Status == 422, "a session alone turns nothing off: $(wrong.Error)")
+  t.Advance(31)
+  off = w.Client.Call(api.TotpOff, {Code: code(t, w.Secret)})?
+  plain = t.SignIn(ana.Email, ana.Password)
+  not off.Totp and off.Recovery == 0 and result.IsOk(plain)
+end
+
+defn isSecretSealed()
+  t = apptest.Start(App)?
+  w = withTotp(t)?
+  facts = json.Text([cepheus.Get(auth.Totp, id, t.Db) for id in 1..200])
+  raw = auth.Unbase32(w.Secret)
+  codes = [c for c in w.Codes if text.Contains(text.Replace("-", "", c), facts) or text.Contains(c, facts)]
+  not text.Contains(w.Secret, facts) and not text.Contains(raw, facts) and value.Len(codes) == 0
+end
+
+defn isAskedOfARole()
+  t = apptest.Start(App, settings = {TwoFactorRoles: "owner"})?
+  t.SignUp(ana)?
+  out = t.Anyone().Send(api.SignIn, {Email: ana.Email, Password: ana.Password})
+  p = json.Parse(out.Body)?
+  bug.Assert(out.Status == 401 and p.second.Setup == true, "set up first: $(out.Body)")
+  s = t.Anyone().Call(api.SecondSetup, {Ticket: p.second.Ticket})?
+  bug.Assert(text.StartsWith("otpauth://totp/second%3Aana%40example.com?secret=", s.Uri), "the address of the QR code: $(s.Uri)")
+  a = t.Anyone().Call(api.Second, {Ticket: p.second.Ticket, Code: code(t, s.Secret)})
+  bug.Assert(result.IsOk(a), "on, and signed in: $a")
+  t.Advance(31)
+  c = t.Anyone().Call(api.Second, {Ticket: ticket(t)?, Code: code(t, s.Secret)})
+  t.Advance(31)
+  signed = t.SignIn(ana.Email, ana.Password)
+  result.IsOk(c)
+end
+
+defn isAskedOfEveryoneWithSha256()
+  t = apptest.Start(App, settings = {TwoFactor: "required", TotpAlgorithm: "SHA256", TotpDigits: "8"})?
+  t.SignUp(ana)
+  out = t.Anyone().Send(api.SignIn, {Email: ana.Email, Password: ana.Password})
+  p = json.Parse(out.Body)?
+  s = t.Anyone().Call(api.SecondSetup, {Ticket: p.second.Ticket})?
+  c = code(t, s.Secret)
+  bug.Assert(text.ByteLength(c) == 8 and text.Contains("algorithm=SHA256&digits=8", s.Uri), "8 digits of SHA-256: $c $(s.Uri)")
+  result.IsOk(t.Anyone().Call(api.Second, {Ticket: p.second.Ticket, Code: c}))
+end
+
+defn isOffMeansOff()
+  t = apptest.Start(App, settings = {TwoFactor: "off"})?
+  a = t.SignUp(ana)?
+  a.Call(api.TotpStart).Error.Status == 403 and result.IsOk(t.SignIn(ana.Email, ana.Password))
+end
+
+defn isRfc6238Exact()
+  t = apptest.Start(App, settings = {TotpDigits: "8"})?
+  secret = auth.Base32("12345678901234567890")
+  values = [auth.TotpCode(secret, at, t.Env)? for at in [59, 1111111109, 1111111111, 1234567890, 2000000000, 20000000000]]
+  value.Equal(values, ["94287082", "07081804", "14050471", "89005924", "69279037", "65353130"])
+end

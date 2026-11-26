@@ -1,0 +1,48 @@
+(* The contracts of the second factor: a code of an authenticator app (TOTP, RFC 6238) and the recovery codes that
+   stand in for it once each, turned on by the user or asked by the settings (TwoFactor, TwoFactorRoles), and the step
+   of a sign-in that asks one. *)
+use std/check
+
+(** What turning on TOTP gives, once: the secret in base32 (to type into the app), the otpauth:// address its QR code
+    holds, and 10 recovery codes, each good for one sign-in without the app. Nothing is on before a code of the app
+    confirms it. *)
+TotpSetup = check.Record({Secret: check.Text(16, 128), Uri: check.Text(1, 2000), Codes: check.List(check.Text(1, 40), 10, 10)})
+
+(** The second factors of the user: TOTP on or not, the recovery codes left, his passkeys and the providers he signs in
+    with. *)
+Factors = check.Record({Totp: check.Bool(), Recovery: check.Int(0, 100), Password: check.Bool(),
+  Passkeys: check.List(check.Record({Id: check.Id(), Name: check.Text(0, 120), Created: check.Time(), Last: check.Time(optional = true),
+    Verified: check.Bool()}), 0, 100),
+  Identities: check.List(check.Record({Id: check.Id(), Provider: check.Text(1, 40), Email: check.Text(0, 254), Created: check.Time()}), 0, 100)})
+
+(** The second factors and the ways of signing in of the user. *)
+MyFactors = Get("/auth/factors", out = Factors, role = Signed, about = "The second factors and the passkeys of the user.")
+
+(** TOTP begins for the user: a new secret and new recovery codes, which a code of the app turns on (TotpConfirm). *)
+TotpStart = Post("/auth/totp", out = TotpSetup, role = Signed, about = "Begins TOTP: a secret for the app, and recovery codes.")
+
+(** A code of the app turns TOTP on: from the next sign-in, the password alone opens nothing. *)
+TotpConfirm = Post("/auth/totp/confirm", body = check.Record({Code: check.Text(6, 8)}), out = Factors, role = Signed,
+  about = "Turns TOTP on with a code of the app.")
+
+(** TOTP turned off, with a code of the app or a recovery code; refused when the settings ask a second factor of the
+    user. *)
+TotpOff = Post("/auth/totp/off", body = check.Record({Code: check.Text(6, 40)}), out = Factors, role = Signed,
+  about = "Turns TOTP off, with a code.")
+
+(** 10 new recovery codes, the old ones ended, with a code of the app. *)
+NewRecovery = Post("/auth/recovery", body = check.Record({Code: check.Text(6, 8)}), out = check.Record({Codes: check.List(check.Text(1, 40), 10, 10)}),
+  role = Signed, about = "New recovery codes; the old ones end.")
+
+(** The second step of a sign-in: the ticket that the first step gave (in the 401 that asked it, as second.Ticket) and
+    a code of the app or a recovery code. A session comes back. *)
+Second = Post("/auth/second", body = check.Record({Ticket: check.Text(1, 200), Code: check.Text(6, 40)}), out = Account, role = Public,
+  about = "The second step of a sign-in: a code of the app, or a recovery code.")
+
+(** The setup of TOTP during a sign-in, when the settings ask a second factor of a user who has none: its secret and
+    its recovery codes, which a code of the app at Second confirms. *)
+SecondSetup = Post("/auth/second/setup", body = check.Record({Ticket: check.Text(1, 200)}), out = TotpSetup, role = Public,
+  about = "Sets TOTP up during a sign-in that asks it.")
+
+(** The endpoints of the second factor. *)
+SecondFactor = [MyFactors, TotpStart, TotpConfirm, TotpOff, NewRecovery, Second, SecondSetup]

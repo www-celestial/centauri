@@ -1,0 +1,42 @@
+(* The contracts of signing in with another provider: Google, Microsoft, Apple, GitHub, or any provider of OpenID
+   Connect, as the setting SignInWith lists them. The page asks the providers, starts one (its address comes back, and
+   a cookie that ties the sign-in to this browser), the provider sends the browser back to Centauri's callback, which
+   sends it on to the page (OidcPage) with the code in the fragment, and the page finishes. *)
+use std/check
+use std/dict
+
+(** A provider the page offers: its name, as SignInWith lists it, and its title, as a button shows it. *)
+ProviderRow = check.Record({Name: check.Text(1, 40), Title: check.Text(1, 120)})
+
+(** The providers of the app, in the order of SignInWith. *)
+Providers = Get("/auth/providers", out = check.List(ProviderRow, 0, 40), role = Public, about = "The providers one may sign in with.")
+
+(** A sign-in with a provider starts: Url is the provider's page to send the browser to; Return, the path of the app
+    the page goes to after (a path of the app only: anything else is /); Invite, the code of an invitation when the
+    sign-up is by invitation; Link, for a user signed in, to link the provider to his account instead. *)
+OidcStart = Post("/auth/oidc/start", body = check.Record({Provider: check.Text(1, 40), Return: check.Text(1, 2000, optional = true),
+  Invite: check.Text(1, 200, optional = true), Link: check.Bool(optional = true, default = false)}), out = check.Record({Url: check.Text(1, 8000)}),
+  role = Public, about = "Starts a sign-in with a provider.")
+
+(** Where a provider sends the browser back: Centauri sends it on to the page (OidcPage) with what the provider gave
+    in the fragment of the address, which no server nor log nor Referer ever sees. It writes nothing. *)
+OidcBack = Get("/auth/oidc/callback", out = File("text/plain"), role = Public, about = "The callback of the providers, passed on to the page.")
+
+(** The same callback for a provider that posts its answer (Apple, response_mode=form_post), from its own site: the
+    one request of another site that Centauri takes, since it writes nothing and only passes the answer on. *)
+OidcBackPost = Post("/auth/oidc/callback", out = File("text/plain"), role = Public, about = "The callback of the providers that post it.") then dict.Put("Cross", true)
+
+(** The account of a sign-in finished, and the path the page goes to. *)
+SignedIn = check.Record(dict.Merge(Account.Fields, {Return: check.Text(1, 2000, optional = true)}))
+
+(** The end of a sign-in with a provider, from the page: what the provider gave (State and Code, or Error), and User,
+    the name that Apple gives once. A session comes back, or a 401 that asks a second factor. *)
+OidcFinish = Post("/auth/oidc/finish", body = check.Record({State: check.Text(1, 400), Code: check.Text(1, 4000, optional = true),
+  Error: check.Text(1, 400, optional = true), Iss: check.Text(1, 400, optional = true), User: check.Text(1, 4000, optional = true)}),
+  out = SignedIn, role = Public, about = "Finishes a sign-in with a provider.")
+
+(** A provider unlinked from the user's account; refused when it is his last way to sign in. *)
+Unlink = Delete("/auth/identities/:id", role = Signed, about = "Unlinks a provider from the user's account.")
+
+(** The endpoints of the sign-in with providers. *)
+OidcEndpoints = [Providers, OidcStart, OidcBack, OidcBackPost, OidcFinish, Unlink]

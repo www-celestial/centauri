@@ -1,0 +1,94 @@
+(* A device of passkeys in software, for the tests of an app (and of Centauri's own): it makes a passkey from the
+   options of a ceremony and signs the challenges of a sign-in, as a phone or a security key does through the
+   browser, its answers the JSON that PublicKeyCredential.toJSON() gives. What it answers can be made wrong on purpose
+   (another origin, another site, no user verified, a counter that goes back), as an attacker or a cloned key would. *)
+use std/cbor
+use std/crypto
+use std/dict
+use std/encode
+use std/json
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+defn b64u(bytes)
+  (** Bytes in base64url without padding. *)
+  text.Replace("=", "", text.Replace("/", "_", text.Replace("+", "-", encode.Base64(bytes))))
+end
+
+defn Device(t, alg = "ES256", uv = true)
+  (** A device with one key of alg, ES256 (P-256, through OpenSSL) or EdDSA (Ed25519, through libsodium), that
+      verifies its user when uv: an Ok of it, to give to Made and Signed. *)
+  env = t.Env
+  if alg == "EdDSA"
+    pair = crypto.SignPair(env.Keys)
+    cose = dict.Dict([{Key: 1, Value: 1}, {Key: 3, Value: -8}, {Key: -1, Value: 6}, {Key: -2, Value: cbor.Bytes(pair.Public)}])
+    return result.Ok({Alg: alg, Secret: pair.Secret, Cose: cose, Id: crypto.Random(16, env.Keys), Uv: uv, Handle: missing})
+  end
+  o = crypto.OpenSsl()?
+  pair = crypto.KeyPair("ES256", o)?
+  x = text.ByteSlice(28, 59, pair.Public)
+  y = text.ByteSlice(60, 91, pair.Public)
+  cose = dict.Dict([{Key: 1, Value: 2}, {Key: 3, Value: -7}, {Key: -1, Value: 1}, {Key: -2, Value: cbor.Bytes(x)}, {Key: -3, Value: cbor.Bytes(y)}])
+  result.Ok({Alg: alg, Secret: pair.Secret, Cose: cose, Id: crypto.Random(16, env.Keys), Uv: uv, Handle: missing, Ssl: o})
+end
+
+defn flagsOf(up, uv, at)
+  (** The byte of the flags of an authenticator's data: user present, verified, attested data. *)
+  (if up 1 else 0 end) + (if uv 4 else 0 end) + (if at 64 else 0 end)
+end
+
+defn counterOf(n)
+  (** A counter as its 4 bytes, the highest first. *)
+  text.FromBytes([math.Mod(math.Div(n, 16777216), 256), math.Mod(math.Div(n, 65536), 256), math.Mod(math.Div(n, 256), 256), math.Mod(n, 256)])
+end
+
+defn clientData(kind, challenge, origin, cross)
+  (** The client's data of a ceremony, as the browser writes it. *)
+  c = {type: kind, challenge: challenge, origin: origin, crossOrigin: cross}
+  json.Text(c)
+end
+
+defn Made(d, options, t, origin = missing, rpId = missing, kind = "webauthn.create", uv = missing, cross = false)
+  (** The answer of a device to the options of a ceremony that makes a passkey (Ceremony.Options): {Credential, Device},
+      Credential the JSON a page sends, Device the device that now knows the user's handle. origin, rpId, kind, uv and
+      cross change what it says, as a forged answer would. *)
+  o = json.Parse(options)!
+  env = t.Env
+  rp = if value.IsMissing(rpId) o.rp.id else rpId end
+  data = clientData(kind, o.challenge, if value.IsMissing(origin) env.Settings.Origin else origin end, cross)
+  verified = if value.IsMissing(uv) d.Uv else uv end
+  key = cbor.Encode(d.Cose)
+  auth = "$(crypto.Sha256(rp, env.Keys))$(text.FromBytes([flagsOf(true, verified, true)]))$(counterOf(0))$(text.Repeat(16, text.FromBytes([0])))$(text.FromBytes([0, text.ByteLength(d.Id)]))$(d.Id)$key"
+  att = cbor.Encode({fmt: "none", attStmt: {}, authData: cbor.Bytes(auth)})
+  cred = {id: b64u(d.Id), rawId: b64u(d.Id), type: "public-key", response: {clientDataJSON: b64u(data), attestationObject: b64u(att), transports: ["internal"]},
+    clientExtensionResults: {}}
+  done = d
+  done.Handle = o.user.id
+  {Credential: json.Text(cred), Device: done}
+end
+
+defn Signed(d, options, t, count = 1, origin = missing, rpId = missing, kind = "webauthn.get", uv = missing, handle = missing, tamper = false)
+  (** The answer of a device to the options of a sign-in (Ceremony.Options): the JSON of its assertion, signed with its
+      key over its data and the hash of the client's data, its counter at count (0: a device that doesn't count). The
+      other arguments change what it says, as a forged or cloned answer would; tamper changes a byte of the signature. *)
+  o = json.Parse(options)!
+  env = t.Env
+  rp = if value.IsMissing(rpId) o.rpId else rpId end
+  data = clientData(kind, o.challenge, if value.IsMissing(origin) env.Settings.Origin else origin end, false)
+  verified = if value.IsMissing(uv) d.Uv else uv end
+  auth = "$(crypto.Sha256(rp, env.Keys))$(text.FromBytes([flagsOf(true, verified, false)]))$(counterOf(count))"
+  signed = "$auth$(crypto.Sha256(data, env.Keys))"
+  sig = if d.Alg == "EdDSA" crypto.Sign(signed, d.Secret, env.Keys) else crypto.SignWith(signed, d.Secret, "ES256", d.Ssl)! end
+  if tamper
+    bytes = text.Bytes(sig)
+    bytes[value.Len(bytes)] = math.Mod(bytes[value.Len(bytes)] + 1, 256)
+    sig = text.FromBytes(bytes)
+  end
+  who = if value.IsMissing(handle) d.Handle else handle end
+  cred = {id: b64u(d.Id), rawId: b64u(d.Id), type: "public-key", response: {clientDataJSON: b64u(data), authenticatorData: b64u(auth), signature: b64u(sig),
+    userHandle: who}, clientExtensionResults: {}}
+  json.Text(cred)
+end
