@@ -45,3 +45,10 @@ allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", 
 [tasks.admin-shot]
 file = "tools/admin-shot.ce"
 allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", "read", "write", "exec", "read=/usr/share/zoneinfo"]
+
+# When the connection drops, in Chrome without a window (CHROME): Chrome's offline mode, a proxy that drops every TCP
+# connection as a change goes, the app restarted on the same database; pictures of each step in OUT (shots/).
+# cesia build --target wasm admin/page.ce first.
+[tasks.drop-shot]
+file = "tools/drop-shot.ce"
+allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", "read", "write", "exec", "read=/usr/share/zoneinfo"]

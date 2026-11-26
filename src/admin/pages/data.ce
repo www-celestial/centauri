@@ -126,16 +126,18 @@ defn editor(thing, kind, p, l, said, asking)
   inputs = [{Field: f, Was: shownValue(dict.Get(f.Name, thing), f), Value: web.Signal(shownValue(dict.Get(f.Name, thing), f))} for f in kind.Fields]
   save = defn ()
     changes = {}
+    seen = {}
     for x in inputs
       if x.Field.Secret != true and web.Get(x.Value) != x.Was
         changes[x.Field.Name] = typed(web.Get(x.Value), x.Field)
+        seen[x.Field.Name] = dict.Get(x.Field.Name, thing)
       end
     end
     if value.Len(changes) == 0
       web.Set(said, web.Signal(result.Err({Message: "Nothing changed."})))
       return missing
     end
-    web.Set(said, Call(api.AdminEdit, {kind: kind.Name, id: thing.Id, Fields: json.Text(changes)}, p))
+    web.Set(said, Call(api.AdminEdit, {kind: kind.Name, id: thing.Id, Fields: json.Text(changes)}, p, base = seen, mine = changes))
     Again(l, web.Get(l.Args))
   end
   own = dict.Get(kind.Name, p.Site.Kinds)

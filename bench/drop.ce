@@ -1,0 +1,149 @@
+(** What the recovery of a dropped connection costs, measured in this program: (1) while online, a live screen's
+    change as a page of version 2 gets it (numbered, kept until the page says it has it) beside version 1 (neither),
+    the same changes pushed to a page that reads them as they come; (2) the memory an action takes while it waits in a
+    page's outbox (Ceres's client, web.Act while the network is cut); (3) the time from the network back to every
+    action waiting answered. Rounds alternate the order; one JSON line a measure:
+    cesia run --allow net,read=/proc/self/status bench/drop.ce [ROUNDS] [CHANGES] [ACTIONS] *)
+use deps/www-celestial/ceres/src/web
+use std/dict
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/live
+use std/math
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket
+
+defn source(n, ended)
+  (** A show of n changes of one row, pushed as fast as the screen takes them. *)
+  ch = fiber.Channel(size = 64)
+  fiber.Spawn(defn ()
+    fiber.Send({Group: 0, Rows: []}, ch)
+    for g in 1..n
+      fiber.Send({Group: g, Added: [{Id: g, Text: "row $g of a show"}], Removed: []}, ch)
+    end
+  end)
+  ch
+end
+
+defn changesSeconds(port, version, n)
+  (** A page of this version that reads a show of n changes to its end: the seconds it took. *)
+  c = websocket.Dial("ws://127.0.0.1:$port/live")!
+  websocket.Send(json.Text({Hello: version}), c)!
+  start = sys.Now()
+  got = 0
+  seq = 0
+  while got < n
+    m = fiber.Receive(c.Messages, timeout = 10)
+    break if result.IsErr(m)
+    t = m.Value
+    if text.StartsWith("[{\"Seq\":", t)
+      seq += 1
+      if math.Mod(seq, 32) == 0
+        _ = websocket.Send(json.Text({Got: seq}), c)
+      end
+    end
+    got += value.Len(text.Split("\"Added\"", t)) - 1
+  end
+  took = sys.Now() - start
+  websocket.Close(c)
+  took
+end
+
+defn outboxBytes(actions)
+  (** The bytes the process holds more for actions waiting in a page's outbox, the network cut, by action. *)
+  l = net.Listen(0, host = "127.0.0.1")!
+  fiber.Spawn(() -> http.Serve(http.App() then live.Route("/live", s -> [], actions = {pay: (s, a) -> a}), listener = l))
+  s = web.Connect("ws://127.0.0.1:1/live", settings = {OutboxCount: actions + 1, OutboxBytes: 1073741824, ReconnectFirst: 60000, ReconnectMax: 60000})
+  p = {Screen: s}
+  before = rss()
+  replies = [web.Act("pay", {Invoice: k, Amount: 120.5}, p) for k in 1..actions]
+  after = rss()
+  web.Close(s)
+  (after - before) / actions
+end
+
+defn rss()
+  (** The memory the process holds, in bytes, as Linux counts it (VmRSS). *)
+  line = list.First([l for l in text.Split("\n", sys.Read("/proc/self/status")!) if text.StartsWith("VmRSS:", l)])
+  text.Number(text.Split(" ", text.Trim(text.ByteSlice(7, text.ByteLength(line), line)))[1]) * 1024
+end
+
+defn backSeconds(actions)
+  (** actions asked while the network is cut, then the network back ("online"): the seconds until every reply came. *)
+  l = net.Listen(0, host = "127.0.0.1")!
+  port = net.Port(l)
+  fiber.Spawn(() -> http.Serve(http.App() then live.Route("/live", s -> [], actions = {pay: (s, a) -> a}), listener = l))
+  front = net.Listen(0, host = "127.0.0.1")!
+  up = fiber.Channel(size = 1)
+  fiber.Send(false, up)
+  fiber.Spawn(defn ()
+    while true
+      page = net.Accept(front)!
+      v = fiber.Receive(up).Value
+      fiber.Send(v, up)
+      if v
+        app = net.Connect("127.0.0.1", port)!
+        fiber.Spawn(() -> pipe(page, app))
+        fiber.Spawn(() -> pipe(app, page))
+      else
+        net.Close(page)
+      end
+    end
+  end)
+  netEvents = fiber.Channel()
+  s = web.Connect("ws://127.0.0.1:$(net.Port(front))/live", net = netEvents, settings = {ReconnectFirst: 60000, ReconnectMax: 60000})
+  p = {Screen: s}
+  replies = [web.Act("pay", {Invoice: k}, p) for k in 1..actions]
+  ui = dict.Put("Screens", [s], web.Start(web.App([web.Route("/", q -> missing)]), 100, 100, {Width: (t, z, f) -> 1, Line: z -> 1}))
+  sys.Sleep(0.3)
+  _ = fiber.Receive(up)
+  fiber.Send(true, up)
+  start = sys.Now()
+  fiber.Send("online", netEvents)
+  while list.Any([value.IsMissing(web.Get(r)) for r in replies]) and sys.Now() - start < 30
+    ui = web.Update(ui)
+    sys.Sleep(0.001)
+  end
+  took = sys.Now() - start
+  web.Close(s)
+  took
+end
+
+defn pipe(from, to)
+  got = net.Read(from)
+  while result.IsOk(got) and got.Value != ""
+    break if result.IsErr(net.Write(to, got.Value))
+    got = net.Read(from)
+  end
+  net.Close(to)
+  net.Close(from)
+end
+
+defn main()
+  args = sys.Args
+  rounds = if value.Len(args) >= 1 text.Number(args[1]) else 21 end
+  changes = if value.Len(args) >= 2 text.Number(args[2]) else 20000 end
+  actions = if value.Len(args) >= 3 text.Number(args[3]) else 100 end
+  l = net.Listen(0, host = "127.0.0.1")!
+  fiber.Spawn(() -> http.Serve(http.App() then live.Route("/live", s -> [live.Show("a", source(changes, s.Ended))]), listener = l))
+  port = net.Port(l)
+  for r in 1..rounds
+    order = if math.Mod(r, 2) == 1 [1, 2] else [2, 1] end
+    for v in order
+      s = changesSeconds(port, v, changes)
+      io.Print(json.Text({Name: "a change to a page of version $v", Round: r, Us: s / changes * 1000000}))
+    end
+    io.Print(json.Text({Name: "an action waiting in the outbox, bytes", Round: r, Bytes: outboxBytes(2000)}))
+    io.Print(json.Text({Name: "back online to $actions actions answered", Round: r, Ms: backSeconds(actions) * 1000}))
+  end
+  sys.Exit(0)
+end
+
+main()

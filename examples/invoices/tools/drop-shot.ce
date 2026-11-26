@@ -1,0 +1,293 @@
+(** When the connection drops, in a browser: the invoices and their admin served in this program (a month of data in
+    memory, src/filled) behind a proxy of std/net that the test drives, and Chrome without a window, driven by its
+    DevTools protocol, playing tools/drop-play.js. The network is cut for real three ways: Chrome's offline mode (as a
+    wifi gone), the proxy dropping every TCP connection as a change goes (a request in flight), and the app restarted
+    (a new process on the same database: its screens forgotten). Each time the page says so in its band, keeps what is
+    asked meanwhile, and carries on without a reload; each change runs once; a change over what someone changed
+    meanwhile is shown as a conflict. A picture of each step, the part of the page it shows, goes to OUT (shots/);
+    CHROME names the browser, its profile is in PROFILE. Build the pages first: cesia build --target wasm admin/page.ce. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/app
+use src/filled
+use src/invoices
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket
+
+defn env(name, default)
+  v = sys.Env(name)
+  if value.IsText(v) and v != "" v else default end
+end
+
+defn ask(conn, id, method, params)
+  (** A command of the DevTools protocol and its result, the messages before it left aside. *)
+  _ = websocket.Send(json.Text({id: id, method: method, params: params}), conn)
+  while true
+    m = json.Parse(fiber.Receive(conn.Messages, timeout = 90)?)?
+    if value.IsDict(m) and "id" in m and m["id"] == id
+      return if "error" in m result.Err({Kind: "cdp", Message: json.Text(m["error"])}) else result.Ok(m["result"]) end
+    end
+  end
+end
+
+defn evaluated(conn, id, expression)
+  (** The value of an expression evaluated in the page, its promise awaited. *)
+  r = ask(conn, id, "Runtime.evaluate", {expression: expression, awaitPromise: true, returnByValue: true})?
+  result.Ok(dict.GetOr("value", "", r["result"]))
+end
+
+defn pictured(conn, id, path, box)
+  (** A picture of a part of the page, in a file: the box the step gave, else the whole page. *)
+  params = {format: "png"}
+  if value.IsDict(box)
+    params.clip = {x: box.X, y: box.Y, width: box.W, height: box.H, scale: 1}
+  end
+  s = ask(conn, id, "Page.captureScreenshot", params)?
+  sys.Write(path, encode.Unbase64(s["data"])?)
+end
+
+defn waitReady(conn, n, start)
+  (** Waits for the page to have loaded its canvas: the next number of a command. *)
+  ready = false
+  k = n
+  while not ready and sys.Now() - start < 90
+    sys.Sleep(0.2)
+    k += 1
+    got = evaluated(conn, k, "document.readyState === 'complete' && !!document.querySelector('canvas')")
+    ready = result.IsOk(got) and got.Value == true
+  end
+  k + 1
+end
+
+defn network(listener, target)
+  (** The proxy between the page and the app: {Cut, To}. Cut() drops every TCP connection it carries; To(port) sends
+      the next ones to another app, as a deploy does. *)
+  state = fiber.Channel(size = 1)
+  fiber.Send({Port: target, Open: []}, state)
+  fiber.Spawn(defn ()
+    while true
+      page = net.Accept(listener)
+      if result.IsOk(page)
+        s = fiber.Receive(state).Value
+        server = net.Connect("127.0.0.1", s.Port)
+        if result.IsOk(server)
+          s.Open = list.Append([page.Value, server.Value], s.Open)
+          fiber.Spawn(() -> pipe(page.Value, server.Value))
+          fiber.Spawn(() -> pipe(server.Value, page.Value))
+        else
+          net.Close(page.Value)
+        end
+        fiber.Send(s, state)
+      end
+    end
+  end)
+  cut = defn ()
+    s = fiber.Receive(state).Value
+    for pair in s.Open
+      net.Close(pair[1])
+      net.Close(pair[2])
+    end
+    fiber.Send({Port: s.Port, Open: []}, state)
+  end
+  to = defn (port)
+    s = fiber.Receive(state).Value
+    s.Port = port
+    fiber.Send(s, state)
+  end
+  {Cut: cut, To: to}
+end
+
+defn pipe(from, to)
+  got = net.Read(from)
+  while result.IsOk(got) and got.Value != ""
+    break if result.IsErr(net.Write(to, got.Value))
+    got = net.Read(from)
+  end
+  net.Close(to)
+  net.Close(from)
+end
+
+defn served(e)
+  (** An app served on a free port: its port. *)
+  l = net.Listen(0, host = "127.0.0.1")!
+  fiber.Spawn(() -> http.Serve(app.App(e), listener = l))
+  net.Port(l)
+end
+
+defn invoiceNamed(office, number, db)
+  (** The invoice of an office (its tenant, as the unpaid table shows it) and number: {Id, Status, PaidAt}. *)
+  rows = cepheus.Find(3, (i, st, t) -> {Where: [[i, invoices.Invoice.Number, text.Number(number)], [i, invoices.Invoice.Tenant, t], [i, invoices.Invoice.Status, st]],
+    Give: {Id: i, Status: st, Tenant: t}}, db)?
+  result.Ok(list.First([r for r in rows if "$(r.Tenant)" == office]))
+end
+
+defn countWhy(what, db)
+  (** How many events of the history say what, as the audit trail keeps each change once. *)
+  rows = cepheus.Find(2, (e, d) -> {Where: [[e, app.Event.Detail, d]], Give: {D: d}}, db)?
+  result.Ok(value.Len([r for r in rows if text.Contains(what, r.D)]))
+end
+
+defn counter(c)
+  (** The next number of a command, from a cell. *)
+  k = fiber.Receive(c).Value
+  fiber.Send(k + 1, c)
+  k
+end
+
+defn said(lines, line)
+  (** A line of a step kept, in a cell of lines, and written at once. *)
+  io.PrintError("drop-shot: $line")
+  fiber.Send(list.Append(line, fiber.Receive(lines).Value), lines)
+end
+
+billOf(got) = if result.IsOk(got) and value.IsDict(got.Value) dict.Get("BillTo", got.Value) else missing end   (* The BillTo of an invoice read. *)
+
+defn play(conn, c, lines, out, step, arg = missing, shot = missing)
+  (** A step of the player: its line kept, and a picture of the part it gave when asked; what it gave. *)
+  got = evaluated(conn, counter(c), "dropPlay($(json.Text(step)), $(json.Text(arg)))")
+  v = if result.IsOk(got) json.Parse(got.Value) else got end
+  x = if result.IsOk(v) and value.IsDict(v.Value) v.Value else {Line: "FAIL $step: $got"} end
+  said(lines, x.Line)
+  if value.IsText(shot)
+    _ = pictured(conn, counter(c), "$out/drop-$shot.png", dict.Get("Box", x))
+  end
+  x
+end
+
+defn offline(conn, c, on)
+  (** Chrome's offline mode on or off, as DevTools' Network conditions. *)
+  _ = ask(conn, counter(c), "Network.emulateNetworkConditions", {offline: on, latency: 0, downloadThroughput: -1, uploadThroughput: -1})
+end
+
+defn main()
+  (** Serves, opens, plays, cuts, pictures: an Ok of the lines of the steps. *)
+  out = env("OUT", "shots")
+  profile = env("PROFILE", "/tmp/centauri-drop-shot")
+  front = net.Listen(0, host = "127.0.0.1")?
+  port = net.Port(front)
+  t = filled.App(port)?
+  proxy = network(front, served(t.Env))
+  _ = sys.Mkdir(out)
+  _ = sys.Remove("$profile/DevToolsActivePort")
+  proc = sys.Start(env("CHROME", "chrome"), args = ["--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "http://127.0.0.1:$port/admin"])?
+  start = sys.Now()
+  while not sys.Exists("$profile/DevToolsActivePort") and sys.Now() - start < 20
+    sys.Sleep(0.05)
+  end
+  debug = text.Split("\n", sys.Read("$profile/DevToolsActivePort")?)[1]
+  targets = json.Parse(http.Fetch("http://127.0.0.1:$debug/json")?.Body)?
+  page = [x for x in targets if x["type"] == "page"][1]
+  conn = websocket.Dial(page["webSocketDebuggerUrl"])?
+  done = fiber.Wait(fiber.Spawn(() -> steps(conn, t, proxy, out)))
+  closed(debug, proc)
+  if result.IsErr(done) result.Err(done.Error) else done.Value end
+end
+
+defn steps(conn, t, proxy, out)
+  (** The steps played in the page, the network cut between them: an Ok of their lines. *)
+  lines = fiber.Channel(size = 1)
+  fiber.Send([], lines)
+  c = fiber.Channel(size = 1)
+  fiber.Send(waitReady(conn, 1, sys.Now()), c)
+  evaluated(conn, counter(c), sys.Read("tools/admin-play.js")?)?
+  said(lines, evaluated(conn, counter(c), "adminPlay('signIn')")?)
+  sys.Sleep(1.5)
+  k = waitReady(conn, counter(c), sys.Now())
+  _ = fiber.Receive(c)
+  fiber.Send(k, c)
+  evaluated(conn, counter(c), sys.Read("tools/admin-play.js")?)?
+  said(lines, evaluated(conn, counter(c), "adminPlay('signedIn')")?)
+  evaluated(conn, counter(c), sys.Read("tools/drop-play.js")?)?
+  _ = ask(conn, counter(c), "Network.enable", {})?
+  play(conn, c, lines, out, "live", shot = "live")
+  chosen = play(conn, c, lines, out, "choose")
+  if env("STOP", "") == "choose"
+    return result.Ok(fiber.Receive(lines).Value)
+  end
+  id = dict.GetOr("Id", 0, chosen)
+  (* 1. the wifi goes: Chrome offline. Two changes asked meanwhile wait, in order, each with its key. *)
+  offline(conn, c, true)
+  play(conn, c, lines, out, "offline")
+  play(conn, c, lines, out, "save", arg = "Renamed while away")
+  play(conn, c, lines, out, "markPaid")
+  play(conn, c, lines, out, "waiting", arg = 2, shot = "offline")
+  play(conn, c, lines, out, "errors")
+  if env("STOP", "") == "waiting"
+    return result.Ok(fiber.Receive(lines).Value)
+  end
+  (* someone else changes the invoice being edited, meanwhile *)
+  _ = cepheus.Write([cepheus.Add(id, invoices.Invoice.BillTo, "Changed by Bruno meanwhile")], t.Db, why = "another admin")
+  sys.Sleep(2)
+  offline(conn, c, false)
+  play(conn, c, lines, out, "back")
+  if env("STOP", "") == "back"
+    play(conn, c, lines, out, "dump")
+    play(conn, c, lines, out, "errors")
+    return result.Ok(fiber.Receive(lines).Value)
+  end
+  play(conn, c, lines, out, "conflict", shot = "conflict")
+  inv = cepheus.Get(invoices.Invoice, id, t.Db)
+  said(lines, if result.IsOk(inv) and value.IsDict(inv.Value) and inv.Value.Status == "paid" "ok the invoice asked paid while away is paid" else "FAIL the invoice asked paid while away: $inv" end)
+  play(conn, c, lines, out, "keepMine")
+  sys.Sleep(1)
+  held = cepheus.Get(invoices.Invoice, id, t.Db)
+  said(lines, if billOf(held) == "Renamed while away" "ok Keep mine wrote the change over the value now" else "FAIL keep mine: $held" end)
+  (* 2. the connection dropped as a change goes: the proxy cuts every TCP connection *)
+  before = countWhy("invoice $id: BillTo", t.Db)?
+  play(conn, c, lines, out, "again", arg = "Cut in flight")
+  proxy.Cut()
+  play(conn, c, lines, out, "back")
+  sys.Sleep(1)
+  if env("STOP", "") == "cut"
+    play(conn, c, lines, out, "dump")
+    play(conn, c, lines, out, "errors")
+    return result.Ok(fiber.Receive(lines).Value)
+  end
+  once = countWhy("invoice $id: BillTo", t.Db)? - before
+  after = cepheus.Get(invoices.Invoice, id, t.Db)
+  said(lines, if billOf(after) == "Cut in flight" and once == 1 "ok the change cut in flight made once" else "FAIL cut in flight: $once $after" end)
+  (* 3. the app restarts (a deploy): a new process on the same database, the proxy sends the page there *)
+  restarted = app.Start(invoices.App, t.Env.Settings, t.Db)?
+  proxy.To(served(restarted))
+  proxy.Cut()
+  play(conn, c, lines, out, "reloaded", shot = "reloaded")
+  play(conn, c, lines, out, "again", arg = "After the restart")
+  play(conn, c, lines, out, "back")
+  sys.Sleep(1)
+  last = cepheus.Get(invoices.Invoice, id, t.Db)
+  said(lines, if billOf(last) == "After the restart" "ok a change after the restart made by the new process" else "FAIL after the restart: $last" end)
+  result.Ok(fiber.Receive(lines).Value)
+end
+
+defn closed(debug, proc)
+  (** The browser closed by its own protocol, its processes with it, then stopped for sure. *)
+  version = http.Fetch("http://127.0.0.1:$debug/json/version")
+  v = if result.IsOk(version) json.Parse(version.Value.Body) else version end
+  whole = if result.IsOk(v) websocket.Dial(v.Value["webSocketDebuggerUrl"]) else v end
+  if result.IsOk(whole)
+    _ = websocket.Send(json.Text({id: 1, method: "Browser.close", params: {}}), whole.Value)
+    sys.Sleep(0.5)
+  end
+  sys.Stop(proc)
+end
+
+got = main()
+if result.IsErr(got)
+  io.PrintError("drop-shot: $(got.Error)")
+  sys.Exit(1)
+end
+for l in got.Value
+  io.Print(l)
+end
+sys.Exit(if list.All([text.StartsWith("ok", l) for l in got.Value]) 0 else 1 end)

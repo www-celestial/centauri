@@ -164,7 +164,9 @@ end
 defn adminEdit(r, x)
   (** PATCH /admin/data/:kind/:id: the fields given of a thing changed, each read through the shape of its type; a
       secret field is never changed, a field the kind hasn't is refused. Cepheus checks the rest (a unique value, the
-      rules), and keeps who changed it and why in its history; the event says which fields, never their values. *)
+      rules), and keeps who changed it and why in its history; the event says which fields, never their values. With
+      the values the admin saw (Centauri-Base, as the data browser sends them), a field changed meanwhile is a
+      conflict (409), never overwritten. *)
   kind = kindNamed(r.Params.kind, r.Env)
   id = IdOf(r.Params.id)
   if value.IsMissing(kind) or value.IsMissing(id)
@@ -201,7 +203,13 @@ defn adminEdit(r, x)
     return Fail(422, "Check the fields.", fields = read.Error)
   end
   changed = dict.Dict([p for p in dict.Pairs(read.Value) if dict.Has(p.Key, given.Value)])
-  cepheus.Update(kind, id, changed, r.Db, by = r.User.Id, why = r.Why)?
+  seen = Unchanged(kind, id, masked(thing, kind), r)?
+  if value.Len(seen) > 0 and list.All([not fields[p.Key].Many and not value.IsMissing(p.Value) for p in dict.Pairs(changed)])
+    (* what the admin saw, checked in the same write: a change made meanwhile refuses it, never overwritten *)
+    cepheus.Write(list.Concat(seen, [cepheus.Add(id, kind[p.Key], p.Value) for p in dict.Pairs(changed)]), r.Db, by = r.User.Id, why = r.Why)?
+  else
+    cepheus.Update(kind, id, changed, r.Db, by = r.User.Id, why = r.Why)?
+  end
   _ = Note(r.Env, "data-edited", "$(r.Params.kind) $id: $(text.Join(", ", dict.Keys(changed))).", user = r.User.Id, ip = r.Ip, route = r.Route)
   result.Ok({Id: id, Fields: json.Text(masked(cepheus.Get(kind, id, r.Db)?, kind))})
 end

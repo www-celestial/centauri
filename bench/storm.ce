@@ -1,0 +1,171 @@
+(** A reconnect storm: 1,000 pages live on one app (Ceres's own client, web.Connect, std/live's version 2 at the app),
+    then the app gone for DOWN seconds as a restart or a deploy makes it, every connection dropped and every new one
+    refused, then back. A proxy between them counts each try: how many reach the app in each 100 ms, the most in one,
+    and the time until 99 % and all pages are back. The waits are drawn at random up to a bound that doubles (full
+    jitter, Brooker 2015); beside the measure, a model of the same pages with the waits of Centauri before (0.25 to 8 s,
+    times 0.5 to 1.5) and with no jitter. cesia run --allow net bench/storm.ce [PAGES] [DOWN]. *)
+use deps/www-celestial/ceres/src/web
+use std/dict
+use std/fiber
+use std/http
+use std/io
+use std/list
+use std/live
+use std/math
+use std/net
+use std/random
+use std/result
+use std/sys
+use std/text
+use std/value
+
+defn proxy(target, log)
+  (** The network: {Port, Down}. Down(seconds) drops every connection and refuses the new ones that long; each try,
+      refused or carried, is a time sent on log. *)
+  l = net.Listen(0, host = "127.0.0.1")!
+  state = fiber.Channel(size = 1)
+  fiber.Send({Until: 0, Open: []}, state)
+  fiber.Spawn(defn ()
+    while true
+      page = net.Accept(l)
+      if result.IsOk(page)
+        fiber.Send(sys.Now(), log)
+        s = fiber.Receive(state).Value
+        if sys.Now() < s.Until
+          net.Close(page.Value)
+        else
+          app = net.Connect("127.0.0.1", target)
+          if result.IsOk(app)
+            s.Open = list.Append([page.Value, app.Value], s.Open)
+            fiber.Spawn(() -> pipe(page.Value, app.Value))
+            fiber.Spawn(() -> pipe(app.Value, page.Value))
+          else
+            net.Close(page.Value)
+          end
+        end
+        fiber.Send(s, state)
+      end
+    end
+  end)
+  down = defn (seconds)
+    s = fiber.Receive(state).Value
+    for pair in s.Open
+      net.Close(pair[1])
+      net.Close(pair[2])
+    end
+    fiber.Send({Until: sys.Now() + seconds, Open: []}, state)
+  end
+  {Port: net.Port(l), Down: down}
+end
+
+defn pipe(from, to)
+  got = net.Read(from)
+  while result.IsOk(got) and got.Value != ""
+    break if result.IsErr(net.Write(to, got.Value))
+    got = net.Read(from)
+  end
+  net.Close(to)
+  net.Close(from)
+end
+
+defn windows(times, from, width = 0.1)
+  (** The tries in each window of width seconds from the time from: a list of counts. *)
+  counts = {}
+  for t in times
+    k = math.Div(math.Floor((t - from) / width), 1)
+    if k >= 0
+      counts[k] = dict.GetOr(k, 0, counts) + 1
+    end
+  end
+  if value.Len(counts) == 0 [] else [dict.GetOr(k, 0, counts) for k in 0..list.Max(dict.Keys(counts))] end
+end
+
+defn model(pages, down, wait)
+  (** The tries of pages after a cut at 0, the app back at down: each page tries after wait(attempt), its attempt
+      counted from 0; a try before down fails at once and waits again. The times of the tries, and the time of each
+      page's first try after down. *)
+  times = []
+  back = []
+  for p in 1..pages
+    t = 0
+    a = 0
+    while true
+      t += wait(a)
+      a += 1
+      times = list.Append(t, times)
+      if t >= down
+        back = list.Append(t, back)
+        break
+      end
+    end
+  end
+  {Times: times, Back: list.Sort(back)}
+end
+
+defn summary(name, times, back, from, pages)
+  (** A line of the measure: the tries, the most in 100 ms, and the times by which 99 % and all pages were back. *)
+  w = windows(times, from)
+  p99 = back[list.Max([1, math.Div(math.Ceil(0.99 * value.Len(back)), 1)])] - from
+  io.Print("$name: $(value.Len(times)) tries for $pages pages, at most $(list.Max(list.Concat([0], w))) in 100 ms, 99 % back after $(math.Round(p99 * 100) / 100) s, all after $(math.Round((back[value.Len(back)] - from) * 100) / 100) s")
+end
+
+defn main()
+  args = sys.Args
+  pages = if value.Len(args) >= 1 text.Number(args[1]) else 1000 end
+  down = if value.Len(args) >= 2 text.Number(args[2]) else 3 end
+  served = net.Listen(0, host = "127.0.0.1")!
+  fiber.Spawn(() -> http.Serve(http.App() then live.Route("/live", s -> []), listener = served))
+  log = fiber.Channel()
+  net0 = proxy(net.Port(served), log)
+  screens = []
+  for k in 1..pages
+    screens = list.Append(web.Connect("ws://127.0.0.1:$(net0.Port)/live"), screens)
+    if math.Mod(k, 50) == 0
+      sys.Sleep(0.05)
+    end
+  end
+  sys.Sleep(3)
+  _ = [x for x in drained(log)]
+  cut = sys.Now()
+  net0.Down(down)
+  sys.Sleep(down + (if value.Len(args) >= 3 text.Number(args[3]) else 40 end))
+  tries = drained(log)
+  ups = [x for x in tries if x >= cut + down]
+  (* each page's first try once the app is back is when it came back: the tries after down, one each, in order *)
+  back = list.Take(pages, list.Sort(ups))
+  summary("measured, full jitter 0.5 s to 30 s", tries, back, cut, pages)
+  full = model(pages, down, a -> random.Float() * list.Min([30, 0.5 * pow2(a)]))
+  summary("model, full jitter 0.5 s to 30 s", full.Times, full.Back, 0, pages)
+  before = model(pages, down, a -> list.Min([8, 0.25 * pow2(a)]) * (0.5 + random.Float()))
+  summary("model, Centauri before (0.25 to 8 s, x0.5 to 1.5)", before.Times, before.Back, 0, pages)
+  none = model(pages, down, a -> list.Min([30, 0.5 * pow2(a)]))
+  summary("model, no jitter 0.5 s to 30 s", none.Times, none.Back, 0, pages)
+  for s in screens
+    web.Close(s)
+  end
+  sys.Exit(0)
+end
+
+defn pow2(a)
+  (** 2 to the power a. *)
+  out = 1
+  k = 0
+  while k < a
+    out *= 2
+    k += 1
+  end
+  out
+end
+
+defn drained(ch)
+  (** The values waiting in a channel. *)
+  out = []
+  while true
+    got = fiber.Receive(ch, timeout = 0)
+    break if result.IsErr(got)
+    out = list.Append(got.Value, out)
+  end
+  out
+end
+
+main()

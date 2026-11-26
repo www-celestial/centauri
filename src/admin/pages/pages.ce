@@ -98,8 +98,10 @@ defn frame(p, m, site)
     web.Set(site.App, Call(api.AdminApp, {}, p))
   end
   web.Stack([
-    web.Row([web.Text(site.Title, font = "strong"), () -> appLine(web.Get(site.App)), web.Spacer(), () -> screenLine(p),
+    web.Row([web.Text(site.Title, font = "strong"), () -> appLine(web.Get(site.App)), web.Spacer(), web.Connection(p),
       web.Text(site.Me.Email, color = gray), web.Button("Sign out", () -> signOut(), key = "C-q")], gap = 12, pad = 6, fill = 0xf2f4f7),
+    () -> againView(web.Get(p.Screen.Status), p, site),
+    web.Conflicts(p),
     web.Row([
       web.Stack([web.Link(x.Title, x.Path) for x in site.Menu], gap = 6, width = 130),
       web.Grow(m.View(q)),
@@ -120,16 +122,27 @@ defn appLine(r)
   web.Text("$(v.Name) $(v.Version) · $(v.Profile) · up $(Span(v.Uptime)) · $(text.Join(", ", v.Modules))", color = gray)
 end
 
-defn screenLine(p)
-  (** Whether the live screen is connected: its problem when it ended. *)
-  if value.IsMissing(p.Screen)
+defn againView(st, p, site)
+  (** When the session ended while the page was away (its screen ends with a 401): the sign-in again in the page, the
+      actions that wait kept, sent once the screen is back; another account drops them (they were not his). *)
+  if st.State != "ended" or not value.IsDict(st.Error) or dict.Get("Status", st.Error) != 401
     return missing
   end
-  e = web.Get(p.Screen.Error)
-  if value.IsSome(e)
-    return web.Row([web.Text("Screen closed: $(Problem(e))", color = red), web.Button("Again", () -> reload())], gap = 6)
-  end
-  if web.Get(p.Screen.Up) web.Text("live", color = green) else web.Text("connecting…", color = amber) end
+  email = web.Signal(site.Me.Email)
+  password = web.Signal("")
+  said = web.Signal("")
+  step = web.Signal(missing)
+  code = web.Signal("")
+  done = () -> web.Again(p.Screen)
+  go = () -> signingIn(email, password, said, step, done = done)
+  send = () -> secondStep(step, code, said, done = done)
+  web.Stack([
+    web.Text("The session ended: sign in again, and the actions that wait go then.", color = red),
+    web.Row([Label("E-mail"), web.Input(email, label = "E-mail", width = 240), Label("Password"), web.Input(password, label = "Password", width = 200, secret = true, onEnter = go),
+      web.Button("Sign in", go)], gap = 8),
+    () -> stepView(web.Get(step), code, send),
+    () -> web.Text(web.Get(said), color = red),
+  ], gap = 6, pad = 8, fill = 0xfdecea, border = red)
 end
 
 defn signOut()
@@ -174,13 +187,15 @@ defn stepView(s, code, send)
   ], gap = 6)
 end
 
-defn secondStep(step, code, said)
-  (** Sends the code of the second step; on success the page loads again, signed in. *)
+defn secondStep(step, code, said, done = reload)
+  (** Sends the code of the second step; on success done(): the page loads again, signed in, by default. *)
   s = web.Get(step)
   got = fetchJson("/auth/second", method = "POST", body = json.Text({Ticket: s.Ticket, Code: text.Trim(web.Get(code))}))
   web.Set(code, "")
   if got.Status >= 200 and got.Status < 300
-    reload()
+    web.Set(step, missing)
+    web.Set(said, "")
+    done()
   else
     d = if value.IsDict(got.Data) got.Data else {} end
     web.Set(said, "$(got.Status) $(dict.GetOr("detail", "The code was refused.", d))")
@@ -190,15 +205,16 @@ defn secondStep(step, code, said)
   end
 end
 
-defn signingIn(email, password, said, step)
-  (** Sends the sign-in; on success the page loads again, signed in; a 401 that asks a second factor opens its
-      step. *)
+defn signingIn(email, password, said, step, done = reload)
+  (** Sends the sign-in; on success done(): the page loads again, signed in, by default; a 401 that asks a second
+      factor opens its step. *)
   web.Set(said, "Signing in…")
   got = fetchJson("/auth/signin", method = "POST", body = json.Text({Email: web.Get(email), Password: web.Get(password)}))
   web.Set(password, "")
   ok = got.Status >= 200 and got.Status < 300
   if ok and value.IsDict(got.Data) and got.Data.Super == true
-    reload()
+    web.Set(said, "")
+    done()
   else if ok
     _ = fetchJson("/auth/signout", method = "POST", body = "{}")
     web.Set(said, "This account is no super-admin of the platform.")
