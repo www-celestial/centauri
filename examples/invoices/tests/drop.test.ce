@@ -1,0 +1,181 @@
+(** The invoices when the connection drops, served on a free port and reached over a real WebSocket as the page reaches
+    them (std/live's version 2): an invoice made while away appears once after, a payment cut in flight is paid once,
+    the unpaid list live misses no change of the break and shows none twice, and a scan whose upload a proxy cuts at
+    60 % goes on from the bytes the app holds. The book's chapter When the connection drops. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/client
+use src/invoices
+use src/invoices/endpoints as e
+use std/bug
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket as ws
+
+lines = [{Label: "Design", Quantity: 3, Price: 400}, {Label: "Hosting", Quantity: 1, Price: 80.5}]
+
+defn office()
+  (** An office served on a free port: its owner Ada (an accountant of her office), a client, two invoices. *)
+  l = net.Listen(0, host = "127.0.0.1")!
+  port = net.Port(l)
+  t = apptest.Start(invoices.App, settings = {Origin: "http://127.0.0.1:$port", UploadPart: 65536})!
+  ada = t.SignUp({Email: "ada@example.com", Password: "correct horse battery", Name: "Ada", Tenant: "Martin & Co"})!
+  am = ada.Call(e.AddClient, {Name: "Ada Martin", Email: "ada@example.com", City: "Lyon"})!
+  one = ada.Call(e.AddInvoice, {Client: am.Id, Date: "2026-10-01", Due: "2026-12-01", Lines: lines})!
+  two = ada.Call(e.AddInvoice, {Client: am.Id, Date: "2026-10-01", Due: "2026-12-01", Lines: lines})!
+  fiber.Spawn(() -> http.Serve(app.App(t.Env), listener = l, timeout = 5, maxBody = 1048576))
+  {T: t, Port: port, Ada: ada, Client: am.Id, One: one, Two: two}
+end
+
+defn screen(o, shows = [], token = missing, got = 0)
+  (** Ada's page's screen of version 2, its first frame read: {Conn, Hello}. *)
+  q = encode.UrlEncode(json.Text(shows))
+  c = ws.Dial("ws://127.0.0.1:$(o.Port)/live?shows=$q", headers = [{Name: "origin", Value: "http://127.0.0.1:$(o.Port)"}, {Name: "cookie", Value: o.Ada.Cookie}])!
+  ws.Send(json.Text(if value.IsMissing(token) {Hello: 2} else {Hello: 2, Token: token, Got: got} end), c)!
+  {Conn: c, Hello: json.Parse(fiber.Receive(c.Messages, timeout = 5)!)![1]}
+end
+
+defn frames(c, seconds = 2)
+  (** The frames that come in seconds, each a list of messages. *)
+  out = []
+  until = sys.Now() + seconds
+  while sys.Now() < until
+    got = fiber.Receive(c.Messages, timeout = until - sys.Now())
+    break if result.IsErr(got)
+    out = list.Append(json.Parse(got.Value)!, out)
+  end
+  out
+end
+
+acksOf(fs) = [m for m in list.Flatten(fs) if dict.Has("Ack", m)]   (* The replies of actions in frames. *)
+
+defn isInvoiceMadeWhileAwayAppearsOnce()
+  (** An invoice asked as the connection drops: the page never got its reply, and sends it again on a new screen with
+      its key. One invoice, number 3, and the reply is the first one's. *)
+  o = office()
+  s = screen(o)
+  ws.Send(json.Text({Act: "POST /invoices", Id: 1, Args: {Client: o.Client, Date: "2026-11-01", Due: "2026-12-15", Lines: lines}, Key: "k-new-invoice"}), s.Conn)!
+  ws.Close(s.Conn)
+  sys.Sleep(0.3)
+  again = screen(o)
+  ws.Send(json.Text({Act: "POST /invoices", Id: 1, Args: {Client: o.Client, Date: "2026-11-01", Due: "2026-12-15", Lines: lines}, Key: "k-new-invoice"}), again.Conn)!
+  replies = acksOf(frames(again.Conn))
+  ws.Close(again.Conn)
+  all = o.Ada.Call(e.Invoices, {})!
+  value.Len(replies) == 1 and replies[1].Ok.Number == 3 and value.Len(all.Rows) == 3
+end
+
+defn isPaymentCutInFlightPaidOnce()
+  (** A payment whose connection drops as it goes, sent again after the break on the screen the app kept (it heard it:
+      not sent again), then on a new one with its key: paid once, one webhook queued, one payment in the month. *)
+  o = office()
+  s = screen(o)
+  ws.Send(json.Text({Act: "POST /invoices/:id/pay", Id: 1, Args: {id: o.One.Id}, Key: "k-pay-one"}), s.Conn)!
+  ws.Close(s.Conn)
+  sys.Sleep(0.3)
+  kept = screen(o, token = s.Hello.Token)
+  bug.Assert(kept.Hello.Resumed == true and kept.Hello.Heard == 1, "the screen kept heard it: $(kept.Hello)")
+  replayed = acksOf(frames(kept.Conn, seconds = 1))
+  ws.Close(kept.Conn)
+  fresh = screen(o)
+  ws.Send(json.Text({Act: "POST /invoices/:id/pay", Id: 1, Args: {id: o.One.Id}, Key: "k-pay-one"}), fresh.Conn)!
+  again = acksOf(frames(fresh.Conn))
+  ws.Close(fresh.Conn)
+  inv = o.Ada.Call(e.Invoice, {id: o.One.Id})!
+  paid = [x for x in o.Ada.Call(e.Dashboard, {})!.Payments if x.Invoice == o.One.Id]
+  replayed[1].Ok.Status == "paid" and again[1].Ok.Status == "paid" and inv.Status == "paid" and value.Len(paid) == 1
+end
+
+defn isUnpaidListLiveMissesNothing()
+  (** The unpaid list live: the page reads it, its connection drops; meanwhile one invoice is paid and two are made
+      elsewhere; the page comes back to its screen and gets those changes, once each, its rows then the unpaid list. *)
+  o = office()
+  s = screen(o, shows = [{Show: "invoices.unpaid", Args: {}}])
+  rows = []
+  seq = 0
+  for f in frames(s.Conn, seconds = 1)
+    seq = if dict.Has("Seq", f[1]) f[1].Seq else seq end
+    for m in f
+      if dict.Has("Rows", m)
+        rows = m.Rows
+      end
+    end
+  end
+  ws.Close(s.Conn)
+  _ = o.Ada.Call(e.Pay, {id: o.Two.Id})!
+  three = o.Ada.Call(e.AddInvoice, {Client: o.Client, Date: "2026-11-02", Due: "2026-12-20", Lines: lines})!
+  four = o.Ada.Call(e.AddInvoice, {Client: o.Client, Date: "2026-11-03", Due: "2026-12-21", Lines: lines})!
+  sys.Sleep(0.5)
+  back = screen(o, shows = [{Show: "invoices.unpaid", Args: {}}], token = s.Hello.Token, got = seq)
+  bug.Assert(back.Hello.Resumed == true, "resumed: $(back.Hello)")
+  added = []
+  removed = []
+  for f in frames(back.Conn, seconds = 1)
+    for m in f
+      if dict.Has("Added", m)
+        added = list.Concat(added, [r.Number for r in m.Added])
+        removed = list.Concat(removed, [r.Number for r in m.Removed])
+        rows = list.Concat([r for r in rows if not (r.Number in [x.Number for x in m.Removed])], m.Added)
+      end
+    end
+  end
+  ws.Close(back.Conn)
+  value.Equal(list.Sort(added), [3, 4]) and value.Equal(removed, [2]) and value.Equal(list.Sort([r.Number for r in rows]), [1, 3, 4])
+end
+
+defn cutting(port, at)
+  (** A network to the app that cuts the first connection after it carried at bytes towards the app: host:port. *)
+  l = net.Listen(0, host = "127.0.0.1")!
+  first = fiber.Channel(size = 1)
+  fiber.Send(true, first)
+  fiber.Spawn(defn ()
+    while true
+      page = net.Accept(l)!
+      to = net.Connect("127.0.0.1", port)!
+      cut = result.IsOk(fiber.Receive(first, timeout = 0))
+      fiber.Spawn(() -> pipe(page, to, if cut at else missing end))
+      fiber.Spawn(() -> pipe(to, page, missing))
+    end
+  end)
+  "127.0.0.1:$(net.Port(l))"
+end
+
+defn pipe(from, to, left)
+  got = net.Read(from)
+  while result.IsOk(got) and got.Value != ""
+    if value.IsSome(left) and text.ByteLength(got.Value) >= left
+      _ = net.Write(to, text.ByteSlice(1, left, got.Value))
+      sys.Sleep(0.2)
+      break
+    end
+    left = if value.IsMissing(left) missing else left - text.ByteLength(got.Value) end
+    break if result.IsErr(net.Write(to, got.Value))
+    got = net.Read(from)
+  end
+  net.Close(to)
+  net.Close(from)
+end
+
+defn isScanUploadResumed()
+  (** A scan of 500,000 bytes whose upload the network cuts at 60 %: client.Upload asks the bytes held and sends the
+      rest; the invoice gets one scan, its bytes those sent. *)
+  o = office()
+  body = "%PDF-1.7\n$(text.Repeat(500000 - 9, "s"))"
+  h = [{Name: "cookie", Value: o.Ada.Cookie}, {Name: "origin", Value: "http://127.0.0.1:$(o.Port)"}]
+  got = client.Upload("http://$(cutting(o.Port, 300000))/invoices/$(o.One.Id)/scan?name=scan.pdf", body, "application/pdf", headers = h)!
+  bug.Assert(got.Status < 300, "uploaded: $(got.Status) $(got.Body)")
+  inv = cepheus.Get(invoices.Invoice, o.One.Id, o.T.Db)!
+  back = client.Download("http://127.0.0.1:$(o.Port)/invoices/$(o.One.Id)/scan", headers = h, part = 200000)!
+  value.IsSome(inv.Scan) and back.Body == body
+end
