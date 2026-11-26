@@ -87,6 +87,49 @@ processor to a request, where it adds 18 in the program: with 256 requests in fl
 waits for the state, and the collector, about an eighth of the server's time in a sampled profile, moves and marks more
 of it.
 
+## The state without a message: Cesia's tables
+
+Centauri's state was a fiber, which each request asked by a message: a round trip of two switches of fiber for its
+session and its limits. Its limits, the sessions it keeps and the values it remembers now live in tables of
+`std/fiber` (Cesia's branch `natives`), which a request reads and counts in place: `fiber.Recall` for its session,
+`fiber.Admit` for its limits, GCRA as before, all of them or none. The same limits, the same bounds (past `keys`, those
+whose time passed go, then those due soonest), and a session read from the database before a sign-out is still kept
+out (`isSessionReadBeforeAForgetKeptOut`); a session the state keeps holds its user's limits, made once. The fiber
+keeps the rest: the log's last lines, the slots of the hashes, the events already written. The same Cesia binary also
+writes `encode.Base64` natively, and runs the slow calls of the hashes on a pool of domains.
+
+`bench/micro.ce`, 21 runs alternated between Centauri's main (92151da on Cesia's main) and this (on Cesia's branch
+`natives`), 2026-11-26, load 3.6 to 6.4, medians in µs with their [min, max]:
+
+| request | main | tables |
+|---|---:|---:|
+| Centauri, public, a JSON of one field | 24.94 [22.60, 48.83] | 22.45 [20.02, 38.97] |
+| Centauri, signed in, a thing by its id (`app.Own`) | 44.76 [41.05, 100.77] | 37.98 [35.10, 59.04] |
+| Centauri, signed in, a page of 20 things | 157.79 [143.75, 376.58] | 142.07 [126.65, 305.04] |
+| std/http, a JSON of one field | 3.59 [3.34, 108.97] | 3.52 [3.28, 44.69] |
+
+The door alone, the state's of main beside the new one in one program, 20,000 calls a run, 21 runs (load 6.4 to 6.9):
+public 3.30 µs [1.94, 16.25] then 2.04 [1.22, 4.04]; signed in 4.42 [3.11, 12.98] then 2.61 [1.60, 11.94]. In a request
+it is worth two or three times that, as the fiber's switches also take the interpreter's caches: 6.8 µs of a signed-in
+request. A page also gains its cursor's Base64, 26.8 µs [23.8, 51.8] by Cesia's loop, 2.1 [1.8, 4.9] native. A sign-in
+by password (Argon2id, 64 MiB, 10 a run, 21 runs, load 7.0 to 7.6) takes 86.3 ms [80.7, 163.1] instead of 93.0 [81.7,
+124.1]: the hash is the whole of it. A start to the first 200 of `bench/serve.ce`, 51.8 ms [49.6, 100.9] instead of
+59.2 [55.1, 134.3] (load 2.4 to 4.3), 31 MB at rest instead of 33: the ranges overlap.
+
+Under load, /hello as above (256 kept connections, 4 threads; the servers on cores 0, 1, 4, 5, the load on the 4
+others; 2 s a measure after 1 s of warming, the four servers in turn, 21 rounds; load 6.1 to 11.2, other jobs ran):
+
+| server | requests/s | p99 | memory |
+|---|---:|---:|---:|
+| std/http | 23,124 [12,186, 30,214] | 19.5 ms | 44 MB |
+| Centauri, main | 10,661 [3,655, 13,597] | 41.1 ms | 58 MB |
+| Centauri, tables | 11,327 [1,565, 12,698] | 34.8 ms | 47 MB |
+| Go 1.26 net/http | 61,819 [17,369, 90,961] | 19.8 ms | 21 MB |
+
+No request failed. The ranges overlap: under load, what a request saves in the program is small beside its share of
+the collector. What the tables change there is the memory: 256 requests in flight no longer wait in the state's
+channel, each with its message and its answer, 11 MB less.
+
 ## The first month: what L2 adds, and what its pieces cost
 
 L2 must not make a request of L1 slower. Measured as L1 was, `bench/micro.ce` in the program, 21 runs alternated
@@ -229,6 +272,6 @@ without polling, a table of 100,000 rows that scrolls and sorts in a frame.
 - L3 (keys of programs, second factors, passkeys, providers, languages, flags) costs a request of L1 1.9 to 2.7 %
   (0.6 to 2.8 µs), within the noise of the ranges; a key of a program costs what a cookie does, a passkey signs in
   sixty times faster than a password.
-- What would take it further needs Cesia: a table of the process shared without a fiber, for the limits and the
-  sessions (the round trip, 6 µs of the 18), and `encode.Base64` as a native (a cursor's 24 µs), both in its core, which
-  is at its ceiling of lines.
+- Cesia's tables took the round trip to the state out of each request (a signed-in one 6.8 µs faster), and its native
+  Base64 a page's 25 µs ([The state without a message](#the-state-without-a-message-cesias-tables)). What is left of
+  Centauri's door is interpreted Cesia: the log line, the metric, the output's shape.

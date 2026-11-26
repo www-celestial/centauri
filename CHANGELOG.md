@@ -91,6 +91,15 @@ sign-up asks its proof of work and counts its address once, at its options. The 
 (`i18n.Catalog(lang, pairs)`, joined by `i18n.Of`), never a dictionary written with texts as keys: a page in
 WebAssembly loads them as the server does.
 
+Speed, on Cesia's branch `natives` (its tables of `std/fiber`, its native `encode.Base64`, its pool of domains for slow
+calls): the state's rate limits, the sessions it keeps and the values it remembers (`Remember`, `Recall`, `Forget`)
+live in tables that a request reads and counts in place, with no message to the state's fiber; a test's clock is a
+table of one key. The same limits (GCRA, all of them or none), the same bounds, the same forget; a kept session holds
+its user's limits, made once. In the program (`bench/micro.ce`, 21 runs, medians): a signed-in request 38.0 µs instead
+of 44.8, a public one 22.5 instead of 24.9, a page 142 instead of 158 ([Speed](docs/book/speed.md)). Tests:
+`isSessionAtItsEndReadAgain`, `isSessionReadBeforeAForgetKeptOut`, `isForgedSessionKeyNobody`. Nothing an app writes
+changes; `env.State` is now a record of the state's channel and tables, where it was the channel.
+
 ## 0.3.0 (not released)
 
 The admin pages. Nothing of 0.2 changes: an app without `admin.Module()` serves what it served; every new field of an

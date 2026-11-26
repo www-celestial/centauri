@@ -96,7 +96,7 @@ is off.
 
 What is set is facts in Cepheus (`centauri_flag`), so every process of every server sees it. Each process reads them
 into its memory at most every `FlagsRefresh` seconds (1 by default; 0 reads them at each question), and its own changes
-at once: asking a flag costs a round trip to the state of the process, not a read of the database. A change made on
+at once: asking a flag costs a read of a table of the process, std/fiber's, not a read of the database. A change made on
 one server is seen on another within `FlagsRefresh` seconds, with no restart (`isChangeSeenByAnotherProcess`).
 
 ## 5. The page asks
