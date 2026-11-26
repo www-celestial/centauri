@@ -25,8 +25,12 @@ use std/text
 use std/value
 
 (** The settings of the admin pages: the path they are served at, as /admin, or off for none (the endpoints stay, for
-    programs). *)
-Settings = {AdminPath: check.Text(1, 200, optional = true, default = "/admin")}
+    programs); their theme, dark (the default), light, or system, which follows the browser's. *)
+Settings = {AdminPath: check.Text(1, 200, optional = true, default = "/admin"),
+  AdminTheme: check.OneOf(["dark", "light", "system"], optional = true, default = "dark")}
+
+(* The background of the page before its first frame, as the theme paints it: no flash of white in the dark. *)
+backs = {dark: "#151515", light: "#d4d4d4", system: "#151515"}
 
 off(env) = env.Settings.AdminPath == "off"   (* Are the pages turned off? *)
 
@@ -62,9 +66,11 @@ defn pagesOf(env, folder, entry, title)
   end
   name = http.Escape(if value.IsMissing(title) "Admin — $(env.App.Name)" else title end)
   ready = sys.Exists("$folder/$entry.wasm")
-  index = if ready "<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>$name</title>\n<link rel=\"stylesheet\" href=\"$path/admin.css\">\n<div id=\"page\"><canvas data-path=\"/\"></canvas></div>\n<script type=\"module\" src=\"$path/$entry.js\"></script>\n"
+  theme = env.Settings.AdminTheme
+  index = if ready "<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>$name</title>\n<link rel=\"stylesheet\" href=\"$path/admin.css\">\n<div id=\"page\"><canvas data-path=\"/\" data-theme=\"$theme\"></canvas></div>\n<script type=\"module\" src=\"$path/$entry.js\"></script>\n"
     else "<!doctype html>\n<meta charset=\"utf-8\">\n<title>$name</title>\n<p>The admin pages are not built: cesia build --target wasm $(http.Escape(folder))/$(http.Escape(entry)).ce\n" end
-  {Path: path, Folder: folder, Files: {"index.html": index, "admin.css": "html, body { margin: 0; height: 100%; background: #fff; }\n#page { width: 100%; height: 100%; }\n"}}
+  light = if theme == "system" "@media (prefers-color-scheme: light) { html, body { background: #d4d4d4; } }\n" else "" end
+  {Path: path, Folder: folder, Files: {"index.html": index, "admin.css": "html, body { margin: 0; height: 100%; background: $(backs[theme]); }\n$light#page { width: 100%; height: 100%; }\n"}}
 end
 
 (* ---- The dashboard: a point each second. *)

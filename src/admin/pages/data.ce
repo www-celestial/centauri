@@ -15,7 +15,7 @@ defn Data(p)
   (** The kinds of the app, or the things of one (/data/:kind). *)
   name = dict.Get("kind", p.Params)
   if value.IsSome(name)
-    return web.Stack([web.Row([web.Link(Say("Data"), "/data"), web.Text("›", color = gray), web.Title(kindTitle(name, p))], gap = 8), Things(p, name)], gap = 8)
+    return web.Stack([web.Row([web.Link(Say("Data"), "/data"), web.Text("›", color = gray), web.Title(kindTitle(name, p))], gap = 8), web.Grow(Things(p, name))], gap = 8)
   end
   kinds = Call(api.AdminKinds, {}, p)
   web.Stack([
@@ -46,7 +46,7 @@ defn Things(p, name, height = 380)
   l = Lister(api.AdminData, {kind: name}, p, each = parsed)
   rows = ListRows(l)
   web.Stack([
-    Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, l, rows, height)),
+    web.Grow(Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, l, rows, height))),
   ], gap = 8)
 end
 
@@ -70,13 +70,14 @@ defn thingsOf(kind, p, l, rows, height)
   table = web.Table(rows, columnsOf(kind, p), height = height, label = kind.Name)
   said = web.Signal(missing)
   asking = web.Signal(missing)
-  web.Stack([
-    table,
-    ListState(l, rows),
-    () -> editor(Chosen(table, rows), kind, p, l, said, asking),
-    Question(asking),
-    () -> said1(web.Get(said)),
-  ], gap = 8)
+  view = () -> editor(Chosen(table, rows), kind, p, l, said, asking)
+  site = dict.Get("Site", p)
+  if value.IsDict(site) and "Detail" in site
+    (* in the dock: the thing chosen in the details at the right, the table the height of the page *)
+    web.Set(site.Detail, view)
+    return web.Stack([web.Grow(table), ListState(l, rows)], gap = 4)
+  end
+  web.Stack([table, ListState(l, rows), view, Question(asking), () -> said1(web.Get(said))], gap = 8)
 end
 
 defn shownValue(v, f)
@@ -142,18 +143,33 @@ defn editor(thing, kind, p, l, said, asking)
   end
   own = dict.Get(kind.Name, p.Site.Kinds)
   acts = if value.IsMissing(own) [] else own.Actions end
-  web.Stack([
-    web.Row([web.Text("$(kind.Name) $(thing.Id)", font = "strong"), web.Button(Say("Save"), save, key = "C-s"),
-      web.Row([action(a, thing, p, said, asking, l) for a in acts], gap = 6)], gap = 10),
-    web.Stack([fieldRow(x, save) for x in inputs], gap = 4),
-  ], gap = 6, pad = 8, border = 0xd0d5dd)
+  web.Inspector([
+    web.Row([web.Button(Say("Save"), save, key = "C-s", icon = "save"), web.Row([action(a, thing, p, said, asking, l) for a in acts], gap = 6)], gap = 6),
+    Question(asking),
+    () -> said1(web.Get(said)),
+    web.Section("$(kindTitle(kind.Name, p)) $(thing.Id)", [fieldRow(x, save, said) for x in inputs]),
+  ])
 end
 
-defn fieldRow(x, save)
-  (** A field of the editor: its name, its input (or "(secret)"), its type. *)
+defn fieldRow(x, save, said)
+  (** A field of the editor: its name, its input (or "(secret)"), its type, and what the server found wrong with it
+      at the last save. *)
   f = x.Field
-  box = if f.Secret == true web.Text(Say("(secret)"), color = gray) else web.Input(x.Value, label = f.Name, width = 420, onEnter = save) end
-  web.Row([Label(f.Name, width = 120), box, web.Text("$(f.Type)$(if f.Many " $(Say("list"))" else "" end)$(if f.Unique " $(Say("unique"))" else "" end)", color = gray)], gap = 8)
+  box = if f.Secret == true web.Text(Say("(secret)"), color = gray) else web.Input(x.Value, label = f.Name, onEnter = save, invalid = () -> fieldWrong(said, f.Name) != "") end
+  web.Property(f.Name, box, note = "$(f.Type)$(if f.Many " $(Say("list"))" else "" end)$(if f.Unique " $(Say("unique"))" else "" end)",
+    error = () -> fieldWrong(said, f.Name))
+end
+
+defn fieldWrong(said, name)
+  (** What the server found wrong with a field at the last save, in the pages' language, or "". *)
+  r = web.Get(said)
+  got = if web.IsSignal(r) web.Get(r) else r end
+  if value.IsMissing(got) or not result.IsErr(got) or not value.IsDict(got.Error)
+    return ""
+  end
+  fields = dict.GetOr("Fields", {}, got.Error)
+  m = if value.IsDict(fields) dict.Get(name, fields) else missing end
+  if value.IsText(m) Say(m) else "" end
 end
 
 defn action(a, thing, p, said, asking, l)

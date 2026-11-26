@@ -17,8 +17,11 @@ use std/sys
 use std/value
 
 defn App(port, rows = 0)
-  (** The app in memory, its data made, ready to serve on port: an Ok of its test t. *)
-  t = apptest.Start(invoices.App, settings = {Origin: "http://127.0.0.1:$port", AdminPath: "/admin", LogRequests: "false"}, now = missing)?
+  (** The app in memory, its data made, ready to serve on port: an Ok of its test t. Its admin pages take the theme
+      that APP_ADMIN_THEME names, dark by default. *)
+  theme = sys.Env("APP_ADMIN_THEME")
+  t = apptest.Start(invoices.App, settings = {Origin: "http://127.0.0.1:$port", AdminPath: "/admin", LogRequests: "false",
+    AdminTheme: if value.IsText(theme) and theme != "" theme else "dark" end}, now = missing)?
   boss = t.Super()?
   offices = [["ada@example.com", "Ada", "Martin & Co"], ["bruno@example.com", "Bruno", "Bruno Conseil"], ["chloe@example.com", "Chloé", "Atelier Chloé"],
     ["dan@example.com", "Dan", "Dan & Fils"], ["eva@example.com", "Eva", "Eva Studio"]]

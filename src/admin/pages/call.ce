@@ -101,11 +101,11 @@ end
 
 narrow = text.Char(0x202F)   (* The narrow no-break space that French puts between thousands. *)
 
-(* The colors of the pages, as 0xRRGGBB: what is wrong, what waits, what is fine, and the gray of what explains. *)
-red = 0xb3261e
-amber = 0x8a5a00
-green = 0x1e6b2e
-gray = 0x5f6670
+(* The colors of the pages, roles of the theme: what is wrong, what waits, what is fine, and the gray of what explains. *)
+red = "Danger"
+amber = "Warn"
+green = "Ok"
+gray = "Muted"
 
 (** Calls an endpoint of the app through the live screen of the page, as any client: a signal of its reply, missing
     until it comes, then an Ok of its value or an Err of its problem. The app checks the session, the role, the limits
@@ -357,5 +357,5 @@ defn question(q, asking)
   web.Row([web.Text(Say("{Label}?", {Label: q.Label}), font = "strong"), web.Button(Say("Yes"), defn ()
     web.Set(asking, missing)
     q.Run()
-  end, key = "C-y"), web.Button(Say("No"), () -> web.Set(asking, missing))], gap = 8, pad = 6, fill = 0xfff4e5, border = amber)
+  end, key = "C-y", icon = "check"), web.Button(Say("No"), () -> web.Set(asking, missing), icon = "close")], gap = 8, pad = 6, fill = "Header", border = amber)
 end

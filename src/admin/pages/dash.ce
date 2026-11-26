@@ -16,30 +16,43 @@ defn Dashboard(p)
   stats = Call(api.AdminStats, {}, p)
   web.Stack([
     web.Title(Say("Dashboard")),
-    Replied(stats, s -> web.Row([tile(Say("Users"), s.Users), tile(Say("Tenants"), s.Tenants), tile(Say("Sessions"), s.Sessions), tile(Say("Requests"), s.Requests),
-      tile(Say("Refused"), s.Refused), tile(Say("Failed sign-ins/min"), s.Failures)], gap = 8)),
+    (* the counts in two rows of three, so that the longest name keeps one line in a center of 600 pixels *)
+    Replied(stats, s -> web.Stack([
+      web.Row([web.Grow(tile(Say("Users"), s.Users, "person")), web.Grow(tile(Say("Tenants"), s.Tenants, "organization")), web.Grow(tile(Say("Sessions"), s.Sessions, "account"))], gap = 4),
+      web.Row([web.Grow(tile(Say("Requests"), s.Requests, "pulse")), web.Grow(tile(Say("Refused"), s.Refused, "shield")), web.Grow(tile(Say("Failed sign-ins/min"), s.Failures, "lock"))], gap = 4),
+    ], gap = 4)),
     () -> nowLine(web.Get(points)),
     web.Row([
-      web.Plot(() -> lines(web.Get(points), [["Requests", Say("requests/s"), "#1f5fbf"], ["Errors", Say("5xx/s"), "#b3261e"]], Say("Requests a second"), "/s"), height = 210, width = 520,
-        label = Say("Requests a second")),
-      web.Plot(() -> lines(web.Get(points), [["P50", "p50", "#1e6b2e"], ["P99", "p99", "#8a5a00"]], Say("Time of a request (ms)"), "ms"), height = 210, width = 520,
-        label = Say("Time of a request")),
-    ], gap = 12, align = "start"),
+      web.Grow(web.Plot(() -> lines(web.Get(points), [["Requests", Say("requests/s"), blue], ["Errors", Say("5xx/s"), rose]], Say("Requests a second"), "/s"), height = 210,
+        label = Say("Requests a second"))),
+      web.Grow(web.Plot(() -> lines(web.Get(points), [["P50", "p50", teal], ["P99", "p99", gold]], Say("Time of a request (ms)"), "ms"), height = 210,
+        label = Say("Time of a request"))),
+    ], gap = 4, align = "start"),
     web.Row([
-      web.Plot(() -> lines(web.Get(points), [["Origin", Say("other site"), "#b3261e"], ["Limit", Say("limit"), "#8a5a00"], ["Signin", Say("no session"), "#5f6670"],
-        ["Role", Say("role"), "#6a3fb3"], ["Failures", Say("failed sign-ins/min"), "#1f5fbf"]],
-        Say("Refused at the door, and failed sign-ins"), "/s"), height = 210, width = 520, label = Say("Refusals and bots")),
-      web.Plot(() -> lines(web.Get(points), [["Ready", Say("ready"), "#1f5fbf"], ["Running", Say("running"), "#1e6b2e"], ["Dead", Say("dead"), "#b3261e"]], Say("Jobs"), Say("jobs")), height = 210, width = 520,
-        label = Say("Jobs")),
-    ], gap = 12, align = "start"),
+      web.Grow(web.Plot(() -> lines(web.Get(points), [["Origin", Say("other site"), rose], ["Limit", Say("limit"), gold], ["Signin", Say("no session"), slate],
+        ["Role", Say("role"), violet], ["Failures", Say("failed sign-ins/min"), blue]],
+        Say("Refused at the door, and failed sign-ins"), "/s"), height = 210, label = Say("Refusals and bots"))),
+      web.Grow(web.Plot(() -> lines(web.Get(points), [["Ready", Say("ready"), blue], ["Running", Say("running"), teal], ["Dead", Say("dead"), rose]], Say("Jobs"), Say("jobs")), height = 210,
+        label = Say("Jobs"))),
+    ], gap = 4, align = "start"),
     web.Text(Say("Last events"), font = "strong"),
     () -> lastEvents(web.Get(events)),
   ], gap = 10)
 end
 
-defn tile(name, n)
-  (** A count in a box: its number, large, and what it counts. *)
-  web.Stack([web.Text(Num(n), size = 20, font = "code"), web.Text(name, color = gray)], gap = 2, pad = 8, border = 0xd0d5dd, width = 150)
+(* The colors of the lines of the graphs: mid tones that keep a contrast of 3:1 on the dark theme's paper and on the
+   light one's (WCAG 2.2, 1.4.11), told apart by their hue. *)
+blue = "#4b8df8"
+rose = "#e5484d"
+teal = "#30a46c"
+gold = "#b8800f"
+violet = "#8e6cf0"
+slate = "#8a8f98"
+
+defn tile(name, n, icon)
+  (** A count in a box, on one line: its icon and what it counts at the left, its number large at the right. *)
+  web.Row([web.Icon(icon, color = "Muted"), web.Text(name, color = gray), web.Spacer(), web.Text(Num(n), size = 20, font = "code")], gap = 6, pad = 8,
+    fill = "Header", border = "Edge")
 end
 
 defn sorted(points)
