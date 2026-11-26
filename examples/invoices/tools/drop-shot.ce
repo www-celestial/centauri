@@ -5,7 +5,9 @@
     (a new process on the same database: its screens forgotten). Each time the page says so in its band, keeps what is
     asked meanwhile, and carries on without a reload; each change runs once; a change over what someone changed
     meanwhile is shown as a conflict. A picture of each step, the part of the page it shows, goes to OUT (shots/);
-    CHROME names the browser, its profile is in PROFILE. Build the pages first: cesia build --target wasm admin/page.ce. *)
+    CHROME names the browser, its profile is in PROFILE; LANG, en by default, is the language of the browser (with fr
+    the pages speak French, and the player reads them in French). Build the pages first: cesia build --target wasm
+    admin/page.ce. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use deps/www-celestial/centauri/src/app
 use src/filled
@@ -180,7 +182,8 @@ defn main()
   _ = sys.Mkdir(out)
   _ = sys.Remove("$profile/DevToolsActivePort")
   proc = sys.Start(env("CHROME", "chrome"), args = ["--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
-    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "http://127.0.0.1:$port/admin"])?
+    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "--lang=$(env("LANG", "en"))", "--accept-lang=$(env("LANG", "en"))",
+    "http://127.0.0.1:$port/admin"])?
   start = sys.Now()
   while not sys.Exists("$profile/DevToolsActivePort") and sys.Now() - start < 20
     sys.Sleep(0.05)

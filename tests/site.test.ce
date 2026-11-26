@@ -1,0 +1,14 @@
+(** The site of Centauri as cesia doc --site builds it, its book in English and in French: a French page that drifts
+    from its English page (its headings, its blocks of code byte for byte, its links), a link that leads nowhere, a
+    Cesia block of the book that doesn't check, a name of the reference that names nothing, each fails it, as it fails
+    the sites of Cesia and Cepheus. The cesia of the PATH builds it, in .cesia/site. *)
+use std/bug
+use std/sys
+
+defn isSiteBuiltWithoutDrift()
+  p = sys.Start("cesia", args = ["doc", "--site", ".cesia/site"])!
+  out = sys.ReadOutput(p)
+  code = sys.WaitExit(p)
+  bug.Assert(code == 0, "cesia doc --site: $code\n$out")
+  true
+end

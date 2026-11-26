@@ -42,23 +42,24 @@ key = "k"
 
 ## 1. La ligne qui le dit
 
-Le bandeau des pages d'admin montre, à sa droite et en mots, l'état de la connexion de la page à son app :
+Le bandeau des pages d'admin montre, à sa droite et en mots, l'état de la connexion de la page à son app (ici les pages
+en français : chaque texte de la ligne passe par le catalogue, `pages.Words`) :
 
-![Le bandeau des pages d'admin : « Invoices — admin », le nom et la version de l'app, puis « Live » en vert, l'e-mail du super-admin et Sign out.](images/drop-live.png)
+![Le bandeau des pages d'admin : « Factures — administration », le nom et la version de l'app, puis « Direct » en vert, l'e-mail du super-admin et Se déconnecter.](images/drop-live.png)
 
 La ligne est `web.Connection(p)`, un *widget* de Ceres (un élément d'écran tout prêt) que toute page peut montrer ;
 une page en JavaScript reçoit le même état par `live.onStatus`. Elle dit, par ordre d'importance :
 
 | la ligne | quand |
 |---|---|
-| `Live` (« en direct ») | connectée, rien n'attend |
-| `Live — sending 2 actions…` (« en direct — envoi de 2 actions… ») | revenue, les actions demandées entre-temps sont en route |
-| `Live — back after a break, nothing missed` (« en direct — de retour après une coupure, rien de manqué ») | revenue sur le screen que l'app a gardé : chaque changement de la coupure est arrivé, une fois |
-| `Live — back after a break, data reloaded` (« en direct — de retour après une coupure, données rechargées ») | revenue sur un nouveau screen (l'app a redémarré, ou la coupure a trop duré) : les listes sont relues, pas la page |
-| `Offline — 2 actions waiting · next try in 4 s` (« hors ligne — 2 actions en attente · prochain essai dans 4 s »), bouton **Try now** (« essayer maintenant ») | coupée : les actions attendent, la page réessaie d'elle-même |
-| `Offline, no network — …` (« hors ligne, pas de réseau — … ») | pareil, quand le navigateur lui-même dit qu'il n'a pas de réseau |
-| `Signed out — sign in again, 2 actions kept` (« déconnectée — reconnectez-vous, 2 actions gardées ») | la session a pris fin pendant que la page était absente : la page demande de se reconnecter, et garde les actions pour après |
-| `Screen closed: …` (« screen fermé : … »), bouton **Again** (« recommencer ») | l'app a refusé le screen pour une autre raison |
+| Direct | connectée, rien n'attend |
+| Direct — envoi de 2 actions… | revenue, les actions demandées entre-temps sont en route |
+| Direct — de retour après une coupure, rien de manqué | revenue sur le screen que l'app a gardé : chaque changement de la coupure est arrivé, une fois |
+| Direct — de retour après une coupure, données rechargées | revenue sur un nouveau screen (l'app a redémarré, ou la coupure a trop duré) : les listes sont relues, pas la page |
+| Hors ligne — 2 actions en attente · prochain essai dans 4 s, bouton **Réessayer maintenant** | coupée : les actions attendent, la page réessaie d'elle-même |
+| Hors ligne, pas de réseau — … | pareil, quand le navigateur lui-même dit qu'il n'a pas de réseau |
+| Déconnecté — reconnectez-vous, 2 actions gardées | la session a pris fin pendant que la page était absente : la page demande de se reconnecter, et garde les actions pour après |
+| Écran fermé : … , bouton **Réessayer** | l'app a refusé le screen pour une autre raison |
 
 ## 2. Le réseau part
 
@@ -72,7 +73,7 @@ La comptable continue de travailler : elle change le nom du client sur une factu
 payée. La page montre ce qu'elle montrait avant (une liste demandée à nouveau garde ses lignes jusqu'à l'arrivée des
 nouvelles), et les deux changements attendent :
 
-![Le bandeau pendant la coupure du réseau : « Offline, no network — 2 actions waiting · next try in 7 s » en orange, et le bouton Try now.](images/drop-offline.png)
+![Le bandeau pendant la coupure du réseau : « Hors ligne, pas de réseau — 2 actions en attente · prochain essai dans 2 s » en orange, et le bouton Réessayer maintenant.](images/drop-offline.png)
 
 Chaque action attend **dans l'ordre**, avec une **Idempotency-Key** créée au moment où elle a été demandée : un nom
 tiré au hasard, de 128 bits, que l'app garde avec la réponse de l'action, pour que la même action envoyée à nouveau
@@ -86,7 +87,7 @@ La page réessaie après une attente tirée au hasard entre 0 et une borne qui d
 échec, le *full jitter* le tirage au hasard de toute cette attente. Ainsi, quand une app redémarre, ses mille pages ne
 reviennent pas toutes au même instant, ce qui la ferait tomber à nouveau ([mesuré](#9-ce-que-cela-coûte)). La page
 réessaie aussitôt quand le navigateur dit qu'il est de nouveau en ligne, quand son onglet est de nouveau affiché, ou
-sur **Try now**.
+sur **Réessayer maintenant**.
 
 ## 3. Le réseau revient
 
@@ -102,17 +103,17 @@ Puis les deux changements partent, dans l'ordre. Le paiement est fait une fois. 
 Bruno, dans un autre bureau, a renommé le client entre-temps. La page le montre, avec la valeur vue, la valeur
 actuelle et la sienne, et les deux choix :
 
-![Le bandeau dit « Live — back after a break, nothing missed » ; dessous, dans un cadre, « PATCH /admin/data/:kind/:id was refused: This changed meanwhile: see its values now. », le champ BillTo, « seen Client 1 », « now Changed by Bruno meanwhile » en rouge, « yours Renamed while away », et les boutons Keep mine et Take theirs.](images/drop-conflict.png)
+![Le bandeau dit « Direct — de retour après une coupure, rien de manqué » ; dessous, dans un cadre, « PATCH /admin/data/:kind/:id a été refusée : Cela a changé entre-temps : voyez ses valeurs maintenant. », le champ BillTo, « vu Client 1 », « maintenant Changed by Bruno meanwhile » en rouge, « le vôtre Renamed while away », et les boutons Garder le mien et Prendre le leur.](images/drop-conflict.png)
 
-**Keep mine** (« garder le mien ») renvoie le changement par-dessus la valeur actuelle ; **Take theirs** (« prendre le
-leur ») l'abandonne. Rien n'est écrasé en silence.
+**Garder le mien** renvoie le changement par-dessus la valeur actuelle ; **Prendre le leur** l'abandonne. Rien n'est
+écrasé en silence.
 
 Quand l'app n'a pas pu garder le screen (elle a redémarré, elle a été redéployée, la page est arrivée sur un autre
 serveur derrière le répartiteur de charge, la coupure a duré plus que `ResumeTime`, ou plus de `ResumeBytes` de
 frames attendaient), la page reçoit un nouveau screen : ses listes sont relues, la page non, et la ligne le dit. Les
 actions en attente y sont envoyées, chacune avec sa clé, qui la fait tourner une fois quoi qu'il se soit passé avant :
 
-![Le bandeau après le redémarrage de l'app : « Live — back after a break, data reloaded » en vert.](images/drop-reloaded.png)
+![Le bandeau après le redémarrage de l'app : « Direct — de retour après une coupure, données rechargées » en vert.](images/drop-reloaded.png)
 
 ## 4. Le même compte, depuis n'importe quelle adresse
 

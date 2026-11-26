@@ -37,17 +37,17 @@ defn Events(p)
   end
   shown = web.Memo(() -> if web.Get(live) filtered(web.Get(tailRows), web.Get(kind), web.Get(route)) else web.Get(rows) end)
   web.Stack([
-    web.Title("Events"),
-    web.Row([Label("Kind", width = 40), web.Input(kind, label = "Kind", width = 120, onEnter = find), Label("User id", width = 55), web.Input(user, label = "User id", width = 90, onEnter = find),
-      Label("Tenant id", width = 65), web.Input(tenant, label = "Tenant id", width = 90, onEnter = find), Label("Route", width = 45), web.Input(route, label = "Route", width = 160, onEnter = find)], gap = 6),
-    web.Row([Label("From", width = 40), web.Input(since, label = "From", placeholder = "2026-11-25 08:00", width = 150, onEnter = find), Label("to", width = 20),
-      web.Input(until, label = "To", placeholder = "2026-11-26", width = 150, onEnter = find), web.Button("Search", find, key = "C-f"),
-      web.Button("Live", () -> web.Set(live, not web.Get(live)), key = "C-l"), () -> web.Text(if web.Get(live) "live: the last hour, as it comes" else "history" end, color = green if web.Get(live) else gray)], gap = 6),
-    web.Table(shown, [web.Column("At", e -> Local(e.At), sort = "At", width = 170), web.Column("Kind", e -> e.Kind, sort = "Kind", width = 120),
-      web.Column("User", e -> Cell(dict.Get("User", e)), sort = "User", width = 80), web.Column("Tenant", e -> Cell(dict.Get("Tenant", e)), sort = "Tenant", width = 80),
-      web.Column("Address", e -> e.Ip, sort = "Ip", width = 130), web.Column("Route", e -> e.Route, sort = "Route", width = 200), web.Column("What", e -> e.Detail)],
-      height = 460, label = "Events"),
-    () -> if web.Get(live) web.Text("$(value.Len(web.Get(shown))) events in the last hour.", color = gray) else ListState(l, rows)() end,
+    web.Title(Say("Events")),
+    web.Row([Label(Say("Kind"), width = 40), web.Input(kind, label = Say("Kind"), width = 120, onEnter = find), Label(Say("User id"), width = 55), web.Input(user, label = Say("User id"), width = 90, onEnter = find),
+      Label(Say("Tenant id"), width = 65), web.Input(tenant, label = Say("Tenant id"), width = 90, onEnter = find), Label(Say("Route"), width = 45), web.Input(route, label = Say("Route"), width = 160, onEnter = find)], gap = 6),
+    web.Row([Label(Say("From"), width = 40), web.Input(since, label = Say("From"), placeholder = Say("2026-11-25 08:00"), width = 150, onEnter = find), Label(Say("to"), width = 20),
+      web.Input(until, label = Say("To"), placeholder = Say("2026-11-26"), width = 150, onEnter = find), web.Button(Say("Search"), find, key = "C-f"),
+      web.Button(Say("Live"), () -> web.Set(live, not web.Get(live)), key = "C-l"), () -> web.Text(if web.Get(live) Say("live: the last hour, as it comes") else Say("history") end, color = green if web.Get(live) else gray)], gap = 6),
+    web.Table(shown, [web.Column(Say("At"), e -> Local(e.At), sort = "At", width = 170), web.Column(Say("Kind"), e -> e.Kind, sort = "Kind", width = 120),
+      web.Column(Say("User"), e -> Cell(dict.Get("User", e)), sort = "User", width = 80), web.Column(Say("Tenant"), e -> Cell(dict.Get("Tenant", e)), sort = "Tenant", width = 80),
+      web.Column(Say("Address"), e -> e.Ip, sort = "Ip", width = 130), web.Column(Say("Route"), e -> e.Route, sort = "Route", width = 200), web.Column(Say("What"), e -> e.Detail)],
+      height = 460, label = Say("Events")),
+    () -> if web.Get(live) web.Text(Say("{N} events in the last hour.", {N: Num(value.Len(web.Get(shown)))}), color = gray) else ListState(l, rows)() end,
   ], gap = 8)
 end
 
@@ -59,8 +59,9 @@ defn filtered(rows, kind, route)
 end
 
 defn Iso(s)
-  (** A time typed in the viewer's zone, as 2026-11-25 or 2026-11-25 08:00, as ISO 8601 in UTC, or missing. *)
-  t = text.Trim(s)
+  (** A time typed in the viewer's zone, as 2026-11-25 or 2026-11-25 08:00, or day first as France writes it,
+      25/11/2026 08:00, as ISO 8601 in UTC, or missing. *)
+  t = DayFirst(text.Trim(s))
   if t == ""
     return missing
   end
@@ -86,14 +87,14 @@ defn Logs(p)
   end
   rows = web.Memo(() -> logRows(web.Get(live), web.Get(tailRows), web.Get(web.Get(got)), web.Get(level), web.Get(search)))
   web.Stack([
-    web.Title("Log"),
-    web.Row([Label("Level", width = 40), web.Select(level, ["info", "warn", "error"], x -> x, x -> x, placeholder = "any", name = "Level", width = 100),
-      Label("Holds", width = 40), web.Input(search, label = "Holds", width = 240, onEnter = find), web.Button("Search", find, key = "C-f"),
-      web.Button("Live", () -> web.Set(live, not web.Get(live)), key = "C-l"),
-      () -> web.Text(if web.Get(live) "live: each line as it is written" else "the lines kept" end, color = green if web.Get(live) else gray)], gap = 6),
-    web.Table(rows, [web.Column("At", x -> Local(x.At), sort = "At", width = 170), web.Column("Level", x -> x.Level, sort = "Level", width = 60),
-      web.Column("Message", x -> x.Message, sort = "Message", width = 180), web.Column("Fields", x -> x.Fields)], height = 500, label = "Log"),
-    () -> web.Text("$(value.Len(web.Get(rows))) lines of this process (each server keeps its own).", color = gray),
+    web.Title(Say("Log")),
+    web.Row([Label(Say("Level"), width = 40), web.Select(level, ["info", "warn", "error"], x -> x, x -> x, placeholder = Say("any"), name = Say("Level"), width = 100),
+      Label(Say("Holds"), width = 40), web.Input(search, label = Say("Holds"), width = 240, onEnter = find), web.Button(Say("Search"), find, key = "C-f"),
+      web.Button(Say("Live"), () -> web.Set(live, not web.Get(live)), key = "C-l"),
+      () -> web.Text(if web.Get(live) Say("live: each line as it is written") else Say("the lines kept") end, color = green if web.Get(live) else gray)], gap = 6),
+    web.Table(rows, [web.Column(Say("At"), x -> Local(x.At), sort = "At", width = 170), web.Column(Say("Level"), x -> x.Level, sort = "Level", width = 60),
+      web.Column(Say("Message"), x -> x.Message, sort = "Message", width = 180), web.Column(Say("Fields"), x -> x.Fields)], height = 500, label = Say("Log")),
+    () -> web.Text(Say("{N} lines of this process (each server keeps its own).", {N: Num(value.Len(web.Get(rows)))}), color = gray),
   ], gap = 8)
 end
 
@@ -113,12 +114,12 @@ defn Audit(p)
   find = () -> web.Set(asked, [Call(api.AdminEvents, {Kind: k}, p) for k in (if value.IsMissing(web.Get(kind)) audited else [web.Get(kind)] end)])
   rows = web.Memo(() -> list.Reverse(list.SortBy(e -> Seconds(e.At), list.Flatten([rowsOf(web.Get(s)) for s in web.Get(asked)]))))
   web.Stack([
-    web.Title("Audit trail"),
-    web.Text("Each change a super-admin made, with who made it (the user of the event), from where and by which route. Cepheus keeps every write in its history too, with who wrote it and why.", color = gray),
-    web.Row([Label("Change", width = 50), web.Select(kind, audited, x -> x, x -> x, placeholder = "all", name = "Change", width = 160), web.Button("Show", find, key = "C-f")], gap = 6),
-    web.Table(rows, [web.Column("At", e -> Local(e.At), sort = "At", width = 170), web.Column("Change", e -> e.Kind, sort = "Kind", width = 110),
-      web.Column("By", e -> Cell(dict.Get("User", e)), sort = "User", width = 70), web.Column("Address", e -> e.Ip, width = 130),
-      web.Column("Route", e -> e.Route, width = 230), web.Column("What", e -> e.Detail)], height = 480, label = "Audit trail"),
-    () -> web.Text("$(value.Len(web.Get(rows))) changes (the last 50 of each kind).", color = gray),
+    web.Title(Say("Audit trail")),
+    web.Text(Say("Each change a super-admin made, with who made it (the user of the event), from where and by which route. Cepheus keeps every write in its history too, with who wrote it and why."), color = gray),
+    web.Row([Label(Say("Change"), width = 50), web.Select(kind, audited, x -> x, x -> x, placeholder = Say("all"), name = Say("Change"), width = 160), web.Button(Say("Show"), find, key = "C-f")], gap = 6),
+    web.Table(rows, [web.Column(Say("At"), e -> Local(e.At), sort = "At", width = 170), web.Column(Say("Change"), e -> e.Kind, sort = "Kind", width = 110),
+      web.Column(Say("By"), e -> Cell(dict.Get("User", e)), sort = "User", width = 70), web.Column(Say("Address"), e -> e.Ip, width = 130),
+      web.Column(Say("Route"), e -> e.Route, width = 230), web.Column(Say("What"), e -> e.Detail)], height = 480, label = Say("Audit trail")),
+    () -> web.Text(Say("{N} changes (the last 50 of each kind).", {N: Num(value.Len(web.Get(rows)))}), color = gray),
   ], gap = 8)
 end

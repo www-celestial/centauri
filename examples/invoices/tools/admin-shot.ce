@@ -1,9 +1,13 @@
 (** The test of the admin pages in a browser: the invoices and their admin served in this program (tools/admin-serve.ce,
     a database in memory filled with a month), Chrome without a window opens /admin, driven by its DevTools protocol over
     std/websocket; tools/admin-play.js, evaluated in the page, plays a super-admin who signs in, visits each page, disables
-    a user, changes an invoice in place, marks one paid by the app's own action, reads the audit trail and signs out. A
-    picture of each page goes to OUT (shots/ by default). CHROME names the browser, a Chrome or a chrome-headless-shell;
-    its profile is in PROFILE (/tmp/centauri-admin-shot). Build the pages first: cesia build --target wasm admin/page.ce. *)
+    a user, changes an invoice in place (markup typed in it stays a text), marks one paid by the app's own action, reads
+    the audit trail and signs out; each page visited fits the window. A picture of each page goes to OUT (shots/ by
+    default). LANG, en by default, is the language of the browser: with fr the pages speak French, and the player reads
+    them in French. With DOCS, a folder, it plays instead the steps that the book shows, and puts in DOCS the picture of
+    the part of the page that each shows (admin-NAME.png), as Centauri's tools/shots.sh asks for the book in English
+    and in French. CHROME names the browser, a Chrome or a chrome-headless-shell; its profile is in PROFILE
+    (/tmp/centauri-admin-shot). Build the pages first: cesia build --target wasm admin/page.ce. *)
 use deps/www-celestial/centauri/src/app
 use src/filled
 use std/dict
@@ -42,11 +46,35 @@ defn evaluated(conn, id, expression)
   result.Ok(dict.GetOr("value", "", r["result"]))
 end
 
-defn pictured(conn, id, path)
-  (** A picture of the page, in a file. *)
-  s = ask(conn, id, "Page.captureScreenshot", {format: "png"})?
+defn pictured(conn, id, path, clip = missing)
+  (** A picture of the page, or of the box clip of it ({x, y, width, height} in pixels), in a file. *)
+  params = if value.IsMissing(clip) {format: "png"} else {format: "png", clip: dict.Put("scale", 1, clip)} end
+  s = ask(conn, id, "Page.captureScreenshot", params)?
   sys.Write(path, encode.Unbase64(s["data"])?)
 end
+
+(* The steps the book shows, each [step, its argument, the name of its picture, the part of the page it shows]: the
+   part from a node to another, or to a height, by role and name (a name that ends with * by its start), right of the
+   menu unless wide. *)
+docSteps = [["lang", "en", missing, missing],
+  ["signInForm", missing, "signin", {top: ["heading", "Invoices — admin"], bottom: ["button", "Sign in"], wide: true}],
+  ["submit", missing, missing, missing], ["signedIn", missing, missing, missing],
+  ["visit", "Dashboard", "dashboard", {top: ["heading", "Dashboard"], bottom: ["img", "Requests a second"]}],
+  ["visit", "Users", missing, missing], ["askDisable", missing, "users-disable", {top: ["heading", "Users"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
+  ["openUser", missing, "user-factors", {top: ["heading", "User *"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
+  ["openTenant", missing, "tenant-invite", {top: ["heading", "Tenant *"], bottom: ["text", "Done."]}],
+  ["visit", "Events", "events", {top: ["heading", "Events"], height: 330}], ["live", missing, "events-live", {top: ["heading", "Events"], height: 250}],
+  ["visit", "Log", "log", {top: ["heading", "Log"], height: 300}],
+  ["visit", "Jobs", missing, missing], ["askRetry", missing, "jobs-retry", {top: ["heading", "Jobs"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
+  ["visit", "Webhooks", "webhooks", {top: ["heading", "Webhooks"], height: 330}], ["visit", "Files", "files", {top: ["heading", "Files"], height: 220}],
+  ["visit", "Settings", "settings", {top: ["heading", "Settings"], height: 360}],
+  ["visit", "Data", missing, missing], ["edit", "Martin & Co, accounts", "data-edit", {top: ["heading", "Invoices"], bottom: ["textbox", "Total"]}],
+  ["visit", "Unpaid", missing, missing], ["askPay", missing, "unpaid-pay", {top: ["heading", "Unpaid invoices"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
+  ["visit", "Audit", "audit", {top: ["heading", "Audit trail"], height: 260}],
+  ["visit", "Keys", missing, missing], ["askRevoke", missing, "keys-revoke", {top: ["heading", "Keys of programs"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
+  ["visit", "Flags", missing, missing], ["flag", missing, "flags-on", {top: ["heading", "Feature flags"], bottom: ["text", "Done."]}],
+  ["signOut", missing, missing, missing], ["signedOut", missing, missing, missing],
+  ["secondStep", missing, "second-step", {top: ["heading", "Invoices — admin"], bottom: ["button", "Send"], wide: true}]]
 
 defn waitReady(conn, n, start)
   (** Waits for the page to have loaded its canvas: the next number of a command. *)
@@ -64,6 +92,8 @@ end
 defn main()
   (** Serves, opens, plays, pictures: an Ok of the lines of the steps. *)
   out = env("OUT", "shots")
+  lang = env("LANG", "en")
+  docs = env("DOCS", "")
   profile = env("PROFILE", "/tmp/centauri-admin-shot")
   l = net.Listen(0)?
   port = net.Port(l)
@@ -72,7 +102,7 @@ defn main()
   _ = sys.Mkdir(out)
   _ = sys.Remove("$profile/DevToolsActivePort")
   proc = sys.Start(env("CHROME", "chrome"), args = ["--headless=new", "--no-sandbox", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
-    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "http://127.0.0.1:$port/admin"])?
+    "--window-size=1280,900", "--remote-debugging-port=0", "--user-data-dir=$profile", "--lang=$lang", "--accept-lang=$lang", "http://127.0.0.1:$port/admin"])?
   start = sys.Now()
   while not sys.Exists("$profile/DevToolsActivePort") and sys.Now() - start < 15
     sys.Sleep(0.05)
@@ -84,11 +114,14 @@ defn main()
   lines = []
   n = waitReady(conn, 1, start)
   evaluated(conn, n, sys.Read("tools/admin-play.js")?)?
-  steps = [["signIn", missing, "signin"], ["signedIn", missing, "dashboard"], ["visit", "Dashboard", "dashboard"], ["visit", "Users", "users"], ["disable", missing, "users-disabled"],
+  steps = [["lang", lang, "signin"], ["signIn", missing, "signin"], ["signedIn", missing, "dashboard"], ["lang", lang, "dashboard"], ["visit", "Dashboard", "dashboard"], ["visit", "Users", "users"], ["disable", missing, "users-disabled"],
     ["visit", "Tenants", "tenants"], ["visit", "Events", "events"], ["visit", "Log", "log"], ["visit", "Jobs", "jobs"], ["visit", "Webhooks", "webhooks"],
-    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"],
+    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"], ["markup", missing, "data-invoice"],
     ["visit", "Unpaid", "unpaid"], ["pay", missing, "unpaid-paid"], ["visit", "Audit", "audit"], ["audit", missing, "audit-after"],
     ["visit", "Keys", "keys"], ["revoke", missing, "keys-revoked"], ["visit", "Flags", "flags"], ["flag", missing, "flags-on"], ["user", missing, "user-factors"], ["signOut", missing, "signout"], ["signedOut", missing, "signout"]]
+  if docs != ""
+    steps = [if s[1] == "lang" ["lang", lang, missing, missing] else s end for s in docSteps]
+  end
   for s in steps
     n += 2
     if s[1] == "signedIn" or s[1] == "signedOut"
@@ -99,8 +132,19 @@ defn main()
       n += 2
     end
     got = evaluated(conn, n, "adminPlay($(json.Text(s[1])), $(json.Text(s[2])))")?
+    io.Print(got)
     lines = list.Append(got, lines)
-    if s[1] != "signIn" and s[1] != "signOut"
+    if docs != "" and value.IsSome(s[3])
+      sys.Sleep(0.3)
+      box = json.Parse(evaluated(conn, n + 1, "adminPlay('clip', $(json.Text(s[4])))")?)?
+      if value.IsMissing(box)
+        io.Print("FAIL the part of the page for $(s[3])")
+        lines = list.Append("FAIL the part of the page for $(s[3])", lines)
+      else
+        pictured(conn, n + 2, "$docs/admin-$(s[3]).png", clip = box)?
+      end
+      n += 2
+    else if docs == "" and s[1] != "signIn" and s[1] != "signOut" and s[1] != "lang" and s[1] != "markup"
       pictured(conn, n + 1, "$out/admin-$(s[3]).png")?
     end
   end
@@ -119,8 +163,5 @@ got = main()
 if result.IsErr(got)
   io.PrintError("admin-shot: $(got.Error)")
   sys.Exit(1)
-end
-for l in got.Value
-  io.Print(l)
 end
 sys.Exit(if list.All([text.StartsWith("ok", l) for l in got.Value]) 0 else 1 end)

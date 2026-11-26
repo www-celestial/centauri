@@ -6,12 +6,22 @@ things of the whole app that no one writes by hand for each endpoint: no office 
 
 ## 1. An app in memory
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/apptest
+use std/json
+e = json.Parse("{}")!
+invoices = json.Parse("{}")!
+now = json.Parse("{}")!
 ```
+
+```cesia norun
 defn office()
   t = apptest.Start(invoices.App, now = now)?
   ada = t.SignUp({Email: "ada@example.com", Password: "correct horse battery", Name: "Ada", Tenant: "Martin & Co"})?
   am = ada.Call(e.AddClient, {Name: "Ada Martin", Email: "Ada@Example.com", City: "Lyon"})?
-  ...
+  (* ... *)
 end
 
 defn isPaidOnce()
@@ -47,7 +57,7 @@ class InvoiceTests {
 
 ## 2. Isolated: no tenant reads another's
 
-```
+```cesia norun
 isIsolated() = apptest.Isolated(invoices.App)?
 ```
 
@@ -60,7 +70,7 @@ route that reads the thing of its path with `cepheus.Get` and no `app.Own` (`isL
 
 ## 3. Fuzz: no input makes a 500
 
-```
+```cesia norun
 isFuzzed() = apptest.Fuzz(invoices.App, cases = 2)?
 ```
 
@@ -72,7 +82,7 @@ that fails on the highest value its shape allows.
 
 ## 4. Surface: no change breaks a client
 
-```
+```cesia norun
 isSurfaceKept() = apptest.Surface(invoices.App, ".cesia/surface.json")?
 ```
 

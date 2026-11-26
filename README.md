@@ -6,7 +6,7 @@ and the other providers, passkeys and two-factor, keys of programs, defenses aga
 translations, feature flags, an administration of the whole platform, and tests of a whole app in memory, written with
 functions and records. No class, no annotation, no container of dependencies: what a handler uses comes in its request.
 
-**Documentation: https://www-celestial.github.io/centauri/**
+**Documentation: https://www-celestial.github.io/centauri/** (in French: https://www-celestial.github.io/centauri/fr/)
 
 The family: [Cesia](https://www-celestial.github.io/cesia-lang/) (the language) · [Cemacs](https://www-celestial.github.io/cemacs/) (the editor) ·
 [Cepheus](https://www-celestial.github.io/cepheus/) (the database) · [Ceti](https://www-celestial.github.io/ceti/) (the browser driver) ·
@@ -39,7 +39,7 @@ App = app.Of([auth.Module(), app.Module("notes", kinds = [Kind], serve = [app.Se
 app.Run(App)
 ```
 
-That is a whole server ([`examples/notes`](examples/notes), with its tests): `POST /notes` takes a JSON body checked
+That is a whole server ([`examples/notes`](https://github.com/www-celestial/centauri/tree/main/examples/notes), with its tests): `POST /notes` takes a JSON body checked
 by its shape (422 with each wrong field), answers 401 without a session and 403 without the role, writes in the tenant
 of who asks, records who wrote and why, and sends back only the fields of `Note`. Beside it come signing up and in, sessions, members, invitations, the administration
 endpoints and `/openapi.json` in dev.
@@ -80,7 +80,9 @@ endpoints and `/openapi.json` in dev.
   every kind changed through its checks, the audit trail, the keys and the flags, a user's factors taken away and one
   session ended, the second step at the sign-in; an app adds its own pages, columns and actions with `pages.Page`,
   `Kind`, `Column` and `Action`. No new way in: the pages call the endpoints of the role super through the same door
-  as any client.
+  as any client. They speak English or French, the language the server speaks to the super-admin, numbers and times
+  as French writes them; an app's own pages say their texts with `pages.Say`, and `apptest.Untranslated` finds a text
+  without its French.
 - **Settings**: `APP_*` variables read once through a shape; three profiles, dev, test and prod; health and metrics.
 - **Tests**: `apptest.Start` runs an app in memory on a fork of the database; `apptest.Isolated` proves on every
   endpoint that no tenant reads another's data, `apptest.Fuzz` that no broken input makes a 500, `apptest.Surface` that
@@ -99,9 +101,9 @@ endpoints and `/openapi.json` in dev.
 
 ## Status
 
-Version 0.4, the first three batches (L1, L2, L3) and the admin pages. It needs Cesia's branch `centauri-l3`
-(`std/crypto` signs and verifies RS256, PS256 and ES256 and computes HMAC-SHA1 through OpenSSL's libcrypto, and
-`std/cbor`), not yet in a release, and Ceres's master; `tools/deps.sh` puts Cepheus and Ceres in `deps/`. An app whose
+Version 0.4, the first three batches (L1, L2, L3) and the admin pages, in English and French, with this book in both.
+It needs Cesia's main (`std/crypto` signs and verifies RS256, PS256 and ES256 and computes HMAC-SHA1 through OpenSSL's
+libcrypto, and `std/cbor`), not yet in a release, and Ceres's main; `tools/deps.sh` puts Cepheus and Ceres in `deps/`. An app whose
 users sign in with a provider, a passkey or TOTP of SHA-1 (the default) allows `ffi=crypto` to its tasks.
 
 MIT licence.

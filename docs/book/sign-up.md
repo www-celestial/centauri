@@ -12,7 +12,23 @@ headers of security.
 
 ## 1. The module of the accounts
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use std/bug
+use std/result
+use std/value
+use std/json
+Roles = json.Parse("{}")!
+ana = json.Parse("{}")!
+invoices = json.Parse("{}")!
+status = json.Parse("{}")!
 ```
+
+```cesia norun
 App = app.Of([auth.Module(), invoices.Module], name = "invoices", roles = Roles, defaults = {MemberRoles: "accountant"})
 ```
 
@@ -156,7 +172,7 @@ Proof of work, the client's side, when a sign-in answers 428:
 
 ## 7. Its tests
 
-```
+```cesia norun
 defn isLockedAfterFailures()
   t = apptest.Start(App, settings = {LockAfter: "3"})?
   t.SignUp(ana)?

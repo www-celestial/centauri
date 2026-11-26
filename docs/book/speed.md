@@ -214,6 +214,54 @@ without JavaScript. The admin pages win once loaded: 145 KB for every page (a pa
 own HTML and statics than all of them), every page after the first without a file, a dashboard pushed each second
 without polling, a table of 100,000 rows that scrolls and sorts in a frame.
 
+## The admin pages in French
+
+The French must cost a request of the app nothing, and a page little. Measured as before, `bench/micro.ce` in the
+program, 21 runs alternated between Centauri's main (92151da) and this version, both on the same build of Cesia (main),
+on cores 0, 1, 4, 5 (2026-11-26, load 3.2 to 15.7: other jobs ran; a first series at load 4 to 40 was thrown away),
+medians in µs with their [min, max]:
+
+| request | main | now |
+|---|---:|---:|
+| Centauri, public, a JSON of one field | 25.75 [22.18, 146.99] | 26.17 [23.38, 147.41] |
+| Centauri, signed in, a thing by its id (`app.Own`) | 45.02 [41.44, 232.83] | 43.68 [40.38, 240.30] |
+| Centauri, signed in, a page of 20 things | 163.89 [143.24, 929.87] | 171.25 [144.05, 541.78] |
+| std/http alone, a JSON of one field (the same code in both) | 3.73 [3.25, 20.71] | 4.26 [3.35, 23.44] |
+
+The door of an app that speaks English alone is the same code as before: the differences are those of std/http alone,
+whose code is the same, that is the noise. In an app of English and French, the same 21 runs (`bench/l3.ce`, the mean
+of 2,000 calls a run):
+
+| piece | main | now |
+|---|---:|---:|
+| an error of a field (422), in English | 107.11 [95.71, 254.02] | 104.92 [93.05, 257.16] |
+| an error of a field, in French (its Problem Details read again and translated) | 136.89 [116.67, 277.67] | 134.78 [118.04, 312.07] |
+| `i18n.Say` of a message of std/check | 7.70 [7.08, 18.87] | 7.96 [7.04, 19.31] |
+
+A text said by the pages (`bench/words.ce`, the mean of 20,000 calls a run, 21 runs): in French 0.77 µs [0.69, 2.56];
+a text that counts, `{N} rows`, 7.95 µs [7.21, 20.96] in French and 7.97 [6.97, 20.72] in English; a message of the
+server or of the screen read again against the French templates, 29.3 µs [24.5, 67.4], on an error only. An English
+text without values is shown as it is, the catalogue not read. A page says 60 to 250 texts when it is built: under
+0.3 ms in French.
+
+In chrome-headless-shell 1243 (SwiftShader, 1280 by 900), the invoices filled with a month, a fresh profile each run,
+21 runs alternated (load 2.5 to 6.1), medians in ms [min, max]; the work of a switch of page is the sum of its frames'
+own work (`Stats()` of `ceres.js`):
+
+| | now, a browser in English | now, in French | main, in English |
+|---|---:|---:|---:|
+| first paint of the sign-in | 127.6 [121.4, 243.1] | 130.5 [121.5, 271.8] | 121.3 [112.0, 212.4] |
+| sign-in to the dashboard showing its counts | 320 [235, 788] | 321 [264, 600] | 284 [236, 760] |
+| first paint of the dashboard, once signed in | 94.8 [85.9, 349.1] | 94.4 [87.5, 214.1] | 89.3 [81.0, 243.7] |
+| to Users: the work of its frames | 8.2 [4.5, 17.9] | 8.0 [4.6, 17.4] | 10.4 [5.4, 20.1] |
+| to Flags: the work of its frames | 4.8 [3.0, 11.7] | 6.0 [3.0, 14.0] | 9.6 [3.1, 15.4] |
+
+French costs a page nothing measurable beside English: the medians are within a millisecond, and the ranges the same.
+Beside main, a first paint takes 6 to 7 ms more, for a module that grew by the French: `page.wasm` 579,669 B on main,
+653,014 B now (146,957 and 163,489 B brotli, 16.5 KB more, once, then from the cache); the switches of page cost what
+they did. The sign-in to the counts, 36 ms higher in its median, is within its ranges, Argon2id and the page loaded
+again in it.
+
 ## What it says
 
 - Starting stays instant: 7 ms over std/http and Cepheus, against 3.4 s for Spring Boot 4 on this machine (the
@@ -229,6 +277,8 @@ without polling, a table of 100,000 rows that scrolls and sorts in a frame.
 - L3 (keys of programs, second factors, passkeys, providers, languages, flags) costs a request of L1 1.9 to 2.7 %
   (0.6 to 2.8 µs), within the noise of the ranges; a key of a program costs what a cookie does, a passkey signs in
   sixty times faster than a password.
+- The admin pages in French cost a request nothing (the door of an English app is the code it was) and a page
+  under 0.3 ms of texts said; their module grew by 16.5 KB brotli.
 - What would take it further needs Cesia: a table of the process shared without a fiber, for the limits and the
   sessions (the round trip, 6 µs of the 18), and `encode.Base64` as a native (a cursor's 24 µs), both in its core, which
   is at its ceiling of lines.

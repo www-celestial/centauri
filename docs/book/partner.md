@@ -13,7 +13,23 @@ checks of addresses; the `Idempotency-Key` header.
 
 ## 1. An endpoint of the partner
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/check
+use std/dict
+use std/list
+use std/value
+use std/json
+Invoice = json.Parse("{}")!
+invoiceOf = json.Parse("{}")!
 ```
+
+```cesia norun
 AddPartner = api.Post("/partners", body = check.Record({Url: check.Url(https = true)}), out = check.Record({Id: check.Id(), Secret: check.Text()}), role = "admin")
 addPartner(r, x) = hooks.Add(x.Url, ["invoice.paid"], r)
 ```
@@ -23,12 +39,12 @@ base64), given back this once; the database keeps it sealed under the app's key 
 
 ## 2. The message, in the group of the payment
 
-```
+```cesia norun
 defn paying(r)
   inv = app.Own(Invoice, r.Params.id, r)?
-  ...
+  (* ... *)
   told = hooks.Later("invoice.paid", {Invoice: inv.Id, Number: inv.Number, Total: inv.Total, PaidAt: r.Now}, r)?
-  cepheus.Write(list.Concat([cepheus.Expect(inv.Id, Invoice.Status, inv.Status), cepheus.Add(inv.Id, Invoice.Status, "paid"), ...], told), r.Db, ...)?
+  cepheus.Write(list.Concat([cepheus.Expect(inv.Id, Invoice.Status, inv.Status), cepheus.Add(inv.Id, Invoice.Status, "paid"), (* ... *)], told), r.Db, (* ... *))?
   invoiceOf(inv.Id, r)
 end
 ```
@@ -36,7 +52,7 @@ end
 `hooks.Later` gives a job for each active endpoint of the office that takes the type: written with the payment, both
 or neither. The job sends:
 
-```
+```text
 POST https://partner.example/in
 webhook-id: msg_6b5d...                     (the same at every try: the partner does it once)
 webhook-timestamp: 1794528000
@@ -86,7 +102,7 @@ forgery*, SSRF, the A10 of OWASP's 2021 list: `http://169.254.169.254/` gives th
 
 ## 4. His answers
 
-```
+```cesia norun
 PartnerAnswer = api.Post("/partner/answers", out = check.Record({Done: check.Bool()}), role = api.Public)
 
 defn partnerAnswer(r)
@@ -95,9 +111,9 @@ defn partnerAnswer(r)
     return {Done: true}
   end
   inv = if value.IsDict(m.Data) app.IdOf(dict.Get("Invoice", m.Data)) else missing end
-  ...
+  (* ... *)
   done = cepheus.Write(list.Concat([cepheus.Expect(inv, Invoice.Acknowledged), cepheus.Add(inv, Invoice.Acknowledged, r.Now)], m.Seen), r.Db, why = r.Why)
-  ...
+  (* ... *)
 end
 ```
 

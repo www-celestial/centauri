@@ -14,7 +14,7 @@ What it uses: keys of programs (an *API key*: a secret a program sends instead o
 
 ## 1. A key, made by an admin
 
-```
+```text
 POST /auth/keys {Name: "Partner's program", Roles: ["accountant"], Days: 365}   (role admin)
 -> {"Id": 65601, "Key": "65601.9f2c...e0a1", "Ends": "2027-11-13T00:00:00Z"}
 ```
@@ -28,7 +28,20 @@ POST /auth/keys {Name: "Partner's program", Roles: ["accountant"], Days: 365}   
 - Its making is an event (`key`: "Key 65601 made, Partner's program, roles [accountant]."), which never holds its
   secret.
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/apptest
+use std/json
+use std/value
+ada = json.Parse("{}")!
+e = json.Parse("{}")!
+invoices = json.Parse("{}")!
+lines = json.Parse("{}")!
 ```
+
+```cesia norun
 defn isPartnerApiWithItsKey()
   t = apptest.Start(invoices.App)?
   a = t.SignUp(ada)?
@@ -106,7 +119,7 @@ secret is never in a log (a line names the route, never a header) nor in an even
 
 ## 4. Revoked
 
-```
+```text
 GET    /auth/keys        -> the keys of the tenant, the newest first: Id, Name, Roles, By, Created, Ends, Last   (role admin)
 DELETE /auth/keys/:id    -> 204; another tenant's key is a 404                                                  (role admin)
 ```

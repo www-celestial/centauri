@@ -114,7 +114,7 @@ removal stay, so a user can still see and take away what he made.
 
 ## 3. Signing up without a password
 
-```
+```text
 POST /auth/signup/passkey/options {Email, Name, Tenant?, Invite?, Proof?}   -> {Ticket, Options}
 POST /auth/signup/passkey         {Ticket, Credential}                      -> the Account, and a session
 ```
@@ -136,7 +136,7 @@ TOTP (*Time-based One-Time Password*, RFC 6238, over HOTP, RFC 4226): the server
 Authenticator, 1Password, Aegis) share a secret of 20 random bytes; every 30 seconds both compute a code of 6 digits
 from it and the time. Nothing goes over the network but the code.
 
-```
+```text
 POST /auth/totp                   -> {Secret, Uri, Codes}     a new secret, not on yet
 POST /auth/totp/confirm {Code}    -> the factors               a code of the app turns it on
 POST /auth/recovery {Code}        -> {Codes}                   10 new recovery codes, with a code of the app
@@ -196,6 +196,8 @@ an address (`isPasskeyAndTwoFactor`), a new password by the link of a mail (`isA
 (`POST /auth/tenant`), an invitation taken (`POST /auth/join`). Only a passkey verified by its device skips it. The
 admin pages ask it too, at their sign-in ([the admin pages](admin.md)).
 
+![The sign-in of the admin pages at its second step: the e-mail and the password typed, then the field "Code of your app" and Send.](images/admin-second-step.png)
+
 ```java
 // Spring Boot: TOTP by a library (java-totp, googleauth), its secret on the user by hand, and the state between
 // the two steps in the HTTP session; Spring Security 7's multi-factor authentication asks each factor as an authority
@@ -214,6 +216,8 @@ admin pages ask it too, at their sign-in ([the admin pages](admin.md)).
   (`isFactorsShownAndReset`). How the super-admin makes sure who asks is the platform's to decide: Centauri trusts
   the role super.
 
+![The page of a user in the admin: "TOTP on, 10 recovery codes left", "1 passkey", the passkey "Bruno's phone", and the buttons "Take away the TOTP and the recovery codes of bruno@example.com" and "Take away the passkeys of bruno@example.com".](images/admin-user-factors.png)
+
 ## 7. Its test
 
 `apptest.Device(t, alg, uv)` is a device of passkeys in software (ES256 through OpenSSL, or EdDSA through libsodium,
@@ -224,7 +228,20 @@ sign-in. Their other arguments make the answer wrong on purpose, as an attacker 
 ends a sign-up or a sign-in that the settings stopped at a second factor not yet set up: it sets TOTP up as its owner
 would and gives `{Client, Secret, Codes}`; `auth.TotpCode(secret, at, t.Env)` is the code his app would show.
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/apptest
+use std/bug
+use std/result
+use std/value
+use std/json
+ada = json.Parse("{}")!
+invoices = json.Parse("{}")!
 ```
+
+```cesia norun
 defn isPasskeyAndTwoFactor()
   t = apptest.Start(invoices.App, settings = {TwoFactorRoles: "owner"})?
   stopped = t.SignUp(ada)

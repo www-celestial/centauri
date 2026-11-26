@@ -1,0 +1,180 @@
+(** The admin pages and the catalogues in French: every text the pages say has its French, with the names of its
+    values; no text goes to a widget unsaid; the catalogues lose no name and hold no empty text; the language of the
+    pages comes from the server as L3 chose it (the account's, then the browser's, among the app's), and the actions of
+    a live screen answer in the browser's language. And what an attacker tries: a translation with markup, which stays
+    a text; a header Accept-Language made to inject, which changes nothing but the language. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/admin/pages
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use src/i18n
+use std/bug
+use std/check
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+use std/websocket as ws
+
+(* The texts of Ceres and of the live screen that reach the pages from elsewhere: the band of keys, the page of no
+   route, the errors of the screen (web/app.ce and web/live.ce of Ceres, app/live.ce here). *)
+elsewhere = ["Nothing here", "No page of this app is at {Path}.", "first field", "scroll the page", "next field, previous", "move", "send",
+  "choose", "close the list", "open the list", "press", "scroll", "first row, last", "click a title", "sort", "next field",
+  "This page is not connected to its app.", "The connection to the app broke before it answered.",
+  "The connection to the app broke before it answered: the action may have run or not.", "Sign in first.",
+  "This session has {N} screens open already.", "There is no show {Show}.", "The show {Show} is for the role {Role}.",
+  "Check the arguments of the show {Show}.", "Live", "sending {N} actions…", "back after a break, nothing missed",
+  "back after a break, data reloaded", "Offline", "Offline, no network", "{N} actions waiting", "next try in {S} s", "Try now",
+  "Signed out — sign in again", "{N} actions kept", "Connecting…", "{Name} was refused: {Message}", "it changed meanwhile",
+  "seen {Value}", "now {Value}", "yours {Value}", "Keep mine", "Take theirs", "This action was asked by another account: it is not sent.",
+  "Too many actions wait to be sent: {N}.", "This action waited too long to be sent: it was not sent.",
+  "No reply came in time: the action may have run or not."]
+
+defn isEveryTextOfTheAdminInFrench()
+  wrong = apptest.Untranslated(["src/admin/pages"], pages.Words, "fr")
+  bug.Assert(value.Len(wrong) == 0, text.Join("\n", wrong))
+  lacking = [t for t in elsewhere if not dict.Has(t, pages.Words.Exact["fr"])]
+  bug.Assert(value.Len(lacking) == 0, "no French: $lacking")
+  value.Len(dict.Keys(pages.Words.Exact["fr"])) > 200
+end
+
+defn isCentaurisCatalogueWhole()
+  wrong = apptest.Untranslated([], i18n.Centauri, "fr")
+  bug.Assert(value.Len(wrong) == 0, text.Join("\n", wrong))
+  true
+end
+
+defn isAnUntranslatedTextFound()
+  (** The walk itself: a text said without French, one with its value written in, one given straight to a widget, a
+      name lost by the French, an empty French; a text in a comment is not read. *)
+  _ = sys.Mkdir(".cesia/words")
+  src = "(* Say(\"In a comment\") *)\nview(p, name) = web.Stack([web.Title(Say(\"Users\")), web.Text(Say(\"Nowhere\")),\n  web.Text(Say(\"Hello $$name\")), web.Button(\"Raw\", f), web.Text(\"$$(name):\"), Say(\"{N} rows\", {N: 2}), Say(\"Empty\")])\n"
+  sys.Write(".cesia/words/page.ce", src)!
+  words = i18n.Catalog("fr", [["Users", "Utilisateurs"], ["{N} rows", "lignes"], ["Empty", ""]])
+  got = apptest.Untranslated([".cesia/words"], words, "fr")
+  want = ["the catalogue: \"{N} rows\" loses {N} in fr.", "the catalogue: \"Empty\" is empty in fr.",
+    ".cesia/words/page.ce:2: \"Nowhere\" has no text in fr.",
+    ".cesia/words/page.ce:3: \"Hello $$name\" has a value written into it: give the message whole to Say, its values in args ({N} and {N: n}).",
+    ".cesia/words/page.ce:3: \"Raw\" is given straight to web.Button(...): it shows in English in every language; give it to Say."]
+  bug.Assert(value.Equal(list.Sort(got), list.Sort(want)), text.Join("\n", got))
+  true
+end
+
+(* ---- The language of the pages, from the server. *)
+
+Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = "member")
+App = app.Of([auth.Module(), app.Module("hello", serve = [app.Serve(Hello, r -> {Text: "hi"})])], name = "words")
+
+ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
+
+defn me(t, cookie, lang)
+  (** GET /auth/me with a cookie and an Accept-Language: {Status, Lang, Body}. *)
+  headers = list.Concat(if value.IsMissing(cookie) [] else [{Name: "cookie", Value: cookie}] end, if value.IsMissing(lang) [] else [{Name: "accept-language", Value: lang}] end)
+  out = t.Raw("GET", "/auth/me", headers = headers)
+  {Status: out.Status, Lang: http.HeaderValue("content-language", out.Headers), Body: out.Body}
+end
+
+defn cookieOf(t, x)
+  (** The session cookie of a new account. *)
+  out = t.Raw("POST", "/auth/signup", body = json.Text(x))
+  text.Split(";", http.HeaderValue("set-cookie", out.Headers))[1]
+end
+
+defn isMeInTheLanguageOfTheUser()
+  t = apptest.Start(App, settings = {Langs: "en,fr"})?
+  c = cookieOf(t, ana)
+  fr = me(t, c, "fr-FR,fr;q=0.9,en;q=0.5")
+  bug.Assert(fr.Status == 200 and fr.Lang == "fr", "the browser's: $fr")
+  bug.Assert(me(t, c, "de-DE").Lang == "en" and me(t, c, missing).Lang == "en", "else the app's first")
+  out = t.Raw("PUT", "/auth/lang", body = json.Text({Lang: "en"}), headers = [{Name: "cookie", Value: c}])
+  bug.Assert(out.Status == 200, "the account's language set: $(out.Status) $(out.Body)")
+  bug.Assert(me(t, c, "fr").Lang == "en", "the account's before the browser's")
+  signedOut = me(t, missing, "fr")
+  bug.Assert(signedOut.Status == 401 and signedOut.Lang == "fr", "the sign-in's: $signedOut")
+  english = apptest.Start(App)?
+  plain = me(english, cookieOf(english, ana), "fr")
+  plain.Status == 200 and value.IsMissing(plain.Lang)
+end
+
+defn isBadAcceptLanguageOnlyTheLanguage()
+  (** A header made to inject a header, a script, a huge list, a q that is no number: the answer is the same but for
+      the language, always one of the app's. *)
+  t = apptest.Start(App, settings = {Langs: "en,fr"})?
+  c = cookieOf(t, ana)
+  plain = me(t, c, missing)
+  for h in ["<script>alert(1)</script>", "fr\r\nset-cookie: x=1", "fr;q=abc, <b>;q=0.9", text.Repeat(5000, "zz-ZZ,"), "fr;q=0, ../../etc/passwd", "*"]
+    got = me(t, c, h)
+    bug.Assert(got.Status == 200 and got.Body == plain.Body and got.Lang in ["en", "fr"], "$h: $got")
+  end
+  me(t, c, "en;q=0.1, <x>;q=1, fr;q=0.5").Lang == "fr"
+end
+
+defn isATranslationATextNotMarkup()
+  (** A translation with markup in it: the door sends it as a text of JSON, of the type of Problem Details, which no
+      browser runs (nosniff), exactly as written. *)
+  bad = "<img src=x onerror=alert(1)> Vérifiez <b>les</b> champs."
+  a = app.Of([auth.Module(), app.Module("hello", serve = [app.Serve(Hello, r -> {Text: "hi"})])], name = "words", messages = i18n.Catalog("fr", [["Check the fields.", bad]]))
+  t = apptest.Start(a, settings = {Langs: "en,fr"})?
+  out = t.Raw("POST", "/auth/signup", body = json.Text({Email: "ana@example.com", Password: "short", Name: "Ana"}), headers = [{Name: "accept-language", Value: "fr"}])
+  p = json.Parse(out.Body)?
+  bug.Assert(out.Status == 422 and p.detail == bad, "$(out.Status) $(out.Body)")
+  http.HeaderValue("content-type", out.Headers) == "application/problem+json" and http.HeaderValue("x-content-type-options", out.Headers) == "nosniff"
+end
+
+(* ---- An action of a live screen, in the browser's language. *)
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100)}), out = check.Record({Id: check.Id(), Text: check.Text()}), role = "member")
+Mine = api.Live("notes.mine", role = "member")
+
+defn add(r, x)
+  id = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  {Id: id, Text: x.Text}
+end
+
+mine(s, args) = cepheus.Watch(2, (n, t) -> {Where: [[n, Note.Tenant, s.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}}, s.Db, until = s.Ended)
+Notes = app.Of([auth.Module(), app.Module("notes", kinds = [Note], serve = [app.Serve(AddNote, add), app.Live(Mine, mine)])], name = "notes")
+
+defn served(langs)
+  (** The notes served on a free port: its port. *)
+  l = net.Listen(0)!
+  s = app.Read(Notes.Fields, {Profile: "test", Origin: "http://localhost:$(net.Port(l))", Pow: "off", Langs: langs}, defaults = Notes.Defaults)!
+  env = app.Start(Notes, s, cepheus.Fork(cepheus.Empty, Notes.Kinds)!)!
+  fiber.Spawn(() -> http.Serve(app.App(env), listener = l, timeout = 5))
+  net.Port(l)
+end
+
+defn refusedAct(port, lang)
+  (** The error of an action of a screen opened by a browser of this language, whose text is too short. *)
+  up = http.Fetch("http://localhost:$port/auth/signup", method = "POST", body = json.Text(ana),
+    headers = [{Name: "host", Value: "localhost:$port"}, {Name: "content-type", Value: "application/json"}])!
+  cookie = text.Split(";", http.HeaderValue("set-cookie", up.Headers))[1]
+  q = encode.UrlEncode(json.Text([{Show: "notes.mine", Args: {}}]))
+  headers = list.Concat([{Name: "origin", Value: "http://localhost:$port"}, {Name: "cookie", Value: cookie}], if value.IsMissing(lang) [] else [{Name: "accept-language", Value: lang}] end)
+  c = ws.Dial("ws://localhost:$port/live?shows=$q", headers = headers)!
+  ws.Send(json.Text({Hello: 1}), c)!
+  _ = fiber.Receive(c.Messages, timeout = 3)
+  ws.Send(json.Text({Act: "POST /notes", Id: 8, Args: {Text: ""}}), c)!
+  got = json.Parse(fiber.Receive(c.Messages, timeout = 3)!)!
+  ws.Close(c)
+  got[1].Err
+end
+
+defn isActInTheBrowsersLanguage()
+  port = served("en,fr")
+  fr = refusedAct(port, "fr-FR,fr;q=0.9")
+  bug.Assert(fr.Status == 422 and fr.Message == "Vérifiez les champs." and fr.Fields.Text == "Un texte de 1 à 100 octets.", "French: $fr")
+  en = refusedAct(served("en,fr"), "<script>, en")
+  bug.Assert(en.Status == 422 and en.Message == "Check the fields.", "English: $en")
+  one = refusedAct(served("en"), "fr")
+  one.Status == 422 and one.Message == "Check the fields." and one.Fields.Text == "Text of 1 to 100 bytes."
+end

@@ -2,7 +2,37 @@
 
 ## Unreleased
 
-When the connection drops, a page carries on: a drop of seconds to minutes (a wifi lost, wifi to 4G, a laptop
+The admin pages in French, and the book in French. Nothing breaks: every endpoint answers as it did. What changes,
+each additive: in an app of several languages (`APP_LANGS`), `GET /auth/me` sends `Content-Language`, the language the
+app speaks to that user, and the actions of a live screen carry the browser's language, so their errors come in it;
+`pages.Run` takes `words`; an English page shows `1 row` where it showed `1 rows`. The admin pages need Ceres's
+`web.App(say = ...)`.
+
+- The admin pages speak English or French: the language of `GET /auth/me`'s `Content-Language` (the account's, else
+  the browser's, among the app's languages), every text through `pages.Say` and a catalogue, `pages.Words` (254
+  texts: titles, the menu, buttons, columns, help lines, empty lists, questions, the band of keys of Ceres, the errors
+  of the screen), numbers as French writes them (`pages.Num`: `12 345,5`, a narrow space that no line breaks), times
+  day first (`26/11/2026 09:22:01`, `pages.Local`; `pages.DayFirst` reads one typed so), plurals by CLDR; a text
+  without its French shows in English, never empty; `<html lang>` set for screen readers. An app's own pages say their
+  texts with `pages.Say(text, args)`, and give their French to `pages.Run(words = ...)`, after Centauri's; the titles
+  of `Page`, `Kind`, `Column`, `Action` and `Run` are said where they show. The invoices' admin page in French.
+- `apptest.Untranslated(paths, words, lang)`: the texts of pages that a catalogue doesn't give in a language (a text
+  said without its translation, an empty one, a name of a value lost or added, a value written into a text, a text
+  given straight to a widget of Ceres), and the catalogue's own entries.
+- `i18n`: a plural reads a number written with spaces between its thousands (`12 345`); an empty translation gives
+  the English.
+- The book in French, `docs/fr/book/`, chapter for chapter, checked by `cesia doc --site` as Cesia's and Cepheus's
+  are: the same headings, blocks byte for byte and links; `README.fr.md`. Every block of the book says its language,
+  so that the site colors the Cesia ones, and each page's Cesia blocks are checked as one program.
+- A picture at each step of the admin pages in the book, in English and in French, taken again by `tools/shots.sh`
+  (`examples/invoices/tools/admin-shot.ce` with `DOCS`); the browser test of the admin plays in French too
+  (`LANG=fr`), each page checked to fit the window and markup typed into a field kept a text.
+- `tools/deps.sh` puts every package of Centauri and its tools in an example; `bench/words.ce`, what a text said costs.
+- Fixes: the site check passes again (README's link to `examples/notes`, `jobs`' doc).
+
+### When the connection drops
+
+A page carries on: a drop of seconds to minutes (a wifi lost, wifi to 4G, a laptop
 asleep, a restart or a deploy, a proxy that cuts idle connections) no longer shows, and nothing is lost or doubled.
 Nothing breaks: a request without an `Idempotency-Key` takes the path it took, every endpoint answers as it did, and a
 page of before still connects (std/live's version 1). What changes, each a setting with its old way kept: a key is the
@@ -32,7 +62,7 @@ live.js, `websocket.Dial`'s `last`) and Ceres's (the page's client, `web.Connect
   Take theirs (`web.Conflicts`), a sign-in in the page when the session ended while away, the changes kept; a list
   asked again keeps its rows until the new ones come.
 - The book: [When the connection drops](docs/book/connection.md), in English and in French, with its pictures taken
-  by `tools/drop-shots.sh`; Security's rows of these threats; Settings.
+  by `tools/shots.sh`; Security's rows of these threats; Settings.
 - Tests: `tests/drop.test.ce` (10), the invoices' `tests/drop.test.ce` (4), the browser test `cesia do drop-shot`
   (Chrome's offline mode, a proxy that drops TCP connections, a restart on the same database); `bench/drop.ce`,
   `bench/storm.ce`.

@@ -4,7 +4,9 @@
     by HTTP, the session a cookie no script reads. Run starts them, in the app's entry of its admin; an app adds its own
     pages (Page), the columns of its kinds (Kind, Column) and its actions (Action) with a few lines: the book's chapter
     The admin, and its tutorial, an admin page of the invoices. The pages: the dashboard, the users, the tenants and their members, the events, the log, the jobs, the webhooks, the
-    files, the settings, the data of each kind, the audit trail, the keys of programs, the feature flags. *)
+    files, the settings, the data of each kind, the audit trail, the keys of programs, the feature flags. They speak
+    the language the server speaks to the super-admin (his account's, else his browser's, among the app's languages,
+    the setting Langs), English or French; an app's own texts come in its catalogue (Run's words, said by Say). *)
 use deps/www-celestial/ceres/src/browser
 use deps/www-celestial/ceres/src/web
 use src/api
@@ -18,27 +20,30 @@ use std/result
 use std/text
 use std/value
 
-(** A page of the app's own among the admin's: its title in the menu, its path (a route of Ceres, as "/unpaid" or
-    "/clients/:id"), and view(p), the widgets it shows; p is the page of Ceres ({Path, Params, Screen, Nav}), and
-    pages.Call(endpoint, args, p) calls an endpoint of the role super from it.
+(** A page of the app's own among the admin's: its title in the menu (an English text, said in the pages' language
+    where it shows), its path (a route of Ceres, as "/unpaid" or "/clients/:id"), and view(p), the widgets it shows; p
+    is the page of Ceres ({Path, Params, Screen, Nav}), and pages.Call(endpoint, args, p) calls an endpoint of the role
+    super from it.
 
       Page("Unpaid", "/unpaid", p -> web.Text("…")).Path --> "/unpaid" *)
 Page(title, path, view) = {Title: title, Path: path, View: view}
 
-(** How the data browser shows a kind: its name (as app.Kind has it), its title, its columns (pages.Column; its first
-    fields when none) and its actions on the thing chosen (pages.Action).
+(** How the data browser shows a kind: its name (as app.Kind has it), its title (said in the pages' language), its
+    columns (pages.Column; its first fields when none) and its actions on the thing chosen (pages.Action).
 
       Kind("invoice", columns = [Column("Number")]).Columns[1].Field --> "Number" *)
 Kind(name, title = missing, columns = [], actions = []) = {Name: name, Title: if value.IsMissing(title) name else title end, Columns: columns, Actions: actions}
 
-(** A column of a kind's table: a field of its things, its title (the field by default), show(v), what a cell shows of
-    a value (pages.Cell by default), and its width in pixels.
+(** A column of a kind's table: a field of its things, its title (the field by default, said in the pages' language:
+    a field the catalogue lacks shows as it is), show(v), what a cell shows of a value (pages.Cell by default), and
+    its width in pixels.
 
       Column("Total", show = v -> "$v €").Title --> "Total" *)
 Column(field, title = missing, show = missing, width = missing) = {Field: field, Title: if value.IsMissing(title) field else title end, Show: show, Width: width}
 
-(** An action on the thing chosen in a kind's table: an endpoint of the role super, args(thing) its input ({id: its
-    id} by default, for a path as /admin/invoices/:id/pay), asked first unless confirm = false.
+(** An action on the thing chosen in a kind's table: its label (said in the pages' language), an endpoint of the role
+    super, args(thing) its input ({id: its id} by default, for a path as /admin/invoices/:id/pay), asked first unless
+    confirm = false.
 
       Action("Mark paid", api.Post("/admin/invoices/:id/pay", role = api.Super)).Label --> "Mark paid" *)
 Action(label, endpoint, args = missing, confirm = true) = {Label: label, Endpoint: endpoint, Args: args, Confirm: confirm}
@@ -54,35 +59,40 @@ own = [{Title: "Dashboard", Path: "/", View: Dashboard}, {Title: "Users", Path: 
 inner = [{Path: "/users/:id", View: User}, {Path: "/tenants/:id", View: Tenant}, {Path: "/data/:kind", View: Data}]
 
 defn fetchJson(path, method = "GET", body = "")
-  (** A request of HTTP to the app from the page, with its cookie: {Status, Data}, Data the JSON of its body or
-      missing. *)
+  (** A request of HTTP to the app from the page, with its cookie: {Status, Data, Lang}, Data the JSON of its body or
+      missing, Lang the language of its answer (Content-Language) or missing. *)
   got = http.Fetch(path, method = method, body = body, headers = if body == "" [] else [{Name: "content-type", Value: "application/json"}] end, timeout = 30)
   if result.IsErr(got)
     return {Status: 0, Data: {detail: got.Error.Message}}
   end
   data = if got.Value.Body == "" result.Ok(missing) else json.Parse(got.Value.Body) end
-  {Status: got.Value.Status, Data: if result.IsOk(data) data.Value else missing end}
+  {Status: got.Value.Status, Data: if result.IsOk(data) data.Value else missing end, Lang: http.HeaderValue("content-language", got.Value.Headers)}
 end
 
 reload() = js.Call("./admin.js", "Reload", [])   (* Loads the page again, to open its screen with a new session. *)
 
-defn Run(title = "Admin", more = [], kinds = [], shows = [])
+defn Run(title = "Admin", more = [], kinds = [], shows = [], words = missing)
   (** Runs the admin pages in the page's canvas: the sign-in until a super-admin is signed in, then the dashboard and
       the other pages, the app's own pages (more, pages.Page) in the menu after them, its kinds shown as kinds says
       (pages.Kind), and the app's own live shows (shows, api.Live endpoints of the role super) on the page's screen,
-      which web.Live reads by their names. *)
+      which web.Live reads by their names. The pages speak the language of the server's answer to /auth/me (its
+      Content-Language: the account's language, else the browser's, among the app's), with Centauri's words (Words)
+      and the app's (words, a catalogue of i18n: its titles and the texts of its pages, said by Say). *)
   me = fetchJson("/auth/me")
+  speak(me.Lang, words)
+  js.Call("./admin.js", "Lang", [peek(spoken).Lang])
+  shown = Say(title)
   if me.Status != 200 or not value.IsDict(me.Data) or me.Data.Super != true
-    note = if me.Status == 200 "$(me.Data.Email) is no super-admin of this platform." else "" end
-    browser.Run(web.App([web.Route("/", p -> signIn(p, title, note))], title = title))
+    note = if me.Status == 200 Say("{Email} is no super-admin of this platform.", {Email: me.Data.Email}) else "" end
+    browser.Run(web.App([web.Route("/", p -> signIn(p, shown, note))], title = shown, say = t -> Say(t)))
     return missing
   end
   asked = [{Show: s.Name, Args: {}} for s in list.Concat(api.AdminShows, shows)]
   live = "/live?shows=$(encode.UrlEncode(json.Text(asked)))"
   menu = list.Concat(own, [{Title: x.Title, Path: x.Path, View: x.View} for x in more])
-  site = {Title: title, Me: me.Data, Menu: menu, Kinds: dict.Dict([{Key: k.Name, Value: k} for k in kinds]), App: web.Signal(missing)}
+  site = {Title: shown, Me: me.Data, Menu: menu, Kinds: dict.Dict([{Key: k.Name, Value: k} for k in kinds]), App: web.Signal(missing)}
   routes = [web.Route(m.Path, framed(m, site)) for m in list.Concat(menu, inner)]
-  browser.Run(web.App(routes, live = live, title = title))
+  browser.Run(web.App(routes, live = live, title = shown, say = t -> Say(t)))
 end
 
 defn framed(m, site)
@@ -98,12 +108,16 @@ defn frame(p, m, site)
     web.Set(site.App, Call(api.AdminApp, {}, p))
   end
   web.Stack([
-    web.Row([web.Text(site.Title, font = "strong"), () -> appLine(web.Get(site.App)), web.Spacer(), web.Connection(p),
-      web.Text(site.Me.Email, color = gray), web.Button("Sign out", () -> signOut(), key = "C-q")], gap = 12, pad = 6, fill = 0xf2f4f7),
+    web.Stack([
+      web.Row([web.Text(site.Title, font = "strong"), () -> appLine(web.Get(site.App)), web.Spacer(), web.Text(site.Me.Email, color = gray),
+        web.Button(Say("Sign out"), () -> signOut(), key = "C-q")], gap = 12),
+      (* the state of the connection on a line of its own, at the right, so that a long one never pushes the band out *)
+      web.Row([web.Spacer(), web.Connection(p, say = t -> Say(t))], gap = 8),
+    ], gap = 2, pad = 6, fill = 0xf2f4f7),
     () -> againView(web.Get(p.Screen.Status), p, site),
-    web.Conflicts(p),
+    web.Conflicts(p, say = t -> Say(t)),
     web.Row([
-      web.Stack([web.Link(x.Title, x.Path) for x in site.Menu], gap = 6, width = 130),
+      web.Stack([web.Link(Say(x.Title), x.Path) for x in site.Menu], gap = 6, width = 130),
       web.Grow(m.View(q)),
     ], align = "start", gap = 16),
   ], gap = 10)
@@ -119,7 +133,7 @@ defn appLine(r)
   if value.IsMissing(v)
     return if value.IsMissing(a) web.Text("…", color = gray) else Wrong(a.Error) end
   end
-  web.Text("$(v.Name) $(v.Version) · $(v.Profile) · up $(Span(v.Uptime)) · $(text.Join(", ", v.Modules))", color = gray)
+  web.Text(Say("{Name} {Version} · {Profile} · up {Up} · {Modules}", {Name: v.Name, Version: v.Version, Profile: v.Profile, Up: Span(v.Uptime), Modules: text.Join(", ", v.Modules)}), color = gray)
 end
 
 defn againView(st, p, site)
@@ -137,9 +151,9 @@ defn againView(st, p, site)
   go = () -> signingIn(email, password, said, step, done = done)
   send = () -> secondStep(step, code, said, done = done)
   web.Stack([
-    web.Text("The session ended: sign in again, and the actions that wait go then.", color = red),
-    web.Row([Label("E-mail"), web.Input(email, label = "E-mail", width = 240), Label("Password"), web.Input(password, label = "Password", width = 200, secret = true, onEnter = go),
-      web.Button("Sign in", go)], gap = 8),
+    web.Text(Say("The session ended: sign in again, and the actions that wait go then."), color = red),
+    web.Row([Label(Say("E-mail")), web.Input(email, label = Say("E-mail"), width = 240), Label(Say("Password")), web.Input(password, label = Say("Password"), width = 200, secret = true, onEnter = go),
+      web.Button(Say("Sign in"), go)], gap = 8),
     () -> stepView(web.Get(step), code, send),
     () -> web.Text(web.Get(said), color = red),
   ], gap = 6, pad = 8, fill = 0xfdecea, border = red)
@@ -164,10 +178,10 @@ defn signIn(p, title, note)
   send = () -> secondStep(step, code, said)
   web.Stack([
     web.Title(title),
-    web.Text("Sign in with the account of a super-admin of the platform.", color = gray),
-    web.Row([Label("E-mail"), web.Input(email, label = "E-mail", width = 280)], gap = 8),
-    web.Row([Label("Password"), web.Input(password, label = "Password", width = 280, secret = true, onEnter = go)], gap = 8),
-    web.Row([web.Button("Sign in", go)], gap = 8),
+    web.Text(Say("Sign in with the account of a super-admin of the platform."), color = gray),
+    web.Row([Label(Say("E-mail")), web.Input(email, label = Say("E-mail"), width = 280)], gap = 8),
+    web.Row([Label(Say("Password")), web.Input(password, label = Say("Password"), width = 280, secret = true, onEnter = go)], gap = 8),
+    web.Row([web.Button(Say("Sign in"), go)], gap = 8),
     () -> stepView(web.Get(step), code, send),
     () -> web.Text(web.Get(said), color = red),
   ], gap = 10, pad = 24, width = 480)
@@ -180,10 +194,10 @@ defn stepView(s, code, send)
   end
   web.Stack([
     if value.IsDict(dict.Get("Setup", s)) web.Stack([
-      web.Text("This app asks a second factor of you. Type this secret into your authenticator app (or open its otpauth:// address), then its code below.", color = amber),
+      web.Text(Say("This app asks a second factor of you. Type this secret into your authenticator app (or open its otpauth:// address), then its code below."), color = amber),
       web.Text(s.Setup.Secret, font = "strong"), web.Text(s.Setup.Uri, color = gray),
-      web.Text("Your recovery codes, each good once without the app; keep them, they are shown this once: $(text.Join("  ", s.Setup.Codes))", color = gray)], gap = 4) else missing end,
-    web.Row([Label("Code"), web.Input(code, label = "Code of your app", width = 160, onEnter = send), web.Button("Send", send)], gap = 8),
+      web.Text(Say("Your recovery codes, each good once without the app; keep them, they are shown this once: {Codes}", {Codes: text.Join("  ", s.Setup.Codes)}), color = gray)], gap = 4) else missing end,
+    web.Row([Label(Say("Code")), web.Input(code, label = Say("Code of your app"), width = 160, onEnter = send), web.Button(Say("Send"), send)], gap = 8),
   ], gap = 6)
 end
 
@@ -198,7 +212,7 @@ defn secondStep(step, code, said, done = reload)
     done()
   else
     d = if value.IsDict(got.Data) got.Data else {} end
-    web.Set(said, "$(got.Status) $(dict.GetOr("detail", "The code was refused.", d))")
+    web.Set(said, "$(got.Status) $(if value.IsText(dict.Get("detail", d)) Say(d.detail) else Say("The code was refused.") end)")
     if got.Status == 403
       web.Set(step, missing)
     end
@@ -208,7 +222,7 @@ end
 defn signingIn(email, password, said, step, done = reload)
   (** Sends the sign-in; on success done(): the page loads again, signed in, by default; a 401 that asks a second
       factor opens its step. *)
-  web.Set(said, "Signing in…")
+  web.Set(said, Say("Signing in…"))
   got = fetchJson("/auth/signin", method = "POST", body = json.Text({Email: web.Get(email), Password: web.Get(password)}))
   web.Set(password, "")
   ok = got.Status >= 200 and got.Status < 300
@@ -217,7 +231,7 @@ defn signingIn(email, password, said, step, done = reload)
     done()
   else if ok
     _ = fetchJson("/auth/signout", method = "POST", body = "{}")
-    web.Set(said, "This account is no super-admin of the platform.")
+    web.Set(said, Say("This account is no super-admin of the platform."))
   else if got.Status == 401 and value.IsDict(got.Data) and value.IsDict(dict.Get("second", got.Data))
     s = {Ticket: got.Data.second.Ticket}
     if got.Data.second.Setup == true
@@ -229,10 +243,10 @@ defn signingIn(email, password, said, step, done = reload)
     web.Set(step, s)
     web.Set(said, "")
   else if got.Status == 428
-    web.Set(said, "The server asks a proof of work (it is under attack): sign in again in a while, or set APP_POW=off for this time.")
+    web.Set(said, Say("The server asks a proof of work (it is under attack): sign in again in a while, or set APP_POW=off for this time."))
   else
     d = if value.IsDict(got.Data) got.Data else {} end
     fields = dict.GetOr("errors", {}, d)
-    web.Set(said, "$(got.Status) $(dict.GetOr("detail", "The sign-in failed.", d))$(if value.IsDict(fields) and value.Len(fields) > 0 " ($(text.Join("; ", ["$(f.Key): $(f.Value)" for f in dict.Pairs(fields)])))" else "" end)")
+    web.Set(said, "$(got.Status) $(if value.IsText(dict.Get("detail", d)) Say(d.detail) else Say("The sign-in failed.") end)$(if value.IsDict(fields) and value.Len(fields) > 0 " ($(text.Join("; ", ["$(f.Key): $(Say(f.Value))" for f in dict.Pairs(fields)])))" else "" end)")
   end
 end

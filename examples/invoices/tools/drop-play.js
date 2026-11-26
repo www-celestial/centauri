@@ -4,6 +4,11 @@
 // that Ceres mirrors (ceres.js Tree), as tools/admin-play.js does. Each step gives JSON: {Line, Box}, Line "ok ..." or
 // "FAIL ...", Box the place of what the step looked at, for a picture of that part of the page.
 window.dropPlay = (() => {
+  // the names the player reads and presses, in French when the pages speak it (the document's lang)
+  const FR = { 'Data': 'Données', 'Save': 'Enregistrer', 'Mark paid': 'Marquer payée', 'Keep mine': 'Garder le mien',
+    'actions waiting': 'actions en attente', 'was refused': 'a été refusée', 'data reloaded': 'données rechargées', 'sending': 'envoi de' }
+  const say = s => (document.documentElement.lang.startsWith('fr') && FR[s]) || s
+  const LIVE = /^(Live|Direct)/, LINE = /^(Live|Offline|Connecting|Signed out|Screen closed|Direct|Hors ligne|Connexion|Déconnecté|Écran fermé)/
   // what the page writes to the console as an error, kept for the step errors
   const errors = []
   let onlines = 0, offlines = 0
@@ -39,22 +44,22 @@ window.dropPlay = (() => {
   }
   const texts = async () => all(await tree(), n => n.Role === 'text').map(n => n.Name)
   const says = async (s, ms = 15000) => until(async () => (await texts()).some(t => t.includes(s)), ms)
-  const status = async () => find(await tree(), n => n.Role === 'text' && /^(Live|Offline|Connecting|Signed out|Screen closed)/.test(n.Name || ''))
+  const status = async () => find(await tree(), n => n.Role === 'text' && LINE.test(n.Name || ''))
   const box = n => n ? { X: n.X, Y: n.Y, W: n.W, H: n.H } : null
   const band = async () => { const s = await status(); return s ? { X: 0, Y: 0, W: innerWidth, H: s.Y + s.H + 8 } : null }
   const out = (cond, what, b) => JSON.stringify({ Line: (cond ? 'ok ' : 'FAIL ') + what, Box: b || null })
   const cellsOf = r => all(r, c => c.Role === 'cell').map(c => c.Name)
   const steps = {
     async live () {
-      const s = await until(async () => { const n = await status(); return n && /^Live/.test(n.Name) ? n : null })
+      const s = await until(async () => { const n = await status(); return n && LIVE.test(n.Name) ? n : null })
       return out(s, 'the band says ' + (s ? s.Name : 'nothing'), await band())
     },
     async offline () {
-      const s = await until(async () => { const n = await status(); return n && /^Offline/.test(n.Name) ? n : null }, 20000)
+      const s = await until(async () => { const n = await status(); return n && /^(Offline|Hors ligne)/.test(n.Name) ? n : null }, 20000)
       return out(s, 'the band says at once: ' + (s ? s.Name : 'nothing'), await band())
     },
     async choose () {
-      await press('link', 'Data'); await wait(1200)
+      await press('link', say('Data')); await wait(1200)
       await press('link', 'invoice'); await wait(1500)
       const row = all(await tree(), n => n.Role === 'row')[2]; if (!row) return out(false, 'an invoice in the data browser')
       click(row); await wait(700)
@@ -63,54 +68,55 @@ window.dropPlay = (() => {
     },
     async save (bill) {
       const typed = await type('BillTo', bill)
-      await press('button', 'Save')
+      await press('button', say('Save'))
       return out(typed, 'changed while away, Save: ' + bill)
     },
     async markPaid () {
-      const asked = await press('button', n => n.startsWith('Mark paid'))
+      const asked = await press('button', n => n.startsWith(say('Mark paid')))
       // Yes by its key, C-y, as the band of keys says: the question is under the fields, below the window
-      await until(async () => (await texts()).some(t => /^Mark paid .*\?$/.test(t)), 5000)
+      const asking = t => t.startsWith(say('Mark paid')) && /\?$/.test(t)
+      await until(async () => (await texts()).some(asking), 5000)
       document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true, cancelable: true }))
-      const gone = await until(async () => !(await texts()).some(t => /^Mark paid .*\?$/.test(t)), 5000)
+      const gone = await until(async () => !(await texts()).some(asking), 5000)
       return out(asked && gone, 'Mark paid while away, Yes')
     },
     async waiting (n) {
-      const want = n + ' actions waiting'
+      const want = n + ' ' + say('actions waiting')
       const s = await until(async () => { const x = await status(); return x && x.Name.includes(want) ? x : null })
       return out(s, 'the band says: ' + (s ? s.Name : 'nothing with ' + want), await band())
     },
     async back () {
       const t0 = performance.now()
-      const s = await until(async () => { const x = await status(); return x && /^Live/.test(x.Name) && !/sending/.test(x.Name) ? x : null }, 45000)
+      const s = await until(async () => { const x = await status(); return x && LIVE.test(x.Name) && !x.Name.includes(say('sending')) ? x : null }, 45000)
       const now = await status()
       return out(s, 'back: ' + (s ? s.Name + ' after ' + Math.round(performance.now() - t0) + ' ms' : 'not back: ' + (now ? now.Name : '?') + ', navigator.onLine ' + navigator.onLine + ', online events ' + onlines + ', offline events ' + offlines), await band())
     },
     async conflict () {
-      const t = await until(async () => find(await tree(), n => n.Role === 'text' && (n.Name || '').includes('was refused')), 15000)
-      const keep = await node('button', 'Keep mine', 2000)
+      const t = await until(async () => find(await tree(), n => n.Role === 'text' && (n.Name || '').includes(say('was refused'))), 15000)
+      const keep = await node('button', say('Keep mine'), 2000)
       const b = t && keep ? { X: 0, Y: 0, W: innerWidth, H: keep.Y + keep.H + 12 } : await band()
-      return out(t && keep, 'the conflict shown: ' + (t ? t.Name : 'none') + ', ' + (await texts()).filter(x => /^(seen|now|yours) /.test(x)).join(' / '), b)
+      return out(t && keep, 'the conflict shown: ' + (t ? t.Name : 'none') + ', ' + (await texts()).filter(x => /^(seen|now|yours|vu|maintenant|le vôtre) /.test(x)).join(' / '), b)
     },
     async keepMine () {
-      await press('button', 'Keep mine')
-      const gone = await until(async () => !find(await tree(), named('button', 'Keep mine')), 15000)
+      await press('button', say('Keep mine'))
+      const gone = await until(async () => !find(await tree(), named('button', say('Keep mine'))), 15000)
       return out(gone, 'kept mine: sent again over the value now', await band())
     },
     async again (bill) {
       // the kind read again (the data browser is a list, not a live view), the same invoice chosen; then a change
       // asked, and the network cut by the test as it goes (tools/drop-shot.ce cuts after this step returns)
       const was = find(await tree(), n => n.Role === 'text' && /^invoice \d+$/.test(n.Name || ''))
-      await press('link', 'Data'); await wait(1200)
+      await press('link', say('Data')); await wait(1200)
       await press('link', 'invoice'); await wait(1500)
       const row = all(await tree(), n => n.Role === 'row')[2]; if (row) { click(row); await wait(700) }
       const now = await until(async () => find(await tree(), n => n.Role === 'text' && /^invoice \d+$/.test(n.Name || '')))
       if (!was || !now || was.Name !== now.Name) return out(false, 'the same invoice chosen again')
       await type('BillTo', bill)
-      await press('button', 'Save')
+      await press('button', say('Save'))
       return out(true, 'a change asked as the connection drops: ' + bill)
     },
     async reloaded () {
-      const s = await until(async () => { const x = await status(); return x && /data reloaded/.test(x.Name) ? x : null }, 30000)
+      const s = await until(async () => { const x = await status(); return x && x.Name.includes(say('data reloaded')) ? x : null }, 30000)
       return out(s, 'after the restart: ' + (s ? s.Name : 'no reload said'), await band())
     },
     async errors () { return out(errors.length === 0, 'errors of the page: ' + (errors.length ? errors.join(' / ').slice(0, 2000) : 'none')) },

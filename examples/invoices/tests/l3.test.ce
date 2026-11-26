@@ -1,15 +1,19 @@
 (** The invoices after their first quarter, the tutorials 12 to 16 of the book, each checked: signing in with Google,
     passkeys and two-factor for the owners, an API for a partner with its key, the app in English and in French, and
     the export with the country opened to one office by a flag. A provider of OpenID Connect and a device of passkeys
-    in software play Google and the phone (apptest.Provider, apptest.Device). *)
+    in software play Google and the phone (apptest.Provider, apptest.Device). And the admin pages in French. *)
+use deps/www-celestial/centauri/src/admin/pages
 use deps/www-celestial/centauri/src/api
 use deps/www-celestial/centauri/src/app
 use deps/www-celestial/centauri/src/apptest
 use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/i18n
 use src/invoices
 use src/invoices/endpoints as e
+use src/invoices/words
 use std/bug
 use std/dict
+use std/http
 use std/json
 use std/list
 use std/result
@@ -89,6 +93,18 @@ defn isInFrench()
   t.Anyone().Call(api.Forgot, {Email: ada.Email})
   t.RunJobs()?
   t.Mails()[value.Len(t.Mails())].Subject == "Un nouveau mot de passe pour invoices"
+end
+
+defn isAdminInFrench()
+  (** The chapter The admin, its last step: each text of the invoices' own admin page has its French in the invoices'
+      words, after Centauri's (pages.Words), with the names of its values; and /auth/me tells the pages the language
+      of a French browser, which they speak. *)
+  wrong = apptest.Untranslated(["admin/page.ce"], i18n.Of([pages.Words, words.Words]), "fr")
+  bug.Assert(value.Len(wrong) == 0, text.Join("\n", wrong))
+  t = apptest.Start(invoices.App)?
+  a = t.SignUp(ada)?
+  out = a.Raw("GET", "/auth/me", headers = [{Name: "accept-language", Value: "fr-FR,fr;q=0.9"}])
+  http.HeaderValue("content-language", out.Headers) == "fr"
 end
 
 defn isExportOpenedToOneOffice()

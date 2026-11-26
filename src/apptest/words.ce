@@ -1,0 +1,360 @@
+(* The texts of an app's pages against a catalogue of another language: each text said has its translation, with the
+   names of its values, and no text is given to a widget without being said. *)
+use src/i18n
+use std/dict
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(* The calls and names whose text the pages say: Say, and the titles that the admin pages say for an app (those of
+   Page, Action and Column first, and title = or Title:). *)
+said = ["Say(", "Title: ", "title = ", "Page(", "Action(", "Column("]
+
+(* The widgets of Ceres that show a text as they get it: one given to them straight shows in English in every
+   language. *)
+straight = ["web.Text(", "web.Title(", "web.Button(", "web.Link(", "web.Column(", "label = ", "placeholder = ", "name = "]
+
+defn Untranslated(paths, words, lang)
+  (** The texts of pages that a catalogue of i18n doesn't give in a language: each a line "file:line: what", none when
+      every text shows in lang. paths are files of Cesia, or folders whose .ce files are read (their tests left out).
+      A text said, the first text of Say(...), or a title the admin pages say for an app (the first text of Page(...),
+      Action(...) or Column(...) without title, a text given as title = or as Title:), must be in the catalogue in
+      lang, not empty, each of its forms with the names of the values of the message ({N}, {Email}), and whole: its
+      values in the args of Say, never written into it with $. A text with a letter given straight to a widget of
+      Ceres (web.Text, web.Title, web.Button, web.Link, web.Column, or as label =, placeholder =, name =) shows in
+      English in every language: it goes through Say. The catalogue's own entries in lang are checked too, so that
+      paths = [] checks a catalogue alone: an empty text, a name of a value lost or added. Comments are not read.
+
+        Untranslated([], i18n.Catalog("fr", [["{N} rows", "{N} lignes"]]), "fr") --> []
+        Untranslated([], i18n.Catalog("fr", [["{N} rows", "lignes"]]), "fr") --> ["the catalogue: \"{N} rows\" loses {N} in fr."] *)
+  l = text.Lower(lang)
+  mine = dict.GetOr(l, dict.Dict(), words.Exact)
+  out = [line for line in [entryProblem(p.Key, p.Value, l) for p in dict.Pairs(mine)] if line != ""]
+  for f in filesOf(paths)
+    src = sys.Read(f)
+    if result.IsErr(src)
+      out = list.Append("$f: it can't be read: $(src.Error.Message)", out)
+    else
+      starts = lineStarts(src.Value)
+      for t in textsIn(src.Value)
+        where = "$f:$(lineAt(t.At, starts))"
+        if t.Mark in straight and hasLetter(t.Text)
+          out = list.Append("$where: \"$(t.Text)\" is given straight to $(t.Mark)...): it shows in English in every language; give it to Say.", out)
+        else if t.Mark in said
+          out = list.Concat(out, keyProblems(t.Text, mine, l, where))
+        end
+      end
+    end
+  end
+  out
+end
+
+defn filesOf(paths)
+  (** The files of paths: a .ce file as it is, a folder's .ce files but its tests. *)
+  out = []
+  for p in paths
+    if text.EndsWith(".ce", p)
+      out = list.Append(p, out)
+    else
+      names = sys.List(p)
+      if result.IsOk(names)
+        out = list.Concat(out, ["$p/$n" for n in names.Value if text.EndsWith(".ce", n) and not text.EndsWith(".test.ce", n)])
+      else
+        out = list.Append(p, out)
+      end
+    end
+  end
+  out
+end
+
+defn keyProblems(raw, mine, lang, where)
+  (** What is wrong with a text said, as written in the source. *)
+  if written(raw)
+    return ["$where: \"$raw\" has a value written into it: give the message whole to Say, its values in args ({N} and {N: n})."]
+  end
+  k = unescaped(raw)
+  target = dict.Get(k, mine)
+  if value.IsMissing(target)
+    return ["$where: \"$k\" has no text in $lang."]
+  end
+  []
+end
+
+defn written(raw)
+  (** Does a text of the source take a value with $: $(...) or $name. *)
+  b = text.Bytes(raw)
+  k = 1
+  while k < value.Len(b)
+    c = b[k + 1]
+    if b[k] == 36 and c == 36
+      k += 1
+    else if b[k] == 36 and (c == 40 or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95)
+      return true
+    end
+    k += 1
+  end
+  false
+end
+
+defn entryProblem(key, target, lang)
+  (** What is wrong with an entry of the catalogue: "" for nothing. A plural form but other may leave out the value
+      that By names, the number its words say ("dans l'heure" for {Hours} 1). *)
+  forms = if value.IsDict(target) [p for p in dict.Pairs(target) if p.Key != "By"] else [{Key: "other", Value: target}] end
+  if list.Any([not value.IsText(x.Value) or x.Value == "" for x in forms])
+    return "the catalogue: \"$key\" is empty in $lang."
+  end
+  names = namesOf(key)
+  by = if value.IsDict(target) dict.Get("By", target) else missing end
+  for x in forms
+    theirs = namesOf(x.Value)
+    lost = [n for n in names if not (n in theirs) and not (x.Key != "other" and n == by)]
+    added = [n for n in theirs if not (n in names)]
+    if value.Len(lost) > 0
+      return "the catalogue: \"$key\" loses $(text.Join(", ", ["{$n}" for n in lost])) in $lang."
+    end
+    if value.Len(added) > 0
+      return "the catalogue: \"$key\" adds $(text.Join(", ", ["{$n}" for n in added])) in $lang, which the message doesn't give."
+    end
+  end
+  ""
+end
+
+defn namesOf(t)
+  (** The names of the values of a message, {Name}: a letter, then letters and digits. *)
+  out = []
+  rest = t
+  while true
+    open = text.ByteFind("{", 1, rest)
+    if value.IsMissing(open)
+      return out
+    end
+    close = text.ByteFind("}", open + 1, rest)
+    if value.IsMissing(close)
+      return out
+    end
+    name = text.ByteSlice(open + 1, close - 1, rest)
+    if isName(name) and not (name in out)
+      out = list.Append(name, out)
+    end
+    rest = text.ByteSlice(if isName(name) close + 1 else open + 1 end, text.ByteLength(rest), rest)
+  end
+end
+
+defn isName(s)
+  b = text.Bytes(s)
+  letter(c) = (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+  value.Len(b) > 0 and value.Len(b) <= 40 and letter(b[1]) and list.All([letter(c) or (c >= 48 and c <= 57) for c in b])
+end
+
+defn hasLetter(raw)
+  (** Does a text of the source hold a letter of its own, its values ($(...), $name) left out. *)
+  b = text.Bytes(raw)
+  k = 1
+  n = value.Len(b)
+  while k <= n
+    c = b[k]
+    if c == 36 and k < n and b[k + 1] == 36
+      k += 1
+    else if c == 36 and k < n and b[k + 1] == 40
+      depth = 0
+      k += 1
+      while k <= n
+        if b[k] == 40
+          depth += 1
+        else if b[k] == 41
+          depth -= 1
+          if depth == 0
+            break
+          end
+        end
+        k += 1
+      end
+    else if c == 36
+      k += 1
+      while k <= n and ((b[k] >= 65 and b[k] <= 90) or (b[k] >= 97 and b[k] <= 122) or (b[k] >= 48 and b[k] <= 57) or b[k] == 95 or b[k] == 46)
+        k += 1
+      end
+      k -= 1
+    else if (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+      return true
+    end
+    k += 1
+  end
+  false
+end
+
+defn unescaped(raw)
+  (** A text of the source as the program has it: \" \\ \n \t read. *)
+  if not text.Contains("\\", raw)
+    return raw
+  end
+  b = text.Bytes(raw)
+  out = []
+  k = 1
+  while k <= value.Len(b)
+    if b[k] == 92 and k < value.Len(b)
+      c = b[k + 1]
+      out = list.Append(if c == 110 "\n" else if c == 116 "\t" else text.ByteSlice(k + 1, k + 1, raw) end, out)
+      k += 2
+    else
+      out = list.Append(text.ByteSlice(k, k, raw), out)
+      k += 1
+    end
+  end
+  text.Join("", out)
+end
+
+(* ---- The texts of a source, each with the call or the name it is given to. *)
+
+defn textsIn(src)
+  (** The texts of a source of Cesia, those inside the values of a text too: each {At, Text, Mark}, At its byte, Text
+      as written between its quotes, Mark the call or name it is given to (one of said or straight), "" for another. *)
+  code(src, text.Bytes(src), 1, false).Found
+end
+
+defn code(src, b, start, nested)
+  (** The texts of code from byte start, to the end, or to the ) that closes a $( of a text when nested: {End, Found}. *)
+  found = []
+  k = start
+  n = value.Len(b)
+  depth = 0
+  while k <= n
+    c = b[k]
+    if c == 40 and k < n and b[k + 1] == 42
+      k = comment(b, k)
+    else if c == 34
+      lit = literal(src, b, k)
+      found = list.Concat(list.Append({At: k, Text: lit.Text, Mark: markOf(src, b, k, lit.End)}, found), lit.Found)
+      k = lit.End + 1
+    else if nested and c == 40
+      depth += 1
+      k += 1
+    else if nested and c == 41
+      if depth == 0
+        return {End: k, Found: found}
+      end
+      depth -= 1
+      k += 1
+    else
+      k += 1
+    end
+  end
+  {End: k, Found: found}
+end
+
+defn literal(src, b, start)
+  (** A text from its opening quote: {End, its closing quote, Text, what is between, Found, the texts in its $(...)}. *)
+  k = start + 1
+  found = []
+  n = value.Len(b)
+  while k <= n and b[k] != 34
+    if b[k] == 92
+      k += 2
+    else if b[k] == 36 and k < n and b[k + 1] == 40
+      inner = code(src, b, k + 2, true)
+      found = list.Concat(found, inner.Found)
+      k = inner.End + 1
+    else
+      k += 1
+    end
+  end
+  {End: k, Text: text.ByteSlice(start + 1, k - 1, src), Found: found}
+end
+
+defn comment(b, start)
+  (** The byte after a comment, (* ... *), comments inside it too. *)
+  depth = 0
+  k = start
+  n = value.Len(b)
+  while k < n
+    if b[k] == 40 and b[k + 1] == 42
+      depth += 1
+      k += 2
+    else if b[k] == 42 and b[k + 1] == 41
+      depth -= 1
+      k += 2
+      if depth == 0
+        return k
+      end
+    else
+      k += 1
+    end
+  end
+  n + 1
+end
+
+defn markOf(src, b, at, close)
+  (** The call or name a text at byte at is given to, of said or straight, or "": a Column with a title gives the
+      field, not a text shown. *)
+  before = text.ByteSlice(list.Max([1, at - 20]), at - 1, src)
+  for m in straight
+    if text.EndsWith(m, before)
+      return m
+    end
+  end
+  for m in said
+    if text.EndsWith(m, before)
+      k = text.ByteLength(before) - text.ByteLength(m)
+      c = if k >= 1 text.Bytes(text.ByteSlice(k, k, before))[1] else 32 end
+      own = (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or c == 95
+      if not own and not (m == "Column(" and titled(src, b, close))
+        return m
+      end
+    end
+  end
+  ""
+end
+
+defn titled(src, b, close)
+  (** Does the call whose first text ends at close give a title =, before its ). *)
+  k = close + 1
+  n = value.Len(b)
+  depth = 0
+  while k <= n
+    c = b[k]
+    if c == 34
+      k = literal(src, b, k).End
+    else if c == 40
+      depth += 1
+    else if c == 41
+      if depth == 0
+        return false
+      end
+      depth -= 1
+    else if depth == 0 and c == 116 and k + 6 <= n and text.ByteSlice(k, k + 6, src) == "title ="
+      return true
+    end
+    k += 1
+  end
+  false
+end
+
+defn lineStarts(src)
+  (** The byte where each line of a source starts. *)
+  out = [1]
+  b = text.Bytes(src)
+  for k in 1..value.Len(b)
+    if b[k] == 10
+      out = list.Append(k + 1, out)
+    end
+  end
+  out
+end
+
+defn lineAt(at, starts)
+  (** The line of a byte, from where the lines start: a search by halves. *)
+  lo = 1
+  hi = value.Len(starts)
+  while lo < hi
+    mid = math.Div(lo + hi + 1, 2)
+    if starts[mid] <= at
+      lo = mid
+    else
+      hi = mid - 1
+    end
+  end
+  lo
+end

@@ -89,7 +89,30 @@ The contract says what each endpoint takes and gives, and who may call it. It is
 `std/check` and Centauri's `api` only, so that a page reads it too (in WebAssembly) and checks a form with the same
 shapes as the server:
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/auth
+use std/dict
+use std/list
+use std/result
+use std/text
+use std/json
+Balance = json.Parse("{}")!
+Kinds = json.Parse("{}")!
+Rules = json.Parse("{}")!
+balance = json.Parse("{}")!
+deleteClient = json.Parse("{}")!
+e = json.Parse("{}")!
+editClient = json.Parse("{}")!
+emailTaken = json.Parse("{}")!
+invoices = json.Parse("{}")!
+keep = json.Parse("{}")!
+office = json.Parse("{}")!
+taken = json.Parse("{}")!
 ```
+
+```cesia norun
 (* src/invoices/endpoints/endpoints.ce *)
 use deps/www-celestial/centauri/src/api
 use std/check
@@ -125,7 +148,7 @@ record ClientOut(Long id, String name, String email, String city, Boolean overdu
 
 ## 3. What the database keeps
 
-```
+```cesia norun
 (* src/invoices/kinds.ce *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use deps/www-celestial/centauri/src/app
@@ -156,7 +179,7 @@ interface ClientRepo extends JpaRepository<Client, Long> {
 A handler is a function of the request `r`, and of what came in, `x`, already checked. `r.User` is who asks (`Id`,
 `Tenant`, `Roles`), `r.Db` the database, `r.Why` what writes (the route and the request's number, kept in the history).
 
-```
+```cesia norun
 (* src/invoices/clients.ce *)
 fields(x, r) = {Name: x.Name, Search: text.Fold(x.Name), Email: x.Email, Key: "$(r.User.Tenant)/$(x.Email)", City: x.City}
 
@@ -215,7 +238,7 @@ class ClientController {
 
 ## 5. A list by pages
 
-```
+```cesia norun
 defn clients(r, q)
   search = text.Fold(q.Search)
   cepheus.Find(6, (c, n, y, m, k, t) -> {
@@ -242,13 +265,13 @@ of the name folded by `text.Fold` (Élodie and ÉLODIE fold the same), or of the
 
 ## 6. The module and the app
 
-```
+```cesia norun
 (* src/invoices/module.ce *)
 Roles = {owner: ["admin"], admin: ["accountant"], accountant: []}
 
 Module = app.Module("invoices", kinds = Kinds, rules = Rules, start = keep, serve = [
   app.Serve(e.AddClient, addClient), app.Serve(e.Clients, clients), app.Serve(e.Client, client), app.Serve(e.EditClient, editClient),
-  app.Serve(e.DeleteClient, deleteClient), ...])
+  app.Serve(e.DeleteClient, deleteClient), (* ... *)])
 
 App = app.Of([auth.Module(), Module], name = "invoices", roles = Roles, defaults = {MemberRoles: "accountant"})
 
@@ -288,7 +311,30 @@ doc.paths["/clients"].post["x-role"] --> "admin"
 
 ## 8. Its tests
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/auth
+use std/dict
+use std/list
+use std/result
+use std/text
+use std/json
+Balance = json.Parse("{}")!
+Kinds = json.Parse("{}")!
+Rules = json.Parse("{}")!
+balance = json.Parse("{}")!
+deleteClient = json.Parse("{}")!
+e = json.Parse("{}")!
+editClient = json.Parse("{}")!
+emailTaken = json.Parse("{}")!
+invoices = json.Parse("{}")!
+keep = json.Parse("{}")!
+office = json.Parse("{}")!
+taken = json.Parse("{}")!
 ```
+
+```cesia norun
 defn isEmailUniqueInAnOffice()
   s = office()?
   again = s.Ada.Call(e.AddClient, {Name: "Other", Email: "ada@example.com"})

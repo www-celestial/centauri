@@ -15,21 +15,21 @@ defn Data(p)
   (** The kinds of the app, or the things of one (/data/:kind). *)
   name = dict.Get("kind", p.Params)
   if value.IsSome(name)
-    return web.Stack([web.Row([web.Link("Data", "/data"), web.Text("›", color = gray), web.Title(kindTitle(name, p))], gap = 8), Things(p, name)], gap = 8)
+    return web.Stack([web.Row([web.Link(Say("Data"), "/data"), web.Text("›", color = gray), web.Title(kindTitle(name, p))], gap = 8), Things(p, name)], gap = 8)
   end
   kinds = Call(api.AdminKinds, {}, p)
   web.Stack([
-    web.Title("Data"),
-    web.Text("Each kind of the database that app.Kind declares, by the module that declares it.", color = gray),
+    web.Title(Say("Data")),
+    web.Text(Say("Each kind of the database that app.Kind declares, by the module that declares it."), color = gray),
     Replied(kinds, ks -> web.Stack([web.Row([web.Link(k.Name, "/data/$(k.Name)"), web.Text(k.Module, color = gray),
-      web.Text(text.Join(", ", ["$(f.Name)$(if f.Secret == true " (secret)" else "" end)" for f in k.Fields]), color = gray)], gap = 10) for k in ks], gap = 4)),
+      web.Text(text.Join(", ", [if f.Secret == true Say("{Field} (secret)", {Field: f.Name}) else f.Name end for f in k.Fields]), color = gray)], gap = 10) for k in ks], gap = 4)),
   ], gap = 8)
 end
 
 defn kindTitle(name, p)
-  (** The title of a kind: the app's, or its name. *)
+  (** The title of a kind: the app's, said in the pages' language, or its name. *)
   k = dict.Get(name, p.Site.Kinds)
-  if value.IsMissing(k) name else k.Title end
+  if value.IsMissing(k) name else Say(k.Title) end
 end
 
 defn parsed(row)
@@ -54,18 +54,18 @@ defn columnsOf(kind, p)
   (** The columns of a kind's table: the app's (pages.Kind), else its id and its first six fields. *)
   own = dict.Get(kind.Name, p.Site.Kinds)
   if value.IsSome(own) and value.Len(own.Columns) > 0
-    return list.Concat([web.Column("Id", t -> t.Id, sort = "Id", width = 80)],
-      [web.Column(c.Title, if value.IsMissing(c.Show) (t -> Cell(dict.Get(c.Field, t))) else (t -> c.Show(dict.Get(c.Field, t))) end, sort = c.Field, width = c.Width) for c in own.Columns])
+    return list.Concat([web.Column(Say("Id"), t -> t.Id, sort = "Id", width = 80)],
+      [web.Column(Say(c.Title), if value.IsMissing(c.Show) (t -> Cell(dict.Get(c.Field, t))) else (t -> c.Show(dict.Get(c.Field, t))) end, sort = c.Field, width = c.Width) for c in own.Columns])
   end
   fields = list.Take(6, [f for f in kind.Fields])
-  list.Concat([web.Column("Id", t -> t.Id, sort = "Id", width = 80)],
+  list.Concat([web.Column(Say("Id"), t -> t.Id, sort = "Id", width = 80)],
     [web.Column(f.Name, if f.Type == "date" (t -> Local(dict.Get(f.Name, t))) else (t -> Cell(dict.Get(f.Name, t))) end, sort = f.Name) for f in fields])
 end
 
 defn thingsOf(kind, p, l, rows, height)
   (** The table of a kind's things and the editor of the one chosen. *)
   if value.IsMissing(kind)
-    return web.Text("There is no such kind.", color = red)
+    return web.Text(Say("There is no such kind."), color = red)
   end
   table = web.Table(rows, columnsOf(kind, p), height = height, label = kind.Name)
   said = web.Signal(missing)
@@ -105,7 +105,7 @@ defn typed(s, f)
       return if x in ["yes", "true", "1"] true else if x in ["no", "false", "0"] false else x end
     end
     if f.Type == "date" and value.Len(x) == 10
-      day = Seconds(x)
+      day = Seconds(DayFirst(x))
       return if value.IsMissing(day) x else day end
     end
     if f.Type == "date"
@@ -121,7 +121,7 @@ end
 defn editor(thing, kind, p, l, said, asking)
   (** The fields of the thing chosen, each in an input, saved together: only those changed are sent. *)
   if value.IsMissing(thing)
-    return web.Text("Choose a thing in the table to see all its fields and change them.", color = gray)
+    return web.Text(Say("Choose a thing in the table to see all its fields and change them."), color = gray)
   end
   inputs = [{Field: f, Was: shownValue(dict.Get(f.Name, thing), f), Value: web.Signal(shownValue(dict.Get(f.Name, thing), f))} for f in kind.Fields]
   save = defn ()
@@ -134,7 +134,7 @@ defn editor(thing, kind, p, l, said, asking)
       end
     end
     if value.Len(changes) == 0
-      web.Set(said, web.Signal(result.Err({Message: "Nothing changed."})))
+      web.Set(said, web.Signal(result.Err({Message: Say("Nothing changed.")})))
       return missing
     end
     web.Set(said, Call(api.AdminEdit, {kind: kind.Name, id: thing.Id, Fields: json.Text(changes)}, p, base = seen, mine = changes))
@@ -143,7 +143,7 @@ defn editor(thing, kind, p, l, said, asking)
   own = dict.Get(kind.Name, p.Site.Kinds)
   acts = if value.IsMissing(own) [] else own.Actions end
   web.Stack([
-    web.Row([web.Text("$(kind.Name) $(thing.Id)", font = "strong"), web.Button("Save", save, key = "C-s"),
+    web.Row([web.Text("$(kind.Name) $(thing.Id)", font = "strong"), web.Button(Say("Save"), save, key = "C-s"),
       web.Row([action(a, thing, p, said, asking, l) for a in acts], gap = 6)], gap = 10),
     web.Stack([fieldRow(x, save) for x in inputs], gap = 4),
   ], gap = 6, pad = 8, border = 0xd0d5dd)
@@ -152,8 +152,8 @@ end
 defn fieldRow(x, save)
   (** A field of the editor: its name, its input (or "(secret)"), its type. *)
   f = x.Field
-  box = if f.Secret == true web.Text("(secret)", color = gray) else web.Input(x.Value, label = f.Name, width = 420, onEnter = save) end
-  web.Row([Label(f.Name, width = 120), box, web.Text("$(f.Type)$(if f.Many " list" else "" end)$(if f.Unique " unique" else "" end)", color = gray)], gap = 8)
+  box = if f.Secret == true web.Text(Say("(secret)"), color = gray) else web.Input(x.Value, label = f.Name, width = 420, onEnter = save) end
+  web.Row([Label(f.Name, width = 120), box, web.Text("$(f.Type)$(if f.Many " $(Say("list"))" else "" end)$(if f.Unique " $(Say("unique"))" else "" end)", color = gray)], gap = 8)
 end
 
 defn action(a, thing, p, said, asking, l)
@@ -163,5 +163,5 @@ defn action(a, thing, p, said, asking, l)
     web.Set(said, Call(a.Endpoint, args, p))
     Again(l, web.Get(l.Args))
   end
-  if a.Confirm Confirm(asking, "$(a.Label) ($(thing.Id))", run) else web.Button(a.Label, run) end
+  if a.Confirm Confirm(asking, "$(Say(a.Label)) ($(thing.Id))", run) else web.Button(Say(a.Label), run) end
 end

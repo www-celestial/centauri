@@ -25,7 +25,17 @@ centauri: APP_CEPHEUS_URL: the database is needed in prod, as cepheus://localhos
 A secret (`check.Secret()`, as `APP_SECRET`, `APP_CEPHEUS_TOKEN`, and the providers' `APP_GOOGLE_SECRET`,
 `APP_APPLE_KEY`...) is never written in a log, and the administration shows it `(secret)`. An app adds its own settings, with their shapes, and reads them in `r.Settings`:
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/auth
+use std/check
+use std/json
+invoices = json.Parse("{}")!
 ```
+
+```cesia norun
 Settings = check.Record({MailFrom: check.Email(optional = true, default = "office@example.com")})
 App = app.Of([auth.Module(), invoices.Module], settings = Settings, defaults = {Tenancy: "single"})
 ```
@@ -67,7 +77,7 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_EMAIL_CHECK`, `APP_SIGN_UP_ANSWER`, `APP_CHECK_TIME`, `APP_RESET_TIME`, `APP_CHECK_PAGE`, `APP_RESET_PAGE`, `APP_MAILS_PER_HOUR` | `off`, `tell`, 2 days, 1 hour, `/check-email`, `/reset-password`, 5 | the checks of addresses and the new passwords by mail ([check](check-email.md)) |
 | `APP_HOOK_TOLERANCE`, `APP_HOOK_TIMEOUT` | 300 s, 15 s | the webhooks: how far from now a message received may be, the deadline of each try |
 | `APP_ADMIN_PATH` | `/admin` | where the admin pages are served, `off` for none ([the admin pages](admin.md)) |
-| `APP_LANGS` | `en` | the languages the app speaks, with commas, its first the default; `en` alone translates nothing ([languages](languages.md)) |
+| `APP_LANGS` | `en` | the languages the app speaks, with commas, its first the default; `en` alone translates nothing; the admin pages speak them too, English and French ([languages](languages.md)) |
 | `APP_KEY_LIMIT` | 600 | the requests a minute of each key of a program, a burst of a quarter, apart from the users' ([partner API](partner-api.md)) |
 | `APP_PASSWORDS` | `on` | `off`: no sign-up nor sign-in by password, only passkeys and providers |
 | `APP_TWO_FACTOR`, `APP_TWO_FACTOR_ROLES` | `optional`, none | TOTP `off`, `optional` (a user turns it on) or `required` of everyone; the roles, with commas, that must have a second factor (`super` for the super-admins) ([passkeys](passkeys.md)) |
