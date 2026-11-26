@@ -30,7 +30,8 @@ defn Start(a, settings = {}, now = Epoch)
       t.SignIn(email, password), t.Anyone(), t.Super(), t.As(u, roles), t.Make(u, kind, fields), t.Advance(seconds),
       t.Raw(method, path), t.RunJobs() (the background jobs due on its clock, one after the other: an Ok of how many
       ran) and t.Jobs(state) (the jobs of a state, "dead" unless given), t.Mails() (the mails sent, the oldest first: {From, To,
-      Subject, Text, Html, Id, Raw}), t.Code(email) (the code of the last link mailed to an address). settings are given as the environment would give them, over the profile test, proof of work
+      Subject, Text, Html, Id, Raw}), t.Code(email) (the code of the last link mailed to an address), t.SetUp(err) (a
+      second factor set up, when the settings stopped a sign-in at one: SetUp). settings are given as the environment would give them, over the profile test, proof of work
       off and generous limits, which a test of them sets back. *)
   db = cepheus.Fork(cepheus.Empty, a.Kinds)?
   if value.Len(a.Rules) > 0
@@ -75,6 +76,7 @@ defn made(t)
   out.Jobs = (state = "dead") -> jobs.List(state, t.Db)
   out.Mails = () -> app.Mails(t.Env.State)
   out.Code = email -> CodeOf(t, email)
+  out.SetUp = failed -> SetUp(t, failed)
   result.Ok(out)
 end
 
@@ -239,6 +241,22 @@ defn signUp(t, x)
     end
   end
   result.Ok(client(t, got.Value, cookieOf(out), out, ip))
+end
+
+defn SetUp(t, failed)
+  (** The end of a sign-up or a sign-in that the settings stopped at a second factor not yet set up (the Err of
+      t.SignUp or t.SignIn, its 401): TOTP set up as its owner would, with his app, and the session opened. An Ok of
+      {Client, Secret, Codes}, the client signed in, the secret of his app, his recovery codes. *)
+  second = dict.Get("second", dict.GetOr("Problem", {}, failed.Error))
+  if not value.IsDict(second)
+    return failed
+  end
+  ip = "198.51.100.251"
+  s = Answer(send(t, missing, ip, api.SecondSetup, {Ticket: second.Ticket}))?
+  code = auth.TotpCode(s.Secret, t.Env.Now(), t.Env)?
+  out = send(t, missing, ip, api.Second, {Ticket: second.Ticket, Code: code})
+  got = Answer(out)?
+  result.Ok({Client: client(t, got, cookieOf(out), out, ip), Secret: s.Secret, Codes: s.Codes})
 end
 
 defn signIn(t, email, password)

@@ -80,6 +80,18 @@ window.adminPlay = (() => {
       const kinds = all(await tree(), n => n.Role === 'cell').map(n => n.Name)
       return line(['disabled', 'data-edited'].every(k => kinds.includes(k)), 'the audit trail holds each change')
     },
+    async revoke () {
+      const k = await rowOf('Accounting robot'); if (!k) return line(false, 'the key in the table')
+      click(k); await wait(500)
+      const asked = await press('button', n => n.startsWith('Revoke key')) && await says('Accounting robot)?')
+      await press('button', 'Yes')
+      return line(asked && await says('Done.'), 'a key chosen, revoked once asked')
+    },
+    async flag () {
+      const shown = await says('export.country') && await says('Tenants:')
+      await press('button', 'On for everyone')
+      return line(shown && await says('on for everyone'), 'the flag of the export, its office, then on for everyone')
+    },
     async signOut () {
       setTimeout(() => press('button', 'Sign out'), 50)
       return line(true, 'signing out (the page loads again)')

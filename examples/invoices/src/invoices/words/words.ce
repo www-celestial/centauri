@@ -1,0 +1,23 @@
+(** The words of the invoices in French, for the server (its errors, read by the door into the language of each
+    request) and for the pages (the same catalogue: i18n.Say(words.Words, lang, message)). Centauri's own words, and
+    those of std/check's shapes, come with Centauri (i18n.Centauri). *)
+use deps/www-celestial/centauri/src/i18n
+
+(** The catalogue of the invoices.
+
+      i18n.Say(Words, "fr", "Invoice 12 is paid already.") --> "La facture 12 est déjà payée."
+      i18n.Say(Words, "fr", "{N} unpaid invoices", {N: 1}) --> "1 facture impayée" *)
+Words = i18n.Catalog({fr: {
+  "Invoice {Number} is paid already.": "La facture {Number} est déjà payée.",
+  "Invoice {Number} is paid: it stays as it is.": "La facture {Number} est payée : elle reste telle qu’elle est.",
+  "Invoice {Number} is paid: it stays.": "La facture {Number} est payée : elle reste.",
+  "Another client has this e-mail.": "Un autre client a cette adresse e-mail.",
+  "This client has invoices: it stays.": "Ce client a des factures : il reste.",
+  "An invoice of this client came meanwhile: it stays.": "Une facture de ce client est arrivée entre-temps : il reste.",
+  "This invoice has no scan.": "Cette facture n’a pas de scan.",
+  "This answer names no invoice.": "Cette réponse ne nomme aucune facture.",
+  "A due date on or after the date.": "Une échéance le jour de la facture ou après.",
+  "The total may not pass 1,000,000,000.": "Le total ne peut pas dépasser 1 000 000 000.",
+  "This client was deleted meanwhile.": "Ce client a été supprimé entre-temps.",
+  "{N} unpaid invoices": {one: "{N} facture impayée", other: "{N} factures impayées"},
+}})

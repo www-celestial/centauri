@@ -3,6 +3,7 @@
    minute; and the dashboard's numbers. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/flags
 use deps/www-celestial/centauri/src/hooks
 use std/csv
 use std/date
@@ -175,9 +176,19 @@ defn export(r, f)
     end
   end
   day(t) = if value.IsMissing(t) "" else date.FormatDate(date.FromUnix(t)) end
-  lines = list.Concat([["number", "date", "due", "bill_to", "status", "total", "paid_at"]],
-    [[x.Number, day(x.Date), day(x.Due), cell(x.BillTo), x.Status, text.Decimals(2, x.Total), day(dict.Get(x.Id, paid))] for x in rows])
+  country = flags.On("export.country", r)
+  head = ["number", "date", "due", "bill_to", "status", "total", "paid_at"]
+  lines = list.Concat([if country list.Append("country", head) else head end],
+    [list.Concat([x.Number, day(x.Date), day(x.Due), cell(x.BillTo), x.Status, text.Decimals(2, x.Total), day(dict.Get(x.Id, paid))],
+      if country [countryOf(x.Id, r)?] else [] end) for x in rows])
   app.Reply(csv.Text(lines), headers = [{Name: "content-disposition", Value: "attachment; filename=\"invoices.csv\""}])
+end
+
+defn countryOf(invoice, r)
+  (** The country of the client of an invoice, for the export of the flag export.country: an Ok. *)
+  inv = cepheus.Get(Invoice, invoice, r.Db)?
+  c = cepheus.Get(Client, inv.Client, r.Db)?
+  result.Ok(dict.GetOr("Country", "", c))
 end
 
 defn dashboard(r)

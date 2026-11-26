@@ -1,0 +1,97 @@
+(* The access of programs and features: the keys of programs of every tenant (revoked from here; their secrets were
+   shown once, to their makers, and the server keeps their hashes only), and the feature flags (on or off for
+   everyone, a share of the users, a tenant, a user). *)
+use deps/www-celestial/ceres/src/web
+use src/api
+use std/dict
+use std/list
+use std/text
+use std/value
+
+defn Keys(p)
+  (** The keys of programs, 50 a page, of a tenant or all. *)
+  tenant = web.Signal("")
+  l = Lister(api.AdminKeys, {}, p)
+  rows = ListRows(l)
+  asking = web.Signal(missing)
+  said = web.Signal(missing)
+  find = () -> Again(l, {Tenant: idOf(web.Get(tenant))})
+  table = web.Table(rows, [web.Column("Id", k -> k.Id, sort = "Id", width = 80), web.Column("Tenant", k -> Cell(dict.Get("Tenant", k)), sort = "Tenant", width = 80),
+    web.Column("Name", k -> k.Name, sort = "Name"), web.Column("Roles", k -> Cell(k.Roles), width = 160),
+    web.Column("Made", k -> Local(k.Created), sort = "Created", width = 170), web.Column("Ends", k -> if dict.Has("Ends", k) Local(k.Ends) else "never" end, width = 170),
+    web.Column("Last used", k -> Local(dict.Get("Last", k)), width = 170)], height = 420, label = "Keys")
+  web.Stack([
+    web.Title("Keys of programs"),
+    web.Text("A key is shown once, to the admin of its tenant who made it; the server keeps the hash of its secret only. A key revoked is refused at its next request.", color = gray),
+    web.Row([Label("Tenant id", width = 70), web.Input(tenant, label = "Tenant id", width = 110, onEnter = find), web.Button("Search", find, key = "C-f")], gap = 8),
+    table,
+    ListState(l, rows),
+    () -> keyActions(Chosen(table, rows), asking, said, l, p),
+    Question(asking),
+    () -> said1(web.Get(said)),
+  ], gap = 8)
+end
+
+defn keyActions(k, asking, said, l, p)
+  (** What can be done to the key chosen: revoke it. *)
+  if value.IsMissing(k)
+    return web.Text("Choose a key in the table for its actions.", color = gray)
+  end
+  web.Row([web.Text("Key $(k.Id), $(k.Name):", font = "strong"),
+    Confirm(asking, "Revoke key $(k.Id) ($(k.Name))", () -> acted(said, Call(api.AdminRevokeKey, {id: k.Id}, p), l))], gap = 8)
+end
+
+defn Flags(p)
+  (** The feature flags the app's code declares, each with what was set over it, and its buttons. *)
+  got = web.Signal(Call(api.AdminFlags, {}, p))
+  said = web.Signal(missing)
+  again = () -> web.Set(got, Call(api.AdminFlags, {}, p))
+  web.Stack([
+    web.Title("Feature flags"),
+    web.Text("The most precise wins: a user, then his tenant, then everyone, then the code's default. Every server sees a change within FlagsRefresh seconds.", color = gray),
+    () -> shownReply(web.Get(web.Get(got)), rows -> if value.Len(rows) == 0 web.Text("This app declares no flag (flags.Module).", color = gray)
+      else web.Stack([flagLine(f, p, said, again) for f in rows], gap = 14) end, "…"),
+    () -> said1(web.Get(said)),
+  ], gap = 8)
+end
+
+defn stateOf(f)
+  (** What a flag is for everyone, in words. *)
+  if dict.Has("Percent", f)
+    return "on for $(f.Percent)% of the users"
+  end
+  if dict.Has("On", f)
+    return if f.On "on for everyone" else "off for everyone" end
+  end
+  "the code's default: $(if f.Default "on" else "off" end)"
+end
+
+defn percentOf(s)
+  (** The share a field holds, from 0 to 100: 0 for no whole number. *)
+  n = text.Number(text.Trim(s))
+  if value.IsInt(n) list.Min([100, list.Max([0, n])]) else 0 end
+end
+
+overrides(xs, what) = if value.Len(xs) == 0 "" else "$what: $(text.Join(", ", ["$(x.Id) $(if x.On "on" else "off" end)" for x in xs]))" end
+
+defn flagLine(f, p, said, again)
+  (** A flag: its name, what it is for, its state, and what sets it. *)
+  share = web.Signal(if dict.Has("Percent", f) "$(f.Percent)" else "" end)
+  target = web.Signal("")
+  set = defn (x)
+    web.Set(said, Call(api.AdminFlag, dict.Put("name", f.Name, x), p))
+    again()
+  end
+  web.Stack([
+    web.Row([web.Text(f.Name, font = "strong"), web.Text(f.About, color = gray), web.Text(stateOf(f), color = green)], gap = 12),
+    web.Row([web.Button("On for everyone", () -> set({On: true})), web.Button("Off for everyone", () -> set({On: false})),
+      web.Input(share, label = "Percent of $(f.Name)", width = 70), web.Button("On for this share", () -> set({Percent: percentOf(web.Get(share))})),
+      web.Button("Back to the default", () -> set({Clear: true}))], gap = 6),
+    web.Text(text.Trim("$(overrides(f.Tenants, "Tenants")) $(overrides(f.Users, "Users"))"), color = gray),
+    web.Row([Label("Id", width = 20), web.Input(target, label = "Tenant or user id of $(f.Name)", width = 110),
+      web.Button("On for the tenant", () -> set({Tenant: idOf(web.Get(target)), On: true})), web.Button("Off for the tenant", () -> set({Tenant: idOf(web.Get(target)), On: false})),
+      web.Button("Clear the tenant", () -> set({Tenant: idOf(web.Get(target)), Clear: true})),
+      web.Button("On for the user", () -> set({User: idOf(web.Get(target)), On: true})), web.Button("Off for the user", () -> set({User: idOf(web.Get(target)), On: false})),
+      web.Button("Clear the user", () -> set({User: idOf(web.Get(target)), Clear: true}))], gap = 6),
+  ], gap = 4)
+end

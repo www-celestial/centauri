@@ -115,10 +115,9 @@ end
 
 defn isAskedOfARole()
   t = apptest.Start(App, settings = {TwoFactorRoles: "owner"})?
-  t.SignUp(ana)?
-  out = t.Anyone().Send(api.SignIn, {Email: ana.Email, Password: ana.Password})
+  out = t.Anyone().Send(api.SignUp, ana)
   p = json.Parse(out.Body)?
-  bug.Assert(out.Status == 401 and p.second.Setup == true, "set up first: $(out.Body)")
+  bug.Assert(out.Status == 401 and p.second.Setup == true and not text.Contains("sid=", value.Text(out.Headers)), "the account made, no session, set up first: $(out.Body)")
   s = t.Anyone().Call(api.SecondSetup, {Ticket: p.second.Ticket})?
   bug.Assert(text.StartsWith("otpauth://totp/second%3Aana%40example.com?secret=", s.Uri), "the address of the QR code: $(s.Uri)")
   a = t.Anyone().Call(api.Second, {Ticket: p.second.Ticket, Code: code(t, s.Secret)})
@@ -152,4 +151,17 @@ defn isRfc6238Exact()
   secret = auth.Base32("12345678901234567890")
   values = [auth.TotpCode(secret, at, t.Env)? for at in [59, 1111111109, 1111111111, 1234567890, 2000000000, 20000000000]]
   value.Equal(values, ["94287082", "07081804", "14050471", "89005924", "69279037", "65353130"])
+end
+
+defn isAskedOnEveryWayIn()
+  t = apptest.Start(App)?
+  w = withTotp(t)?
+  t.Anyone().Call(api.Forgot, {Email: ana.Email})
+  t.RunJobs()?
+  reset = t.Anyone().Send(api.Reset, {Code: t.Code(ana.Email), Password: "a brand new password"})
+  p = json.Parse(reset.Body)?
+  bug.Assert(reset.Status == 401 and value.IsDict(p.second), "a new password by mail, then the code: $(reset.Body)")
+  t.Advance(31)
+  done = t.Anyone().Call(api.Second, {Ticket: p.second.Ticket, Code: code(t, w.Secret)})
+  result.IsOk(done)
 end

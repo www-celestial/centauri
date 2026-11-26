@@ -1,0 +1,111 @@
+(** The invoices after their first quarter, the tutorials 12 to 16 of the book, each checked: signing in with Google,
+    passkeys and two-factor for the owners, an API for a partner with its key, the app in English and in French, and
+    the export with the country opened to one office by a flag. A provider of OpenID Connect and a device of passkeys
+    in software play Google and the phone (apptest.Provider, apptest.Device). *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/apptest
+use deps/www-celestial/centauri/src/auth
+use src/invoices
+use src/invoices/endpoints as e
+use std/bug
+use std/dict
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+ada = {Email: "ada@example.com", Password: "correct horse battery", Name: "Ada", Tenant: "Martin & Co"}
+bruno = {Email: "bruno@example.com", Password: "correct horse staple", Name: "Bruno", Tenant: "Bruno Conseil"}
+lines = [{Label: "Design", Quantity: 3, Price: 400}]
+
+defn isSignedInWithGoogle()
+  (** Tutorial 12: a provider of OpenID Connect plays Google; Ana signs up with it, her address checked by it (no mail),
+      and comes back to the page she started from. *)
+  first = apptest.Start(invoices.App)?
+  p = apptest.Provider(first)?
+  t = apptest.Start(invoices.App, settings = dict.Put("OidcName", "Google", p.Settings))?
+  bug.Assert(value.Equal(t.Anyone().Call(api.Providers)?, [{Name: "oidc", Title: "Google"}]), "the button")
+  out = apptest.ProviderSignIn(t, p, start = {Return: "/invoices?Unpaid=true"})
+  a = json.Parse(out.Body)?
+  bug.Assert(out.Status == 201 and a.Return == "/invoices?Unpaid=true" and a.Checked == true and "owner" in a.Roles, "an office of her own: $(out.Body)")
+  cookie = text.Split(";", [h.Value for h in out.Headers if h.Name == "set-cookie" and text.StartsWith("sid=", h.Value)][1])[1]
+  made = t.Raw("POST", "/clients", body = json.Text({Name: "Client 1", Email: "c1@example.com"}), headers = [{Name: "cookie", Value: cookie}])
+  made.Status == 201 and value.Len(t.Mails()) == 0
+end
+
+defn isPasskeyAndTwoFactor()
+  (** Tutorial 13: the owners must have a second factor; Ada sets up TOTP at her first sign-in, then adds a passkey and
+      signs in with it alone, her phone checking her face. *)
+  t = apptest.Start(invoices.App, settings = {TwoFactorRoles: "owner"})?
+  stopped = t.SignUp(ada)
+  bug.Assert(result.IsErr(stopped) and stopped.Error.Status == 401 and stopped.Error.Problem.second.Setup, "asked at the check of her address: $stopped")
+  s = t.SetUp(stopped)?
+  a = s.Client
+  bug.Assert(value.Len(s.Codes) == 10 and a.Call(api.MyFactors)?.Totp, "TOTP on")
+  d = apptest.Device(t)?
+  c = a.Call(api.PasskeyNew)?
+  a.Call(api.PasskeyAdd, {Ticket: c.Ticket, Credential: apptest.Made(d, c.Options, t).Credential, Name: "Ada's phone"})?
+  password = t.SignIn(ada.Email, ada.Password)
+  bug.Assert(password.Error.Status == 401, "the password alone: a second step")
+  start = t.Anyone().Call(api.PasskeyStart)?
+  key = t.Anyone().Call(api.PasskeySignIn, {Ticket: start.Ticket, Credential: apptest.Signed(apptest.Made(d, c.Options, t).Device, start.Options, t)})
+  result.IsOk(key) and key.Value.Email == ada.Email
+end
+
+defn isPartnerApiWithItsKey()
+  (** Tutorial 14: Ada makes a key for her partner's program, with the role accountant; the program lists the unpaid
+      invoices with it, can't delete a client (admin's), and the OpenAPI document says how to send the key. *)
+  t = apptest.Start(invoices.App)?
+  a = t.SignUp(ada)?
+  client = a.Call(e.AddClient, {Name: "Client 1", Email: "c1@example.com"})?
+  a.Call(e.AddInvoice, {Client: client.Id, Date: "2026-11-01", Due: "2026-12-01", Lines: lines})?
+  key = a.Call(api.NewKey, {Name: "Partner's program", Roles: ["accountant"], Days: 365})?
+  h = [{Name: "authorization", Value: "Bearer $(key.Key)"}]
+  listed = t.Raw("GET", "/invoices?Unpaid=true", headers = h)
+  deleted = t.Raw("DELETE", "/clients/$(client.Id)", headers = h)
+  doc = json.Parse(t.Raw("GET", "/openapi.json").Body)?
+  op = doc.paths["/invoices"].get
+  listed.Status == 200 and value.Len(json.Parse(listed.Body)?.Rows) == 1 and deleted.Status == 403 and doc.components.securitySchemes.key.scheme == "bearer" and
+    {key: []} in op.security and op["x-role"] == "accountant"
+end
+
+defn isInFrench()
+  (** Tutorial 15: the app speaks English and French (Langs); a French browser gets its errors in French, the app's own
+      and Centauri's, and the mails of a user who chose French are in French. *)
+  t = apptest.Start(invoices.App)?
+  a = t.SignUp(ada)?
+  c = a.Call(e.AddClient, {Name: "Client 1", Email: "c1@example.com"})?
+  inv = a.Call(e.AddInvoice, {Client: c.Id, Date: "2026-11-01", Due: "2026-12-01", Lines: lines})?
+  a.Call(e.Pay, {id: inv.Id})?
+  fr = [{Name: "accept-language", Value: "fr-FR,fr;q=0.9"}]
+  again = a.Raw("POST", "/invoices/$(inv.Id)/pay", headers = fr)
+  wrong = a.Raw("POST", "/clients", body = json.Text({Name: "", Email: "nobody"}), headers = fr)
+  p = json.Parse(wrong.Body)?
+  bug.Assert(json.Parse(again.Body)?.detail == "La facture 1 est déjà payée.", "the app's words: $(again.Body)")
+  bug.Assert(p.detail == "Vérifiez les champs." and p.errors.Email == "Une adresse e-mail, comme ada@example.com.", "Centauri's and std/check's: $(wrong.Body)")
+  a.Call(api.SetLang, {Lang: "fr"})?
+  t.Anyone().Call(api.Forgot, {Email: ada.Email})
+  t.RunJobs()?
+  t.Mails()[value.Len(t.Mails())].Subject == "Un nouveau mot de passe pour invoices"
+end
+
+defn isExportOpenedToOneOffice()
+  (** Tutorial 16: the CSV export with the country of the client, a flag of the code off by default, opened to Ada's
+      office alone from the admin pages, without a restart. *)
+  t = apptest.Start(invoices.App)?
+  a = t.SignUp(ada)?
+  b = t.SignUp(bruno)?
+  for u in [a, b]
+    c = u.Call(e.AddClient, {Name: "Client", Email: "c@example.com", Country: "BE"})?
+    u.Call(e.AddInvoice, {Client: c.Id, Date: "2026-11-01", Due: "2026-12-01", Lines: lines})?
+  end
+  boss = t.Super()?
+  before = a.Raw("GET", "/invoices.csv").Body
+  boss.Call(api.AdminFlag, {name: "export.country", Tenant: a.Tenant, On: true})?
+  hers = a.Raw("GET", "/invoices.csv").Body
+  his = b.Raw("GET", "/invoices.csv").Body
+  not text.Contains("country", before) and text.StartsWith("number,date,due,bill_to,status,total,paid_at,country", hers) and text.Contains(",BE", hers) and
+    not text.Contains("country", his)
+end

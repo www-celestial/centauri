@@ -104,11 +104,48 @@ defn userView(u, p, asking, said, again)
     ], gap = 8),
     web.Text("Tenants and roles (comma between roles; none takes him out of the tenant)", font = "strong"),
     web.Stack([roleLine(a.Id, t.Tenant, t.Name, t.Roles, p, said, again) for t in u.Tenants], gap = 4),
+    factorsView(dict.Get("Factors", u), a, p, asking, done),
     web.Text("Sessions", font = "strong"),
-    web.Table(u.Sessions, [web.Column("Id", s -> s.Id, width = 80), web.Column("Started", s -> Local(s.Started), sort = "Started", width = 170),
-      web.Column("Seen", s -> Local(s.Seen), sort = "Seen", width = 170), web.Column("Address", s -> s.Ip, width = 140), web.Column("Browser", s -> s.Agent)],
-      height = 200, label = "Sessions"),
+    sessionsView(u.Sessions, p, asking, done),
   ], gap = 8)
+end
+
+defn factorsView(f, a, p, asking, done)
+  (** The second factors of a user and his ways of signing in, and what takes them away when he lost his device. *)
+  if not value.IsDict(f)
+    return missing
+  end
+  web.Stack([
+    web.Text("Ways of signing in, second factors", font = "strong"),
+    web.Row([web.Text(if f.Password "password" else "no password" end, color = gray),
+      web.Text(if f.Totp "TOTP on, $(f.Recovery) recovery codes left" else "no TOTP" end, color = if f.Totp green else gray end),
+      web.Text("$(value.Len(f.Passkeys)) passkeys", color = gray), web.Text(text.Join(", ", ["$(i.Provider) ($(i.Email))" for i in f.Identities]), color = gray)], gap = 12),
+    web.Stack([web.Text("passkey $(k.Name), made $(Local(k.Created)), last used $(Local(dict.Get("Last", k))), $(if k.Verified "verified" else "not verified" end)", color = gray) for k in f.Passkeys], gap = 2),
+    web.Row([
+      if f.Totp Confirm(asking, "Take away the TOTP and the recovery codes of $(a.Email)", () -> done(Call(api.AdminResetFactors, {id: a.Id, Totp: true}, p))) else missing end,
+      if value.Len(f.Passkeys) > 0 Confirm(asking, "Take away the passkeys of $(a.Email)", () -> done(Call(api.AdminResetFactors, {id: a.Id, Passkeys: true}, p))) else missing end,
+    ], gap = 8),
+  ], gap = 4)
+end
+
+defn sessionsView(sessions, p, asking, done)
+  (** The sessions of a user, the one chosen ended by its button. *)
+  rows = web.Signal(sessions)
+  table = web.Table(rows, [web.Column("Id", s -> s.Id, width = 80), web.Column("Started", s -> Local(s.Started), sort = "Started", width = 170),
+    web.Column("Seen", s -> Local(s.Seen), sort = "Seen", width = 170), web.Column("Address", s -> s.Ip, width = 140), web.Column("Browser", s -> s.Agent)],
+    height = 200, label = "Sessions")
+  web.Stack([
+    table,
+    () -> sessionChosen(Chosen(table, rows), p, asking, done),
+  ], gap = 6)
+end
+
+defn sessionChosen(s, p, asking, done)
+  (** The session chosen, to end. *)
+  if value.IsMissing(s)
+    return web.Text("Choose a session in the table to end it alone.", color = gray)
+  end
+  web.Row([web.Text("Session $(s.Id), from $(s.Ip):", font = "strong"), Confirm(asking, "End session $(s.Id)", () -> done(Call(api.AdminEndSession, {id: s.Id}, p)))], gap = 8)
 end
 
 defn roles(s)
@@ -163,6 +200,12 @@ defn Tenant(p)
     web.Set(said, Call(api.AdminRoles, {id: id, user: idOf(web.Get(user)), Roles: roles(web.Get(given))}, p))
     again()
   end
+  email = web.Signal("")
+  invited = web.Signal("member")
+  invite = defn ()
+    web.Set(said, Call(api.AdminInvite, {id: id, Email: text.Trim(web.Get(email)), Roles: roles(web.Get(invited))}, p))
+    web.Set(email, "")
+  end
   web.Stack([
     web.Row([web.Link("Tenants", "/tenants"), web.Text("›", color = gray), web.Title("Tenant $id")], gap = 8),
     () -> shownReply(web.Get(web.Get(got)), t -> web.Stack([
@@ -171,6 +214,8 @@ defn Tenant(p)
     ], gap = 8), "…"),
     web.Row([Label("Add user id", width = 100), web.Input(user, label = "User id to add", width = 110), Label("roles", width = 40),
       web.Input(given, label = "Roles to give", width = 200), web.Button("Add", add)], gap = 8),
+    web.Row([Label("Invite e-mail", width = 100), web.Input(email, label = "E-mail to invite", width = 220), Label("roles", width = 40),
+      web.Input(invited, label = "Roles of the invitation", width = 160), web.Button("Invite by mail", invite)], gap = 8),
     () -> said1(web.Get(said)),
   ], gap = 8)
 end

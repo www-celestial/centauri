@@ -1,0 +1,166 @@
+(* A provider of OpenID Connect in software, for the tests of an app (and of Centauri's own): a server of https on this
+   machine, with a certificate of an authority made for the tests (.cesia/tls, by openssl, which the test's permissions
+   allow: exec=openssl, read and write of .cesia), that publishes its discovery document and its keys (JWKS), and
+   answers its token endpoint: it checks PKCE and the client's secret, and signs an ID token with its own key. It keeps
+   nothing: each code is the claims of its token, with the challenge of PKCE. A code can ask it to sign wrong (no
+   signature, an HMAC, a key of its own in the token), as a hostile provider or a forger would. *)
+use src/api
+use src/auth
+use std/bug
+use std/crypto
+use std/dict
+use std/encode
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/tls
+use std/value
+
+tlsDir = ".cesia/tls"
+
+defn TestCerts()
+  (** An authority and a certificate of localhost and 127.0.0.1 it signed, made once by openssl in .cesia/tls: an Ok of
+      {Ca, Cert, Key}, their paths. *)
+  if result.IsOk(sys.Read("$tlsDir/server.pem")) and result.IsOk(sys.Read("$tlsDir/ca.pem"))
+    return result.Ok({Ca: "$tlsDir/ca.pem", Cert: "$tlsDir/server.pem", Key: "$tlsDir/server.key"})
+  end
+  sys.Mkdir(tlsDir)?
+  sys.Write("$tlsDir/san.txt", "subjectAltName=DNS:localhost,IP:127.0.0.1\n")?
+  steps = [["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=centauri test authority", "-days", "3650", "-keyout", "$tlsDir/ca.key", "-out", "$tlsDir/ca.pem"],
+    ["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost", "-keyout", "$tlsDir/server.key", "-out", "$tlsDir/server.csr"],
+    ["x509", "-req", "-in", "$tlsDir/server.csr", "-CA", "$tlsDir/ca.pem", "-CAkey", "$tlsDir/ca.key", "-CAcreateserial", "-days", "3650", "-out", "$tlsDir/server.pem", "-extfile", "$tlsDir/san.txt"]]
+  for args in steps
+    p = sys.Start("openssl", args = args)?
+    _ = sys.ReadOutput(p)
+    if sys.WaitExit(p) != 0
+      return result.Err({Kind: "apptest", Message: "openssl $(args[1]) failed"})
+    end
+  end
+  result.Ok({Ca: "$tlsDir/ca.pem", Cert: "$tlsDir/server.pem", Key: "$tlsDir/server.key"})
+end
+
+defn ProviderKey(kid, pair, alg)
+  (** A key of a provider: a pair of crypto.KeyPair of alg (RS256 of 2048 bits, or ES256), its secret and its JWK. *)
+  if alg == "ES256"
+    return {Kid: kid, Alg: alg, Secret: pair.Secret, Jwk: {"kty": "EC", "kid": kid, "alg": alg, "use": "sig", "crv": "P-256",
+      "x": auth.B64u(text.ByteSlice(28, 59, pair.Public)), "y": auth.B64u(text.ByteSlice(60, 91, pair.Public))}}
+  end
+  bug.Assert(text.ByteLength(pair.Public) == 294, "An RSA key of 2048 bits.")
+  {Kid: kid, Alg: alg, Secret: pair.Secret, Jwk: {"kty": "RSA", "kid": kid, "alg": alg, "use": "sig", "n": auth.B64u(text.ByteSlice(34, 289, pair.Public)),
+    "e": auth.B64u(text.FromBytes([1, 0, 1]))}}
+end
+
+defn keeper(box, first)
+  (** The keys of the provider, in a fiber: "keys" gives them, "rotate" puts a new one in place of the old. *)
+  keys = [first]
+  for m in box
+    if m.Op == "keys"
+      fiber.Send(keys, m.Reply)
+    else if m.Op == "rotate"
+      keys = [m.Key]
+      fiber.Send(true, m.Reply)
+    end
+  end
+end
+
+defn askKeeper(box, m)
+  (** The answer of the keeper to a message. *)
+  reply = fiber.Channel(size = 1)
+  m.Reply = reply
+  fiber.Send(m, box)
+  fiber.Receive(reply).Value
+end
+
+defn Provider(t, alg = "ES256", pair = missing, client = "centauri-test", secret = "s3cret")
+  (** A provider on a free port of this machine, signing by alg with pair (a new pair of crypto.KeyPair when missing:
+      an RSA pair takes some 50 ms, a test that makes many gives one): an Ok of {Issuer, Settings, Box, Ssl}, Settings
+      those that make the app t signs in with it as "oidc" (SignInWith, OidcIssuer, OidcId, OidcSecret, CallAllow,
+      CallCa), to give apptest.Start. *)
+  c = TestCerts()?
+  o = crypto.OpenSsl()?
+  p = if value.IsMissing(pair) crypto.KeyPair(alg, o)? else pair end
+  box = fiber.Channel()
+  first = ProviderKey("k1", p, alg)
+  fiber.Spawn(() -> keeper(box, first))
+  l = net.Listen(0)?
+  issuer = "https://localhost:$(net.Port(l))"
+  conf = {"issuer": issuer, "authorization_endpoint": "$issuer/authorize", "token_endpoint": "$issuer/token", "jwks_uri": "$issuer/jwks"}
+  routes = http.App() then http.Get("/.well-known/openid-configuration", r -> http.Json(conf))
+    then http.Get("/jwks", r -> http.WithHeader("cache-control", "max-age=300", http.Json({keys: [k.Jwk for k in askKeeper(box, {Op: "keys"})]})))
+    then http.Post("/token", r -> token(r, box, client, secret, t, o))
+  fiber.Spawn(() -> http.Serve(routes, listener = l, wrap = tls.Server(c.Cert, c.Key, tls.Open()?)?, timeout = 30))
+  result.Ok({Issuer: issuer, Box: box, Ssl: o, Alg: alg, Settings: {SignInWith: "oidc", OidcIssuer: issuer, OidcId: client, OidcSecret: secret,
+    CallAllow: "localhost", CallCa: c.Ca}})
+end
+
+defn Rotate(p, pair)
+  (** The provider turns its keys: a new key, kid "k2", of pair, in place of the old one. *)
+  askKeeper(p.Box, {Op: "rotate", Key: ProviderKey("k2", pair, p.Alg)})
+end
+
+defn token(r, box, client, secret, t, o)
+  (** POST /token of the provider: the code read, PKCE and the client checked, an ID token signed (or signed wrong, as
+      the code's How asks: Alg "none", Alg "HS256" with the public key as the secret, Own a key of its own in the
+      token's header). *)
+  f = http.Form(r)
+  raw = auth.Unb64u(dict.GetOr("code", "", f))
+  code = if result.IsOk(raw) json.Parse(raw.Value) else raw end
+  if result.IsErr(code) or not value.IsDict(code.Value) or dict.Get("client_id", f) != client or dict.Get("client_secret", f) != secret or
+    auth.B64u(crypto.Sha256(dict.GetOr("code_verifier", "", f), t.Env.Keys)) != dict.Get("Challenge", code.Value)
+    return http.Json({error: "invalid_grant"}, status = 400)
+  end
+  how = dict.GetOr("How", {}, code.Value)
+  k = askKeeper(box, {Op: "keys"})[1]
+  claims = code.Value.Claims
+  signed = missing
+  if dict.Get("Alg", how) == "none"
+    signed = "$(auth.B64u(json.Text({alg: "none"}))).$(auth.B64u(json.Text(claims)))."
+  else if dict.Get("Alg", how) == "HS256"
+    body = "$(auth.B64u(json.Text({alg: "HS256", kid: k.Kid}))).$(auth.B64u(json.Text(claims)))"
+    signed = "$body.$(auth.B64u(crypto.HmacSha256(json.Text(k.Jwk), body, t.Env.Keys)))"
+  else if dict.Get("Own", how) == true
+    evil = crypto.KeyPair("ES256", o)!
+    head = auth.B64u(json.Text({alg: "ES256", kid: k.Kid, jwk: ProviderKey(k.Kid, evil, "ES256").Jwk, jku: "https://evil.example/jwks"}))
+    body = "$head.$(auth.B64u(json.Text(claims)))"
+    signed = "$body.$(auth.B64u(crypto.EcdsaRaw(crypto.SignWith(body, evil.Secret, "ES256", o)!)!))"
+  else
+    signed = auth.SignJwt(claims, k.Secret, k.Alg, t.Env, kid = k.Kid)!
+  end
+  http.Json({"access_token": "at", "token_type": "Bearer", "id_token": signed, "expires_in": 3600})
+end
+
+defn Begun(t, start = {})
+  (** A sign-in with the provider started in a browser, as a page starts it: {Cookie, Q, Out}, Q the query of the
+      provider's address (state, nonce, code_challenge...), Cookie the flow's for the finish. *)
+  out = t.Anyone().Send(api.OidcStart, dict.Merge({Provider: "oidc"}, start))
+  set = [h.Value for h in out.Headers if h.Name == "set-cookie"]
+  url = json.Parse(out.Body)
+  q = if result.IsOk(url) and value.IsDict(url.Value) and value.IsText(dict.Get("Url", url.Value)) encode.ParseQuery(text.Split("?", url.Value.Url)[2]) else {} end
+  {Cookie: if value.Len(set) > 0 text.Split(";", set[1])[1] else "" end, Q: q, Out: out}
+end
+
+defn CodeFor(p, b, claims = {}, how = {}, now = missing)
+  (** The code the provider gives for a sign-in begun: its token's claims those of a user, Ana by default (sub u-1,
+      ana@example.com, verified), and those of the flow (aud, nonce), over which claims are written. *)
+  at = if value.IsMissing(now) 1794528000 else now end
+  c = dict.Merge({"iss": p.Issuer, "aud": dict.GetOr("client_id", "", b.Q), "sub": "u-1", "email": "ana@example.com", "email_verified": true, "name": "Ana",
+    "exp": at + 600, "iat": at, "nonce": dict.GetOr("nonce", "", b.Q)}, claims)
+  auth.B64u(json.Text({Claims: c, Challenge: dict.GetOr("code_challenge", "", b.Q), How: how}))
+end
+
+defn Finished(t, b, x, cookie = missing)
+  (** The finish of a sign-in from the page, with the cookie of the browser that began it (or another): the response. *)
+  t.Raw("POST", "/auth/oidc/finish", body = json.Text(x), headers = [{Name: "cookie", Value: if value.IsMissing(cookie) b.Cookie else cookie end}])
+end
+
+defn ProviderSignIn(t, p, claims = {}, how = {}, start = {})
+  (** A whole sign-in with the provider, from its start to its finish, for the user of claims (Ana by default): the
+      response of the finish, its session's cookie in its headers. *)
+  b = Begun(t, start = start)
+  Finished(t, b, {State: dict.GetOr("state", "", b.Q), Code: CodeFor(p, b, claims = claims, how = how, now = t.Env.Now())})
+end

@@ -21,7 +21,8 @@ ana = {Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}
 
 defn registered(t, alg = "ES256")
   (** Ana signed up by password, then a passkey of a new device made: {Client, Device}. *)
-  a = t.SignUp(ana)?
+  signed = t.SignUp(ana)
+  a = if result.IsOk(signed) signed.Value else t.SetUp(signed)?.Client end
   d = apptest.Device(t, alg = alg)?
   c = a.Call(api.PasskeyNew)?
   m = apptest.Made(d, c.Options, t)
@@ -111,7 +112,7 @@ defn isVerificationAsked()
   lax = apptest.Start(App, settings = {PasskeyCheck: "preferred", TwoFactorRoles: "owner"})?
   v = registered(lax)?
   stepped = signIn(lax, v.Device, uv = false)
-  signIn(t, w.Device, uv = false).Error.Status == 400 and stepped.Error.Status == 401 and stepped.Error.Problem.second.Setup == true and result.IsOk(signIn(lax, v.Device, count = 2))
+  signIn(t, w.Device, uv = false).Error.Status == 400 and stepped.Error.Status == 401 and stepped.Error.Problem.second.Methods[1] == "totp" and result.IsOk(signIn(lax, v.Device, count = 2))
 end
 
 defn isSignedUpWithoutPassword()

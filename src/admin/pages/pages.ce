@@ -4,7 +4,7 @@
     by HTTP, the session a cookie no script reads. Run starts them, in the app's entry of its admin; an app adds its own
     pages (Page), the columns of its kinds (Kind, Column) and its actions (Action) with a few lines: the book's chapter
     The admin, and its tutorial, an admin page of the invoices. The pages: the dashboard, the users, the tenants and their members, the events, the log, the jobs, the webhooks, the
-    files, the settings, the data of each kind, the audit trail. *)
+    files, the settings, the data of each kind, the audit trail, the keys of programs, the feature flags. *)
 use deps/www-celestial/ceres/src/browser
 use deps/www-celestial/ceres/src/web
 use src/api
@@ -47,7 +47,8 @@ Action(label, endpoint, args = missing, confirm = true) = {Label: label, Endpoin
 own = [{Title: "Dashboard", Path: "/", View: Dashboard}, {Title: "Users", Path: "/users", View: Users}, {Title: "Tenants", Path: "/tenants", View: Tenants},
   {Title: "Events", Path: "/events", View: Events}, {Title: "Log", Path: "/logs", View: Logs}, {Title: "Jobs", Path: "/jobs", View: Jobs},
   {Title: "Webhooks", Path: "/hooks", View: Hooks}, {Title: "Files", Path: "/files", View: Files}, {Title: "Settings", Path: "/settings", View: Settings},
-  {Title: "Data", Path: "/data", View: Data}, {Title: "Audit", Path: "/audit", View: Audit}]
+  {Title: "Data", Path: "/data", View: Data}, {Title: "Audit", Path: "/audit", View: Audit}, {Title: "Keys", Path: "/keys", View: Keys},
+  {Title: "Flags", Path: "/flags", View: Flags}]
 
 (* The pages reached from another, not in the menu. *)
 inner = [{Path: "/users/:id", View: User}, {Path: "/tenants/:id", View: Tenant}, {Path: "/data/:kind", View: Data}]
@@ -139,23 +140,59 @@ end
 
 defn signIn(p, title, note)
   (** The sign-in of a super-admin: an e-mail and a password, sent by HTTP; the cookie that comes back no script
-      reads, and the page loads again with it. *)
+      reads, and the page loads again with it. When the app asks a second factor, the code of his app (or a recovery
+      code) comes next, and when he has none yet, the secret to type into his app and his recovery codes. *)
   email = web.Signal("")
   password = web.Signal("")
   said = web.Signal(note)
-  go = () -> signingIn(email, password, said)
+  step = web.Signal(missing)
+  code = web.Signal("")
+  go = () -> signingIn(email, password, said, step)
+  send = () -> secondStep(step, code, said)
   web.Stack([
     web.Title(title),
     web.Text("Sign in with the account of a super-admin of the platform.", color = gray),
     web.Row([Label("E-mail"), web.Input(email, label = "E-mail", width = 280)], gap = 8),
     web.Row([Label("Password"), web.Input(password, label = "Password", width = 280, secret = true, onEnter = go)], gap = 8),
     web.Row([web.Button("Sign in", go)], gap = 8),
+    () -> stepView(web.Get(step), code, send),
     () -> web.Text(web.Get(said), color = red),
   ], gap = 10, pad = 24, width = 480)
 end
 
-defn signingIn(email, password, said)
-  (** Sends the sign-in; on success the page loads again, signed in. *)
+defn stepView(s, code, send)
+  (** The second step of a sign-in: the setup of TOTP when asked, and the field of the code. *)
+  if value.IsMissing(s)
+    return missing
+  end
+  web.Stack([
+    if value.IsDict(dict.Get("Setup", s)) web.Stack([
+      web.Text("This app asks a second factor of you. Type this secret into your authenticator app (or open its otpauth:// address), then its code below.", color = amber),
+      web.Text(s.Setup.Secret, font = "strong"), web.Text(s.Setup.Uri, color = gray),
+      web.Text("Your recovery codes, each good once without the app; keep them, they are shown this once: $(text.Join("  ", s.Setup.Codes))", color = gray)], gap = 4) else missing end,
+    web.Row([Label("Code"), web.Input(code, label = "Code of your app", width = 160, onEnter = send), web.Button("Send", send)], gap = 8),
+  ], gap = 6)
+end
+
+defn secondStep(step, code, said)
+  (** Sends the code of the second step; on success the page loads again, signed in. *)
+  s = web.Get(step)
+  got = fetchJson("/auth/second", method = "POST", body = json.Text({Ticket: s.Ticket, Code: text.Trim(web.Get(code))}))
+  web.Set(code, "")
+  if got.Status >= 200 and got.Status < 300
+    reload()
+  else
+    d = if value.IsDict(got.Data) got.Data else {} end
+    web.Set(said, "$(got.Status) $(dict.GetOr("detail", "The code was refused.", d))")
+    if got.Status == 403
+      web.Set(step, missing)
+    end
+  end
+end
+
+defn signingIn(email, password, said, step)
+  (** Sends the sign-in; on success the page loads again, signed in; a 401 that asks a second factor opens its
+      step. *)
   web.Set(said, "Signing in…")
   got = fetchJson("/auth/signin", method = "POST", body = json.Text({Email: web.Get(email), Password: web.Get(password)}))
   web.Set(password, "")
@@ -165,6 +202,16 @@ defn signingIn(email, password, said)
   else if ok
     _ = fetchJson("/auth/signout", method = "POST", body = "{}")
     web.Set(said, "This account is no super-admin of the platform.")
+  else if got.Status == 401 and value.IsDict(got.Data) and value.IsDict(dict.Get("second", got.Data))
+    s = {Ticket: got.Data.second.Ticket}
+    if got.Data.second.Setup == true
+      set = fetchJson("/auth/second/setup", method = "POST", body = json.Text({Ticket: s.Ticket}))
+      if set.Status >= 200 and set.Status < 300 and value.IsDict(set.Data)
+        s.Setup = set.Data
+      end
+    end
+    web.Set(step, s)
+    web.Set(said, "")
   else if got.Status == 428
     web.Set(said, "The server asks a proof of work (it is under attack): sign in again in a while, or set APP_POW=off for this time.")
   else

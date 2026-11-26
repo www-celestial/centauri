@@ -105,7 +105,7 @@ defn joining(r, x)
   Join(r.User.Id, inv.Tenant, inv.Roles, r.User.Id, r.Why, r.Env.Db, r.Now)?
   cepheus.Write(inv.Gone, r.Env.Db, by = r.User.Id, why = r.Why)?
   EndSessions([r.User.Session], r.User.Id, r.Why, r.Env.Db)?
-  opened(r.User.Id, membershipOf(r.User.Id, inv.Tenant, r.Env.Db)?, r, "join")
+  admitted(r.User.Id, membershipOf(r.User.Id, inv.Tenant, r.Env.Db)?, r, "join")
 end
 
 defn memberIn(r)

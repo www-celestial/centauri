@@ -272,6 +272,18 @@ defn secondNeeded(user, roles, super, r)
   result.Ok(if asked(roles, super, s) {Setup: true} else missing end)
 end
 
+defn admitted(user, m, r, kind)
+  (** A session of a user in a membership, or the step of his second factor first when he has one or the settings ask
+      one of him: what every way in ends with but the second step itself (a check of an address, a new password, a
+      tenant entered, an invitation taken). *)
+  u = cepheus.Get(User, user, r.Env.Db)?
+  need = secondNeeded(user, if value.IsMissing(m) [] else app.Expand(m.Roles, r.Env.Roles) end, dict.Get("Super", u) == true, r)?
+  if not value.IsMissing(need)
+    return stepped(user, m, r, need)
+  end
+  opened(user, m, r, kind)
+end
+
 defn stepped(user, m, r, need)
   (** The end of a first step: a ticket of the second, in the Err of a 401 (its Problem Details hold it as
       second: {Ticket, Methods, Setup}). *)

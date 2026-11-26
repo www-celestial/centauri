@@ -26,154 +26,28 @@ use std/text
 use std/tls
 use std/value
 
-dir = ".cesia/tls"
+ssl = crypto.OpenSsl()!   (* OpenSSL, for the provider's keys. *)
 
-defn certs()
-  (** An authority and a certificate of localhost it signed, made once by openssl (the same as tests/calls.test.ce). *)
-  if result.IsOk(sys.Read("$dir/server.pem")) and result.IsOk(sys.Read("$dir/ca.pem"))
-    return result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
-  end
-  sys.Mkdir(dir)?
-  sys.Write("$dir/san.txt", "subjectAltName=DNS:localhost,IP:127.0.0.1\n")?
-  steps = [["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=centauri test authority", "-days", "3650", "-keyout", "$dir/ca.key", "-out", "$dir/ca.pem"],
-    ["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost", "-keyout", "$dir/server.key", "-out", "$dir/server.csr"],
-    ["x509", "-req", "-in", "$dir/server.csr", "-CA", "$dir/ca.pem", "-CAkey", "$dir/ca.key", "-CAcreateserial", "-days", "3650", "-out", "$dir/server.pem", "-extfile", "$dir/san.txt"]]
-  for args in steps
-    p = sys.Start("openssl", args = args)?
-    _ = sys.ReadOutput(p)
-    if sys.WaitExit(p) != 0
-      return result.Err({Kind: "test", Message: "openssl $(args[1]) failed"})
-    end
-  end
-  result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
-end
+(* Two keys of RSA of 2048 bits, made once for the file, as Google's are: the provider's, and the one it turns to. *)
+pairs = [crypto.KeyPair("RS256", ssl)!, crypto.KeyPair("RS256", ssl)!]
 
-ssl = crypto.OpenSsl()!   (* OpenSSL, for the provider's keys and signatures. *)
+App = app.Of([auth.Module()], name = "sso")
 
-(* Three keys of RSA of 2048 bits, made once for the file: the provider's, the one it turns to, an attacker's. *)
-pairs = [crypto.KeyPair("RS256", ssl)!, crypto.KeyPair("RS256", ssl)!, crypto.KeyPair("RS256", ssl)!]
+(* The provider of a test: RS256, its first key. *)
+provider() = apptest.Provider(apptest.Start(App)!, alg = "RS256", pair = pairs[1])!
 
-defn rsaKey(kid, k)
-  (** A key of the provider, the k-th of pairs: its secret, and its JWK (n and e read from the DER of a key of 2048
-      bits). *)
-  pair = pairs[k]
-  bug.Assert(text.ByteLength(pair.Public) == 294, "a key of 2048 bits")
-  n = text.ByteSlice(34, 289, pair.Public)
-  {Kid: kid, Secret: pair.Secret, Jwk: {"kty": "RSA", "kid": kid, "alg": "RS256", "use": "sig", "n": auth.B64u(n), "e": auth.B64u(text.FromBytes([1, 0, 1]))}}
-end
+(* The app, set to sign in with a provider, named Acme. *)
+started(p, settings = {}) = apptest.Start(App, settings = dict.Merge(dict.Put("OidcName", "Acme", p.Settings), settings))
 
-defn keeper(box, first)
-  (** The keys of the provider, in a fiber: "keys" gives them, "rotate" puts a new one in place of the old. *)
-  keys = [first]
-  n = 1
-  for m in box
-    if m.Op == "keys"
-      fiber.Send(keys, m.Reply)
-    else if m.Op == "rotate"
-      n += 1
-      keys = [m.Key]
-      fiber.Send(true, m.Reply)
-    end
-  end
-end
-
-defn ask(box, m)
-  reply = fiber.Channel(size = 1)
-  m.Reply = reply
-  fiber.Send(m, box)
-  fiber.Receive(reply).Value
-end
-
-defn Provider(t)
-  (** The provider, on a free port: an Ok of {Issuer, Box, Ca}. Its codes are the claims of the token they give, with
-      the challenge of PKCE, so it keeps nothing; How changes what it signs, as a bad provider would. *)
-  c = certs()?
-  o = ssl
-  box = fiber.Channel()
-  fiber.Spawn(() -> keeper(box, rsaKey("k1", 1)))
-  l = net.Listen(0)?
-  issuer = "https://localhost:$(net.Port(l))"
-  routes = http.App() then http.Get("/.well-known/openid-configuration", r -> http.Json({"issuer": issuer, "authorization_endpoint": "$issuer/authorize",
-    "token_endpoint": "$issuer/token", "jwks_uri": "$issuer/jwks"})) then http.Get("/jwks", r -> http.WithHeader("cache-control", "max-age=300", http.Json({keys: [k.Jwk for k in ask(box, {Op: "keys"})]})))
-    then http.Post("/token", r -> token(r, box, t, o))
-  fiber.Spawn(() -> http.Serve(routes, listener = l, wrap = tls.Server(c.Cert, c.Key, tls.Open()!)!, timeout = 30))
-  result.Ok({Issuer: issuer, Box: box, Ca: c.Ca, Ssl: o})
-end
-
-defn token(r, box, t, o)
-  (** POST /token of the provider: the code read, PKCE and the client checked, an ID token signed. *)
-  f = http.Form(r)
-  code = json.Parse(auth.Unb64u(dict.GetOr("code", "", f))!)!
-  if f["client_id"] != "centauri-test" or f["client_secret"] != "s3cret" or auth.B64u(crypto.Sha256(dict.GetOr("code_verifier", "", f), t.Env.Keys)) != code.Challenge
-    return http.Json({error: "invalid_grant"}, status = 400)
-  end
-  how = dict.GetOr("How", {}, code)
-  k = ask(box, {Op: "keys"})[1]
-  claims = code.Claims
-  signed = missing
-  if dict.Get("Alg", how) == "none"
-    signed = "$(auth.B64u(json.Text({alg: "none"}))).$(auth.B64u(json.Text(claims)))."
-  else if dict.Get("Alg", how) == "HS256"
-    body = "$(auth.B64u(json.Text({alg: "HS256", kid: k.Kid}))).$(auth.B64u(json.Text(claims)))"
-    signed = "$body.$(auth.B64u(crypto.HmacSha256(json.Text(k.Jwk), body, t.Env.Keys)))"
-  else if dict.Get("Own", how) == true
-    evil = rsaKey("k1", 3)
-    body = "$(auth.B64u(json.Text({alg: "RS256", kid: "k1", jwk: evil.Jwk, jku: "https://evil.example/jwks"}))).$(auth.B64u(json.Text(claims)))"
-    signed = "$body.$(auth.B64u(crypto.SignWith(body, evil.Secret, "RS256", o)!))"
-  else
-    signed = auth.SignJwt(claims, k.Secret, "RS256", t.Env, kid = k.Kid)!
-  end
-  http.Json({"access_token": "at", "token_type": "Bearer", "id_token": signed, "expires_in": 3600})
-end
-
-defn App(p)
-  (** The app, which signs in with the provider p. *)
-  app.Of([auth.Module()], name = "sso")
-end
-
-defn started(p, settings = {})
-  (** The app in memory, set to sign in with the provider. *)
-  apptest.Start(App(p), settings = dict.Merge({SignInWith: "oidc", OidcIssuer: p.Issuer, OidcId: "centauri-test", OidcSecret: "s3cret", OidcName: "Acme",
-    CallAllow: "localhost", CallCa: p.Ca}, settings))
-end
-
-defn query(url)
-  (** The fields of the query of an address. *)
-  encode.ParseQuery(text.Split("?", url)[2])
-end
-
-defn begin(t, start = {})
-  (** A sign-in started in a browser: {Cookie, Q (the query of the provider's address), Out}. *)
-  out = t.Anyone().Send(api.OidcStart, dict.Merge({Provider: "oidc"}, start))
-  bug.Assert(out.Status == 201, "started: $(out.Status) $(out.Body)")
-  set = [h.Value for h in out.Headers if h.Name == "set-cookie"][1]
-  bug.Assert(text.Contains("HttpOnly", set) and text.Contains("SameSite=Strict", set), "the cookie of the flow: $set")
-  {Cookie: text.Split(";", set)[1], Q: query(json.Parse(out.Body)!.Url), Out: out}
-end
-
-defn codeOf(p, b, claims = {}, how = {})
-  (** The code the provider gives for a sign-in, its token's claims those of the user and of the flow. *)
-  now = apptest.Epoch
-  c = dict.Merge({"iss": p.Issuer, "aud": b.Q["client_id"], "sub": "u-1", "email": "ana@example.com", "email_verified": true, "name": "Ana", "exp": now + 600,
-    "iat": now, "nonce": dict.GetOr("nonce", "", b.Q)}, claims)
-  auth.B64u(json.Text({Claims: c, Challenge: b.Q["code_challenge"], How: how}))
-end
-
-defn finish(t, b, x, cookie = missing)
-  (** The finish of a sign-in from the page, with the cookie of a browser. *)
-  t.Raw("POST", "/auth/oidc/finish", body = json.Text(x), headers = [{Name: "cookie", Value: if value.IsMissing(cookie) b.Cookie else cookie end}])
-end
-
-defn signedIn(t, p, claims = {}, how = {}, start = {})
-  (** A whole sign-in: the answer of the finish. *)
-  b = begin(t, start = start)
-  finish(t, b, {State: b.Q.state, Code: codeOf(p, b, claims = claims, how = how)})
-end
+begin(t, start = {}) = apptest.Begun(t, start = start)
+codeOf(p, b, claims = {}, how = {}) = apptest.CodeFor(p, b, claims = claims, how = how)
+finish(t, b, x, cookie = missing) = apptest.Finished(t, b, x, cookie = cookie)
+signedIn(t, p, claims = {}, how = {}, start = {}) = apptest.ProviderSignIn(t, p, claims = claims, how = how, start = start)
 
 problemOf(out) = json.Parse(out.Body)!.detail
 
 defn isSignedUpThenIn()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   bug.Assert(value.Equal(t.Anyone().Call(api.Providers)?, [{Name: "oidc", Title: "Acme"}]), "the providers")
   first = signedIn(t, p, start = {Return: "/invoices?late=1"})
@@ -190,10 +64,9 @@ defn isSignedUpThenIn()
   value.Len(f.Identities) == 1 and f.Identities[1].Provider == "oidc" and not f.Password
 end
 
-t1() = apptest.Start(App(missing))!
 
 defn isLinkedOnlyByAVerifiedAddress()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
   unverified = signedIn(t, p, claims = {"email_verified": false})
@@ -206,7 +79,7 @@ defn isLinkedOnlyByAVerifiedAddress()
 end
 
 defn isTokenOfAnotherAppOrSignInRefused()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   other = signedIn(t, p, claims = {aud: "another-app"})
   b1 = begin(t)
@@ -220,7 +93,7 @@ defn isTokenOfAnotherAppOrSignInRefused()
 end
 
 defn isMixUpRefused()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   b = begin(t)
   out = finish(t, b, {State: b.Q.state, Code: codeOf(p, b), Iss: "https://evil.example"})
@@ -228,7 +101,7 @@ defn isMixUpRefused()
 end
 
 defn isFinishedOnce()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   b = begin(t)
   x = {State: b.Q.state, Code: codeOf(p, b)}
@@ -238,7 +111,7 @@ defn isFinishedOnce()
 end
 
 defn isLoginCsrfRefused()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   attacker = begin(t)
   victim = begin(t)
@@ -250,29 +123,29 @@ defn isLoginCsrfRefused()
 end
 
 defn isReturnKeptInTheApp()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   returns = [json.Parse(signedIn(t, p, start = {Return: r}).Body)!.Return for r in ["//evil.example/x", "https://evil.example", "/\\evil.example", "/ok"]]
   value.Equal(returns, ["/", "/", "/", "/ok"])
 end
 
 defn isForgedTokenRefused()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   codes = [signedIn(t, p, how = h).Status for h in [{Alg: "none"}, {Alg: "HS256"}, {Own: true}]]
   value.Equal(codes, [401, 401, 401])
 end
 
 defn isRotationRead()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   bug.Assert(signedIn(t, p).Status == 201, "with k1")
-  ask(p.Box, {Op: "rotate", Key: rsaKey("k2", 2)})
+  apptest.Rotate(p, pairs[2])
   signedIn(t, p).Status == 201
 end
 
 defn isCallbackPassedOn()
-  p = Provider(t1())?
+  p = provider()
   t = started(p, settings = {OidcPage: "/signin/done"})?
   get = t.Raw("GET", "/auth/oidc/callback?code=abc&state=xyz&evil=1")
   post = t.Raw("POST", "/auth/oidc/callback", body = "code=abc&state=xyz&user=%7B%7D",
@@ -284,7 +157,7 @@ defn isCallbackPassedOn()
 end
 
 defn isProviderTextNotShown()
-  p = Provider(t1())?
+  p = provider()
   t = started(p)?
   b = begin(t)
   denied = finish(t, b, {State: b.Q.state, Error: "access_denied"})
@@ -294,22 +167,22 @@ defn isProviderTextNotShown()
 end
 
 defn isSecondFactorAfterTheProvider()
-  p = Provider(t1())?
+  p = provider()
   t = started(p, settings = {TwoFactorRoles: "owner"})?
   out = signedIn(t, p)
-  bug.Assert(out.Status == 201, "a new owner signs up: $(out.Body)")
+  first = json.Parse(out.Body)?
+  bug.Assert(out.Status == 401 and first.second.Setup == true, "a new owner signs up, and sets up his second factor first: $(out.Body)")
   again = signedIn(t, p)
   again.Status == 401 and json.Parse(again.Body)?.second.Setup == true
 end
 
 defn isSettingMissingNamed()
-  got = apptest.Start(App(missing), settings = {SignInWith: "google,apple,nobody"})
+  got = apptest.Start(App, settings = {SignInWith: "google,apple,nobody"})
   m = got.Error.Message
   text.Contains("APP_GOOGLE_ID", m) and text.Contains("APP_APPLE_KEY", m) and text.Contains("nobody is no provider", m)
 end
 
 defn isMicrosoftAndAppleRead()
-  t = t1()
   ms = dict.Put("Client", "c", auth.Microsoft) then dict.Put("Issuer", "https://login.microsoftonline.com/common/v2.0")
   conf = {issuer: "https://login.microsoftonline.com/{tenantid}/v2.0"}
   base = {iss: "https://login.microsoftonline.com/1234/v2.0", tid: "1234", aud: "c", sub: "s", exp: 2e9, nonce: "n", email: "ana@example.com"}
@@ -322,14 +195,24 @@ defn isMicrosoftAndAppleRead()
 end
 
 defn isAppleSecretSigned()
-  t = t1()
   o = crypto.OpenSsl()?
   pair = crypto.KeyPair("ES256", o)?
   pem = "-----BEGIN PRIVATE KEY-----\\n$(encode.Base64(pair.Secret))\\n-----END PRIVATE KEY-----"
-  u = apptest.Start(App(missing), settings = {SignInWith: "apple", AppleId: "com.acme.web", AppleTeam: "TEAM123", AppleKeyId: "KEY123", AppleKey: pem})?
+  u = apptest.Start(App, settings = {SignInWith: "apple", AppleId: "com.acme.web", AppleTeam: "TEAM123", AppleKeyId: "KEY123", AppleKey: pem})?
   secret = auth.ClientSecret("apple", u.Env)?
   parts = auth.JwtParts(secret)?
   der = crypto.EcdsaDer(parts.Signature)?
   crypto.VerifyWith(der, parts.Signed, pair.Public, "ES256", o) and parts.Header.kid == "KEY123" and parts.Claims.iss == "TEAM123" and parts.Claims.sub == "com.acme.web" and
     parts.Claims.aud == "https://appleid.apple.com"
+end
+
+defn isFlowCookieGuarded()
+  p = provider()
+  t = started(p, settings = {Origin: "https://sso.example"})?
+  b = begin(t)
+  set = [h.Value for h in b.Out.Headers if h.Name == "set-cookie"][1]
+  q = b.Q
+  text.StartsWith("__Host-oidc=", set) and text.Contains("HttpOnly", set) and text.Contains("SameSite=Strict", set) and text.Contains("; Secure", set) and
+    q["code_challenge_method"] == "S256" and text.ByteLength(q["code_challenge"]) == 43 and q["redirect_uri"] == "https://sso.example/auth/oidc/callback" and
+    not text.Contains(text.Split(".", text.Split("=", text.Split(";", set)[1])[2])[2], json.Text(b.Q))
 end

@@ -11,12 +11,14 @@
 use deps/www-celestial/cepheus/cesia/cepheus
 use src/api
 use src/app
+use src/i18n
 use src/jobs
 use src/mail
 use std/check
 use std/crypto
 use std/dict
 use std/encode
+use std/http
 use std/io
 use std/json
 use std/list
@@ -350,8 +352,9 @@ defn signingUp(r, x, facts, kinds, hash = missing, handle = missing, checked = f
   member = next
   ops = list.Concat(ops, app.Facts(Member, cepheus.New(member), {User: cepheus.New(1), Tenant: tenant, Roles: roles, Created: now}))
   required = s.EmailCheck == "required" and not checked
+  stepFirst = not required and s.TwoFactor != "off" and asked(app.Expand(roles, env.Roles), false, s)
   session = NewSession(cepheus.New(1), cepheus.New(member), tenant, r, env, thing = member + 1)
-  if not required
+  if not required and not stepFirst
     ops = list.Concat(ops, session.Ops)
   end
   if s.EmailCheck != "off" and not checked
@@ -380,15 +383,22 @@ defn signingUp(r, x, facts, kinds, hash = missing, handle = missing, checked = f
   if required
     return waiting
   end
+  if stepFirst
+    return stepped(user, {Member: things[member], Tenant: tenantId}, r, {Setup: true})
+  end
   out = account(user, tenantId, roles, env.Db, env.Roles)?
   app.Reply(out, headers = [Cookie(session.Value(things[member + 1]), env, s.SessionMax)])
 end
 
 defn newUser(email, name, hash, now, r)
-  (** The fields of a new user: his language the one his browser prefers among the app's, when it speaks several. *)
+  (** The fields of a new user: his language the one his browser prefers among the app's, when it speaks several and
+      the browser names one of them (none else: his browser's, at each request). *)
   u = {Email: email, Name: name, Hash: hash, Super: false, Disabled: false, Created: now}
   if r.Env.Translating
-    u.Lang = app.Lang(r)
+    lang = i18n.Best(http.HeaderValue("accept-language", r.Headers), r.Env.Langs, missing)
+    if value.IsText(lang)
+      u.Lang = lang
+    end
   end
   u
 end
@@ -580,7 +590,7 @@ defn switchTenant(r, x)
     return app.Fail(403, "You are no member of this tenant.")
   end
   EndSessions([r.User.Session], r.User.Id, r.Why, r.Db)?
-  opened(r.User.Id, m, r, "switch")
+  admitted(r.User.Id, m, r, "switch")
 end
 
 (* The answer of a request that sends a mail, or seems to: 202, the same whatever the address. *)
@@ -700,7 +710,7 @@ defn checkEmail(r, x)
     return app.Fail(403, "This link is not valid, or it has ended: ask for a new one.")
   end
   note(r, "checked", "The address was checked.", user = c.User, every = 0)
-  opened(c.User, membershipOf(c.User, missing, env.Db)?, r, "checked")
+  admitted(c.User, membershipOf(c.User, missing, env.Db)?, r, "checked")
 end
 
 defn sendCheck(r, x, kinds)
@@ -744,7 +754,7 @@ defn resetPassword(r, x)
   EndSessions([one.Id for one in SessionsOf(c.User, env.Db)?], c.User, r.Why, env.Db)?
   app.ForgetSessions(env.State)
   note(r, "password", "A new password by the link of a mail.", user = c.User, every = 0)
-  opened(c.User, membershipOf(c.User, missing, env.Db)?, r, "reset")
+  admitted(c.User, membershipOf(c.User, missing, env.Db)?, r, "reset")
 end
 
 defn keep(env)

@@ -1,5 +1,5 @@
 (** The invoices on a database in memory filled as a month of a small platform would be: five offices, their clients and
-    invoices (some paid), an accountant invited, sign-ins that failed, a request of another site, a job of mail that died
+    invoices (some paid), an accountant invited, a key of a program, the flag of the export opened to one office, sign-ins that failed, a request of another site, a job of mail that died
     and a report that waits. What the tutorial of the admin pages shows (tools/admin-serve.ce) and what their test in a
     browser plays (tools/admin-shot.ce). The super-admin is super@app.test, password "correct horse super". *)
 use deps/www-celestial/cepheus/cesia/cepheus
@@ -18,7 +18,7 @@ use std/value
 defn App(port, rows = 0)
   (** The app in memory, its data made, ready to serve on port: an Ok of its test t. *)
   t = apptest.Start(invoices.App, settings = {Origin: "http://127.0.0.1:$port", AdminPath: "/admin", LogRequests: "false"}, now = missing)?
-  _ = t.Super()?
+  boss = t.Super()?
   offices = [["ada@example.com", "Ada", "Martin & Co"], ["bruno@example.com", "Bruno", "Bruno Conseil"], ["chloe@example.com", "Chloé", "Atelier Chloé"],
     ["dan@example.com", "Dan", "Dan & Fils"], ["eva@example.com", "Eva", "Eva Studio"]]
   owners = []
@@ -27,6 +27,8 @@ defn App(port, rows = 0)
   end
   ada = owners[1]
   bo = t.SignUp({Email: "bo@example.com", Password: "another long secret", Name: "Bo", Invite: ada.Call(api.Invite, {Email: "bo@example.com", Roles: ["accountant"]})?.Code})?
+  _ = ada.Call(api.NewKey, {Name: "Accounting robot", Roles: ["accountant"], Days: 90})?
+  _ = boss.Call(api.AdminFlag, {name: "export.country", Tenant: ada.Tenant, On: true})?
   lines = [{Label: "Design", Quantity: 3, Price: 400}, {Label: "Hosting", Quantity: 1, Price: 80.5}]
   for k in 1..value.Len(owners)
     o = owners[k]
