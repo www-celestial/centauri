@@ -76,7 +76,7 @@ each with its test in `tests/oidc.test.ce` (oidc), `tests/passkeys.test.ce` (pas
 | threat | defense | test |
 |---|---|---|
 | token substitution: an ID token of another app, or of another sign-in | `aud` this app's client, and `azp` when there are several; `nonce` a BLAKE2b of the secret of this browser's cookie | oidc `isTokenOfAnotherAppOrSignInRefused` |
-| mix-up: a provider's answer that another provider named | the answer's `iss` checked when given, and asked when the provider says it gives it (RFC 9207); the code sent only to the token endpoint of the flow's provider, from its own discovery document | oidc `isMixUpRefused`, `isIssuerAskedWhenPromised` |
+| mix-up: the answer of one provider taken for another's, the code of a sign-in sent to the wrong provider | the answer's `iss` checked when given, and asked when the provider says it gives it (RFC 9207); the code sent only to the token endpoint of the flow's provider, from its own discovery document | oidc `isMixUpRefused`, `isIssuerAskedWhenPromised` |
 | replay of a flow: a finish sent twice | the flow ends at its first finish, by a write that expects it | oidc `isFinishedOnce` |
 | CSRF of the callback, login CSRF: a sign-in started in the attacker's browser, finished in the victim's | `state` a BLAKE2b of the secret of the cookie of the browser that started (`__Host-oidc`, `SameSite=Strict`), compared in constant time; the finish refused from another site; the callback writes nothing | oidc `isLoginCsrfRefused`, `isCallbackPassedOn`, `isFlowCookieGuarded` |
 | open redirect of `Return` | a path of the app only: a `/` not followed by another, no `\` nor control character, 2,000 bytes at most; else `/` | oidc `isReturnKeptInTheApp` |
@@ -103,6 +103,16 @@ each with its test in `tests/oidc.test.ce` (oidc), `tests/passkeys.test.ce` (pas
 | language header injection: a line end, a script, 5,000 languages in `Accept-Language` | the header read as tags only, 400 bytes and 20 languages; one of `Langs` in `Content-Language` | words `isLanguageHeaderInjectionHarmless` |
 | a second factor skipped by another way in | the step after a password, a provider, a passkey its device didn't verify, the link of a check, a new password, a tenant entered, an invitation taken | second `isAskedOnEveryWayIn`; oidc `isSecondFactorAfterTheProvider`; passkeys `isVerificationAsked`; l3 `isPasskeyAndTwoFactor` |
 | the code of an invitation read in an answer or the database | with `Mail`, a job makes it and mails it; its hash kept | people `isTenantAdminInvitingByMail`, `isInvitedByMail` |
+
+The threats of the pages in French, each with its test in `tests/translated.test.ce` (translated),
+`src/admin/pages/pages.test.ce` (pages), `examples/invoices/tests/l3.test.ce` (l3), and the browser test with
+`LANG=fr`:
+
+| threat | defense | test |
+|---|---|---|
+| markup in a translation, or in a text typed or kept, made into HTML in a page | a translation is a text: the canvas draws it, the hidden DOM gets it as text (`textContent`, `aria-label`); the door sends it inside JSON of `application/problem+json`, with nosniff | translated `isATranslationATextNotMarkup`; pages `isATranslationATextNotMarkup`; the browser test's step `markup` (no element made of `<b>` or `<img onerror>`) |
+| a text without its translation, or with an empty one, shown empty or in a broken sentence | a text the catalogue lacks, or whose translation is empty, shows in English; a test walks the pages for each text said and fails on one without French, a name of a value lost (`{N}`), a value written into a text | pages `isMissingEnglishNeverEmpty`; translated `isEveryTextOfTheAdminInFrench`, `isCentaurisCatalogueWhole`, `isAnUntranslatedTextFound`; l3 `isAdminInFrench` |
+| a header `Accept-Language` made to inject, sent to a page or to its live screen | read as tags only (400 bytes, 20 languages); the answer the same but its `Content-Language`, one of `Langs`; an action of the screen gets the header of its opening, read the same way | translated `isBadAcceptLanguageOnlyTheLanguage`, `isActInTheBrowsersLanguage` |
 
 What Centauri does not do yet: the third wall, a token of Cepheus per role that reads only its kinds (G16), for roles
 that must never see some kinds (an outside accountant); checking a new password against the lists of leaked ones. The

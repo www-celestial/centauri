@@ -11,7 +11,21 @@ What it uses: `api.Upload`, a body read in pieces as it comes (never whole), its
 
 ## 1. The contract
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/api
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/check
+use std/dict
+use std/value
+use std/json
+Invoice = json.Parse("{}")!
+Scans = json.Parse("{}")!
 ```
+
+```cesia norun
 Scan = api.Upload("/invoices/:id/scan", ["application/pdf", "image/jpeg", "image/png"], most = 10485760,
   out = check.Record({File: check.Id(), Size: check.Int(0)}), role = "accountant")
 ScanFile = api.Get("/invoices/:id/scan", out = api.File(), role = "accountant")
@@ -20,7 +34,7 @@ ScanFile = api.Get("/invoices/:id/scan", out = api.File(), role = "accountant")
 A page sends the file itself as the body, with its type and its name: `fetch("/invoices/7/scan?name=scan.pdf", {method:
 "POST", body: file, headers: {"content-type": file.type}})`. The handler gets `file`, `{Name, Type, Size, Read}`:
 
-```
+```cesia norun
 defn scan(r, file)
   inv = app.Own(Invoice, r.Params.id, r)?
   f = app.Store(Scans, file, r)?

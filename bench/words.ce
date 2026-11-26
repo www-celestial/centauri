@@ -1,0 +1,36 @@
+(** What the words of the admin pages cost, in this program, as a page says them (pages.Say is i18n.Say with the
+    pages' catalogue, pages.Words, and the language Run chose): a text in English and in French, a text that counts, a
+    message of the server or of the screen read again against the templates. Each measure is the mean of its n calls;
+    rounds alternate the order; one JSON line a measure: cesia run bench/words.ce [ROUNDS] [N] *)
+use src/admin/pages
+use src/i18n
+use std/io
+use std/json
+use std/list
+use std/math
+use std/sys
+use std/text
+use std/value
+
+rounds = if value.Len(sys.Args) > 0 text.Number(sys.Args[1]) else 3 end
+n = if value.Len(sys.Args) > 1 text.Number(sys.Args[2]) else 20000 end
+w = pages.Words
+
+cases = [
+  {Name: "a text, English", Run: k -> i18n.Say(w, "en", "Sign out")},
+  {Name: "a text, French", Run: k -> i18n.Say(w, "fr", "Sign out")},
+  {Name: "a text that counts, English", Run: k -> i18n.Say(w, "en", "{N} rows, all of them.", {N: k})},
+  {Name: "a text that counts, French", Run: k -> i18n.Say(w, "fr", "{N} rows, all of them.", {N: k})},
+  {Name: "a message of the screen, English", Run: k -> i18n.Say(w, "en", "This session has 16 screens open already.")},
+  {Name: "a message of the screen, French", Run: k -> i18n.Say(w, "fr", "This session has 16 screens open already.")}]
+
+for round in 1..rounds
+  order = if math.Mod(round, 2) == 0 list.Reverse(cases) else cases end
+  for x in order
+    start = sys.Now()
+    for k in 1..n
+      x.Run(k)
+    end
+    io.Print(json.Text({Name: x.Name, Round: round, Us: (sys.Now() - start) / n * 1000000}))
+  end
+end

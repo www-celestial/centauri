@@ -15,10 +15,34 @@ TLS or by Postmark (`mail.Send`, `mail.Later`).
 A job is a thing of Cepheus (`centauri_job`: its kind, its arguments, its state, when it may run, its tries, its
 lease). `jobs.Later` gives its facts, to write **in the group of the write that asks for it**:
 
+```cesia norun hide=code
+(* For the check of this page: the packages its code uses, and the names it takes from the invoices of
+   examples/invoices, unknown here. *)
+use deps/www-celestial/centauri/src/app
+use deps/www-celestial/centauri/src/auth
+use deps/www-celestial/centauri/src/hooks
+use deps/www-celestial/centauri/src/jobs
+use deps/www-celestial/centauri/src/mail
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/check
+use std/list
+use std/text
+use std/json
+Invoice = json.Parse("{}")!
+Module = json.Parse("{}")!
+User = json.Parse("{}")!
+k = json.Parse("{}")!
+o = json.Parse("{}")!
+office = json.Parse("{}")!
+r = json.Parse("{}")!
+to = json.Parse("{}")!
+x = json.Parse("{}")!
 ```
+
+```cesia norun
 Welcome = jobs.Kind("welcome", check.Record({User: check.Id(), Email: check.Email()}), (job, env) -> mail.Send(env, {To: job.Email, Subject: "Welcome", Text: "Hello."}))
 
-ops = list.Concat(app.Facts(User, cepheus.New(1), {...}), jobs.Later(Welcome, {User: cepheus.New(1), Email: x.Email}))
+ops = list.Concat(app.Facts(User, cepheus.New(1), {(* ... *)}), jobs.Later(Welcome, {User: cepheus.New(1), Email: x.Email}))
 cepheus.Write(ops, r.Db)?
 ```
 
@@ -54,9 +78,9 @@ another), that panics or runs past its `most` seconds is dead or stopped, and ho
 
 ## 2. A schedule
 
-```
+```cesia norun
 Report = jobs.Every("report", "0 6 * * *", report, zone = "Europe/Paris")
-App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), Module], ...)
+App = app.Of([auth.Module(), jobs.Module(every = [Report]), hooks.Module(), Module], (* ... *))
 ```
 
 - Five fields of cron (minute, hour, day, month, weekday; `*`, numbers, ranges, lists, steps, names), or `@daily`,
@@ -81,13 +105,13 @@ void report() { offices.findWithUnpaid().forEach(o -> mails.send(o.owners(), unp
 
 The report itself writes **one mail job an office**, so that an office whose mail fails is tried again alone:
 
-```
+```cesia norun
 defn report(job, env)
   offices = cepheus.Find(3, (i, o, t) -> {Where: [[i, Invoice.Tenant, o], [i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])],
     Give: {Office: o, Total: cepheus.Sum(t), Count: cepheus.Count()}}, env.Db)?
-  ...
+  (* ... *)
       ops = list.Concat(ops, mail.Later({To: to, Subject: "Unpaid invoices: $(o.Count)", Text: "..."}, thing = 1000 + k))
-  ...
+  (* ... *)
   cepheus.Write(ops, env.Db, why = env.Why)?
 end
 ```
@@ -121,14 +145,14 @@ void send(String to, String subject, String text) { var m = new SimpleMailMessag
 
 ## 4. Its test
 
-```
+```cesia norun
 defn isReportOfTheNightSentAndTriedAgain()
   s = office()?
   t = s.T
   t.Advance(5 * 3600 + 60)                           (* 05:01 UTC, 06:01 in Paris *)
   t.RunJobs()?
   m = [x for x in t.Mails() if text.StartsWith("Unpaid invoices", x.Subject)]
-  ...
+  (* ... *)
 end
 ```
 

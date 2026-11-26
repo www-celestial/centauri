@@ -141,9 +141,10 @@ defn filled(template, args)
 end
 
 defn formOf(target, lang, template, args)
-  (** The text of a translation for these values: itself, or the plural form of the number that chooses it. *)
+  (** The text of a translation for these values: itself, or the plural form of the number that chooses it; the
+      message itself for an empty one, so that a text never shows empty. *)
   if value.IsText(target)
-    return target
+    return if target == "" template else target end
   end
   if not value.IsDict(target)
     return template
@@ -159,7 +160,8 @@ defn formOf(target, lang, template, args)
     end
   end
   form = if value.IsMissing(n) "other" else Plural(lang, n) end
-  dict.GetOr(form, dict.GetOr("other", template, target), target)
+  got = dict.GetOr(form, dict.GetOr("other", template, target), target)
+  if value.IsText(got) and got != "" got else template end
 end
 
 defn Say(catalog, lang, message, args = missing)
@@ -167,13 +169,15 @@ defn Say(catalog, lang, message, args = missing)
       those values), else the message itself, filled in. Without args, a message as it was written, values in it:
       its text when the catalogue has it as it is, else the first template it matches, its values taken from it and
       put in the translation, else the message unchanged. A language the catalogue lacks gives the message; "pt-BR"
-      is served by "pt" when there is no "pt-BR".
+      is served by "pt" when there is no "pt-BR"; an empty translation gives the message too: a text never shows
+      empty.
 
         c = Catalog("fr", [["A whole number from {Min} to {Max}.", "Un nombre entier de {Min} à {Max}."]])
         Say(c, "fr", "A whole number from 1 to 10.") --> "Un nombre entier de 1 à 10."
         Say(c, "fr-CA", "A whole number from 1 to 10.") --> "Un nombre entier de 1 à 10."
         Say(c, "de", "A whole number from 1 to 10.") --> "A whole number from 1 to 10."
-        Say(c, "fr", "Something else.") --> "Something else." *)
+        Say(c, "fr", "Something else.") --> "Something else."
+        Say(Catalog("fr", [["Yes", ""]]), "fr", "Yes") --> "Yes" *)
   l = langOf(catalog, lang)
   if not value.IsMissing(args)
     if value.IsMissing(l)
@@ -186,10 +190,7 @@ defn Say(catalog, lang, message, args = missing)
     return message
   end
   target = dict.Get(message, catalog.Exact[l])
-  if value.IsText(target)
-    return target
-  end
-  if value.IsDict(target)
+  if value.IsText(target) or value.IsDict(target)
     return formOf(target, l, message, {})
   end
   for p in catalog.Patterns[l]
@@ -246,8 +247,9 @@ end
 
 defn operands(n)
   (** The operands of CLDR's plural rules of a number, or of a text that writes one: i its integer digits, v the count
-      of its visible digits after the point, f those digits as an integer, n its absolute value. *)
-  t = if value.IsText(n) text.Trim(n) else value.Text(n) end
+      of its visible digits after the point, f those digits as an integer, n its absolute value. The spaces between
+      thousands of a text, as French writes 12 345 (a space, a no-break space or a narrow one), are left out. *)
+  t = if value.IsText(n) ungrouped(text.Trim(n)) else value.Text(n) end
   if text.StartsWith("-", t)
     t = text.ByteSlice(2, text.ByteLength(t), t)
   end
@@ -262,6 +264,9 @@ defn operands(n)
   {I: i, V: text.ByteLength(frac), F: if frac == "" 0 else text.Number(frac) end, N: num}
 end
 
+(* A text without the spaces that part thousands: the space, the no-break space and the narrow no-break space. *)
+ungrouped(t) = text.Replace(" ", "", text.Replace(text.Char(0xA0), "", text.Replace(text.Char(0x202F), "", t)))
+
 within(x, a, b) = value.IsInt(x) and x >= a and x <= b   (* x in a..b, for an integer x, as CLDR writes it *)
 
 defn Plural(lang, n)
@@ -275,6 +280,7 @@ defn Plural(lang, n)
         Plural("fr", 0) --> "one"
         Plural("fr", 1.5) --> "one"
         Plural("fr", 1000000) --> "many"
+        Plural("fr", "12 345") --> "other"
         Plural("ru", 22) --> "few"
         Plural("ru", 25) --> "many"
         Plural("pl", 12) --> "many"

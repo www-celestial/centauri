@@ -1,11 +1,13 @@
 (** The admin pages of the invoices: Centauri's, and the app's own, a page of the unpaid invoices of every office with
     their sum by office, the invoices in the data browser with their number, client, status and total, and the action
-    of the support, Mark paid, an endpoint of the role super (e.AdminPay). Compiled to WebAssembly by
-    cesia build --target wasm admin/page.ce, which writes page.wasm, its loader page.js and their glue beside it;
-    admin.Module(folder = "admin") serves them at /admin. *)
+    of the support, Mark paid, an endpoint of the role super (e.AdminPay). They speak English or French, as Centauri's
+    pages do: their texts said by pages.Say, their French in the invoices' catalogue (words.Words, which the server
+    uses too). Compiled to WebAssembly by cesia build --target wasm admin/page.ce, which writes page.wasm, its loader
+    page.js and their glue beside it; admin.Module(folder = "admin") serves them at /admin. *)
 use deps/www-celestial/centauri/src/admin/pages
 use deps/www-celestial/ceres/src/web
 use src/invoices/endpoints as e
+use src/invoices/words
 use std/dict
 use std/list
 use std/plot
@@ -18,7 +20,7 @@ defn byOffice(rows)
     sums[i.Tenant] = dict.GetOr(i.Tenant, 0, sums) + i.Total
   end
   offices = dict.Keys(sums)
-  plot.Of([plot.Bars(["$o" for o in offices], [sums[o] for o in offices], color = "#b3261e")], title = "Unpaid by office (€)", x = "office", y = "€")
+  plot.Of([plot.Bars(["$o" for o in offices], [sums[o] for o in offices], color = "#b3261e")], title = pages.Say("Unpaid by office (€)"), x = pages.Say("office"), y = "€")
 end
 
 defn unpaid(p)
@@ -27,32 +29,32 @@ defn unpaid(p)
   rows = pages.ListRows(l)
   asking = web.Signal(missing)
   said = web.Signal(missing)
-  table = web.Table(rows, [web.Column("Office", i -> i.Tenant, sort = "Tenant", width = 90), web.Column("Number", i -> i.Number, sort = "Number", width = 90),
-    web.Column("Bill to", i -> i.BillTo, sort = "BillTo"), web.Column("Due", i -> i.Due, sort = "Due", width = 120),
-    web.Column("Total", i -> web.Money(i.Total), sort = "Total", width = 140)], height = 340, label = "Unpaid invoices")
+  table = web.Table(rows, [web.Column(pages.Say("Office"), i -> i.Tenant, sort = "Tenant", width = 90), web.Column(pages.Say("Number"), i -> i.Number, sort = "Number", width = 90),
+    web.Column(pages.Say("Bill to"), i -> i.BillTo, sort = "BillTo"), web.Column(pages.Say("Due"), i -> pages.Local(i.Due), sort = "Due", width = 120),
+    web.Column(pages.Say("Total"), i -> web.Money(i.Total), sort = "Total", width = 140)], height = 340, label = pages.Say("Unpaid invoices"))
   web.Stack([
-    web.Title("Unpaid invoices"),
-    web.Plot(() -> byOffice(web.Get(rows)), height = 200, width = 640, label = "Unpaid by office"),
+    web.Title(pages.Say("Unpaid invoices")),
+    web.Plot(() -> byOffice(web.Get(rows)), height = 200, width = 640, label = pages.Say("Unpaid by office")),
     table,
     pages.ListState(l, rows),
     () -> paying(pages.Chosen(table, rows), p, l, asking, said),
     pages.Question(asking),
-    () -> if value.IsMissing(web.Get(said)) missing else pages.Replied(web.Get(said), v -> web.Text("Paid."))() end,
+    () -> if value.IsMissing(web.Get(said)) missing else pages.Replied(web.Get(said), v -> web.Text(pages.Say("Paid.")))() end,
   ], gap = 8)
 end
 
 defn paying(i, p, l, asking, said)
   (** The action on the invoice chosen. *)
   if value.IsMissing(i)
-    return web.Text("Choose an invoice to mark it paid.")
+    return web.Text(pages.Say("Choose an invoice to mark it paid."))
   end
-  pages.Confirm(asking, "Mark invoice $(i.Number) of office $(i.Tenant) paid", defn ()
+  pages.Confirm(asking, pages.Say("Mark invoice {Number} of office {Office} paid", {Number: i.Number, Office: i.Tenant}), defn ()
     web.Set(said, pages.Call(e.AdminPay, {id: i.Id}, p))
     pages.Again(l, web.Get(l.Args))
   end)
 end
 
-pages.Run(title = "Invoices — admin",
+pages.Run(title = "Invoices — admin", words = words.Words,
   kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number"), pages.Column("BillTo", title = "Bill to"), pages.Column("Status"),
-    pages.Column("Total", show = v -> "$v €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
+    pages.Column("Total", show = v -> "$(pages.Num(v)) €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])
