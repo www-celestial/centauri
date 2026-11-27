@@ -24,6 +24,7 @@ Words = i18n.Catalog("fr", [
   ["Invoices — admin", "Factures — administration"],
   ["Invoices", "Factures"],
   ["Number", "Numéro"],
+  ["Client", "Client"],
   ["Bill to", "Facturé à"],
   ["Status", "Statut"],
   ["Total", "Total"],

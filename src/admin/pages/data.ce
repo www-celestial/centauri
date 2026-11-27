@@ -268,19 +268,24 @@ defn deleting(ids, kind, p, b, said, after)
 end
 
 defn columnsOf(kind, p)
-  (** The columns of a kind's table: the app's (pages.Kind), else its id and its first six fields. *)
+  (** The columns of a kind's table: the app's (pages.Kind), else its id and its first six fields shown, each as its
+      type says (a date in the reader's time, an amount with its two decimals, a link the title of what it names). *)
   own = dict.Get(kind.Name, p.Site.Kinds)
   first = web.Column(Say("Id"), t -> web.Text(t.Id, size = "small", color = gray), sort = "Id", width = 80)
-  isLink = name -> list.Any([f.Name == name and f.Type == "link" for f in kind.Fields])
   if value.IsSome(own) and value.Len(own.Columns) > 0
     return list.Concat([first],
-      [web.Column(Say(c.Title), if value.IsSome(c.Show) (t -> c.Show(dict.Get(c.Field, t))) else if isLink(c.Field) (t -> linkCell(t, c.Field)) else (t -> Cell(dict.Get(c.Field, t))) end,
+      [web.Column(Say(c.Title), if value.IsSome(c.Show) (t -> c.Show(dict.Get(c.Field, t))) else cellOf(list.FindFirst(f -> f.Name == c.Field, kind.Fields), c.Field) end,
         sort = c.Field, width = c.Width) for c in own.Columns])
   end
   fields = list.Take(6, [f for f in kind.Fields if f.Name != "Search" and dict.Get("Derived", f) != true and f.Secret != true])
-  list.Concat([first],
-    [web.Column(f.Name, if f.Type == "date" (t -> Local(dict.Get(f.Name, t))) else if f.Type == "money" (t -> Money(dict.Get(f.Name, t))) else if f.Type == "link" (t -> linkCell(t, f.Name))
-      else (t -> Cell(dict.Get(f.Name, t))) end, sort = f.Name) for f in fields])
+  list.Concat([first], [web.Column(f.Name, cellOf(f, f.Name), sort = f.Name) for f in fields])
+end
+
+defn cellOf(f, name)
+  (** How a cell shows a field, by its type: a date in the reader's time, an amount, the title a link names. *)
+  t = if value.IsMissing(f) "" else f.Type end
+  if t == "date" (x -> Local(dict.Get(name, x))) else if t == "money" (x -> Money(dict.Get(name, x))) else if t == "link" (x -> linkCell(x, name))
+  else (x -> Cell(dict.Get(name, x))) end
 end
 
 defn shownValue(v, f)
