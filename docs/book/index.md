@@ -58,5 +58,8 @@ Spring Boot beside, and ends on tests that pass. The whole app is in
     the invoices, and the pages in French, with Django's admin beside.
 21. [Speed](speed.md): what Centauri adds to a start, to a request and under load, beside std/http alone, Go and
     Spring Boot, where the time goes, and what the pieces of the first month cost.
+22. [Telemetry](telemetry.md): a slow click found through its trace, from the page to the reads of Cepheus, in Jaeger
+    (`APP_OTEL`, OpenTelemetry's traces, metrics and logs); what the pages tell their app of each visit, their speed,
+    errors, devices and journey, what the law lets it keep without asking (`APP_TELEMETRY_*`), and what it costs.
 
 The reference of the packages, every public name with its parameters, is under [Reference](ref/index.html).

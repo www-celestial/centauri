@@ -87,6 +87,10 @@ et finit sur des tests qui passent. L'app entière est dans
     en français, avec l'admin de Django à côté.
 21. [Vitesse](speed.md) : ce que Centauri ajoute à un démarrage, à une requête et sous charge, à côté de std/http seul,
     de Go et de Spring Boot, où passe le temps, et ce que coûtent les pièces du premier mois.
+22. [Télémétrie](telemetry.md) : un clic lent retrouvé grâce à sa trace (l'histoire d'une requête, étape par étape),
+    de la page jusqu'aux lectures de Cepheus, dans Jaeger (`APP_OTEL`, les traces, les métriques et les logs
+    d'OpenTelemetry) ; ce que les pages disent à leur app de chaque visite, leur vitesse, leurs erreurs, leurs appareils
+    et leur parcours, ce que la loi la laisse garder sans demander (`APP_TELEMETRY_*`), et ce que cela coûte.
 
 La référence des packages (un package : un dossier de fichiers Cesia groupés sous un nom), chaque nom public avec ses
 paramètres, est sous [Référence](ref/index.html).

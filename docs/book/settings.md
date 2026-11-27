@@ -97,6 +97,12 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_OIDC_ISSUER`, `APP_OIDC_ID`, `APP_OIDC_SECRET`, `APP_OIDC_NAME`, `APP_OIDC_SCOPES` | none, none, none, `SSO`, `openid email profile` | any provider of OpenID Connect: its issuer (https), its client, its button's title, its scopes |
 | `APP_<NAME>_ID`, `APP_<NAME>_SECRET` | none | the client of a provider of the app's own, `auth.Provider("okta", ...)` reading `APP_OKTA_ID` and `APP_OKTA_SECRET` |
 | `APP_FLAGS_REFRESH` | 1 s | how often a process reads the feature flags again, 0 to 3,600 seconds ([flags](flags.md)) |
+| `APP_OTEL`, `APP_OTEL_ENDPOINT`, `APP_OTEL_PROTOCOL`, `APP_OTEL_COMPRESSION`, `APP_OTEL_HEADERS` | `off`, `http://127.0.0.1:4318`, `protobuf`, `none`, none | traces, metrics and logs to a collector of OpenTelemetry, by OTLP over HTTP, protobuf or JSON, gzip or not, the headers of a vendor (a secret) ([telemetry](telemetry.md)) |
+| `APP_OTEL_SAMPLE`, `APP_OTEL_ALWAYS`, `APP_OTEL_SLOW`, `APP_OTEL_TRUST` | 1, `errors,slow`, 1000 ms, `restart` | the share of traces kept; the failed and slow requests kept all the same; a `traceparent` from outside restarted with a link, or trusted |
+| `APP_OTEL_SIGNALS`, `APP_OTEL_SERVICE`, `APP_OTEL_QUEUE`, `APP_OTEL_EVERY`, `APP_OTEL_METRICS_EVERY` | `traces,metrics,logs`, the app's name, 2048, 5 s, 60 s | what is sent, under which name, the spans that wait at most, how often |
+| `APP_TELEMETRY_CLIENT`, `APP_TELEMETRY_SAMPLE`, `APP_TELEMETRY_EVERY` | `on`, 1, 30 s | the pages tell their app their speed, errors, device and journey ([telemetry](telemetry.md#4-what-the-pages-tell)) |
+| `APP_TELEMETRY_CONSENT`, `APP_TELEMETRY_IP`, `APP_TELEMETRY_USER` | `ask`, `none`, `off` | the address and the account of a visitor, kept only as said, and with `ask` only once he said yes |
+| `APP_TELEMETRY_GEO`, `APP_TELEMETRY_GEO_FILE`, `APP_TELEMETRY_KEEP`, `APP_TELEMETRY_MOST` | `city`, none, 30 days, 6000 | the country and city from a database of DB-IP, the days the telemetry is kept, the batches a minute a process takes |
 
 ## 2. Three profiles
 
@@ -120,7 +126,10 @@ Their only differences, and nothing else changes with them:
   milliseconds, address, user; never a body, a cookie or a token.
 - `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`), and
   `http_*` of std/metrics: on `127.0.0.1:APP_ADMIN_PORT/metrics` for Prometheus, and as rows at `GET /admin/metrics`
-  for the super-admin.
+  for the super-admin. With `APP_OTEL=on`, the same numbers go to a collector of OpenTelemetry too, with the traces of
+  the requests and the lines of the log ([telemetry](telemetry.md)): one source, two views. A metric holds 2,000
+  series at most, the others counted in one, `otel_metric_overflow="true"`, as OpenTelemetry advises: a label made
+  from requests can't fill the memory.
 
 ## 4. Production
 

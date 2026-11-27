@@ -34,7 +34,18 @@ window.adminPlay = (() => {
   const click = n => { const c = document.querySelector('canvas'), r = c.getBoundingClientRect()
     for (const type of ['pointerdown', 'pointerup'])
       c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + Math.min(10, n.W / 2), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
-  const press = async (role, name) => { const n = await node(role, name); if (!n) return false; click(n); await wait(400); return true }
+  // a node below the window first scrolled into it, by the wheel as a person does: a long list (the kinds of the data
+  // browser) puts its last links past the bottom
+  const press = async (role, name) => {
+    let n = await node(role, name); if (!n) return false
+    const c = document.querySelector('canvas')
+    for (let k = 0; k < 30 && n && c.getBoundingClientRect().top + n.Y + n.H > innerHeight - 40; k++) {
+      c.dispatchEvent(new WheelEvent('wheel', { clientX: innerWidth / 2, clientY: innerHeight / 2, deltaY: 100, bubbles: true, cancelable: true }))
+      await wait(150); n = await node(role, name)
+    }
+    if (!n) return false
+    click(n); await wait(400); return true
+  }
   const type = async (name, text) => {
     const f = await node('textbox', name); if (!f) return false
     click(f)

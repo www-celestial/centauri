@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="390" viewBox="0 0 760 390">
+<title>The bytes each library of telemetry adds to a page, with Brotli</title>
+<style>text{font-family:system-ui, sans-serif;font-size:12px;fill:#1f2328}.h{font-weight:600;font-size:13px}.s{fill:#57606a}.b{fill:#ebfbee;stroke:#2f9e44}.g{fill:#fff4e6;stroke:#e8590c}</style>
+<rect width="760" height="390" fill="#fff"/>
+<text class="h" x="16" y="24">What a page loads to tell its telemetry: bytes with Brotli (quality 11)</text>
+<text class="s" x="16" y="42">each library as its quick start sets it up, bundled by esbuild, minified; measured on 2026-11-27</text>
+<text x="16" y="82">Centauri's telemetry (telemetry.js + its WebAssembly)</text>
+<rect class="b" x="330" y="70" width="24.5" height="16" rx="2"/>
+<text x="362.5" y="82">6.7 KB</text>
+<text x="16" y="112">web-vitals 6.2.3, alone</text>
+<rect class="g" x="330" y="100" width="11.0" height="16" rx="2"/>
+<text x="349.0" y="112">3.0 KB</text>
+<text x="16" y="142">Elastic APM RUM 5.17.5</text>
+<rect class="g" x="330" y="130" width="76.8" height="16" rx="2"/>
+<text x="414.8" y="142">20.9 KB</text>
+<text x="16" y="172">Sentry 11.19, errors only</text>
+<rect class="g" x="330" y="160" width="105.6" height="16" rx="2"/>
+<text x="443.6" y="172">28.8 KB</text>
+<text x="16" y="202">OpenTelemetry JS for the web 3.1</text>
+<rect class="g" x="330" y="190" width="120.1" height="16" rx="2"/>
+<text x="458.1" y="202">32.7 KB</text>
+<text x="16" y="232">Grafana Faro 2.15</text>
+<rect class="g" x="330" y="220" width="138.9" height="16" rx="2"/>
+<text x="476.9" y="232">37.9 KB</text>
+<text x="16" y="262">Sentry 11.19, with tracing</text>
+<rect class="g" x="330" y="250" width="183.3" height="16" rx="2"/>
+<text x="521.3" y="262">50.0 KB</text>
+<text x="16" y="292">Datadog RUM 7.19</text>
+<rect class="g" x="330" y="280" width="274.7" height="16" rx="2"/>
+<text x="612.7" y="292">74.9 KB</text>
+<text x="16" y="322">Grafana Faro 2.15, with tracing</text>
+<rect class="g" x="330" y="310" width="289.5" height="16" rx="2"/>
+<text x="627.5" y="322">79.0 KB</text>
+<text x="16" y="352">Sentry 11.19, its quick start (tracing, replay)</text>
+<rect class="g" x="330" y="340" width="313.6" height="16" rx="2"/>
+<text x="651.6" y="352">85.5 KB</text>
+</svg>

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+OpenTelemetry and the telemetry of the pages. Nothing breaks: `APP_OTEL` is off by default; the pages' telemetry is
+on, adds three kinds that the admin lists and a route, `POST /telemetry`, and keeps only what the CNIL lets a site
+measure without asking.
+
+- `APP_OTEL=on`: traces, metrics and logs to a collector of OpenTelemetry (`APP_OTEL_ENDPOINT`, OTLP over HTTP,
+  `APP_OTEL_PROTOCOL` protobuf or JSON, `APP_OTEL_COMPRESSION`, `APP_OTEL_HEADERS`). Each request a span named by its
+  route, its reads and writes of Cepheus its children, `app.Call` a child that carries `traceparent` on (its host and
+  port, never its path), a job a trace of its own linked to the request that asked for it, a mail's sending, a live
+  action the child or the link of the page's click; `Server-Timing` tells a page its trace. Sampling
+  (`APP_OTEL_SAMPLE`, `APP_OTEL_ALWAYS`, `APP_OTEL_SLOW`), a `traceparent` from outside restarted with a link
+  (`APP_OTEL_TRUST`), `APP_OTEL_SIGNALS`, `APP_OTEL_SERVICE`, `APP_OTEL_QUEUE`, `APP_OTEL_EVERY`,
+  `APP_OTEL_METRICS_EVERY`; the client's address and account only as `APP_TELEMETRY_IP` and `APP_TELEMETRY_USER` say.
+- The pages' telemetry (`APP_TELEMETRY_CLIENT`, on): `POST /telemetry` takes their batches, bounded (60 a minute an
+  address, 64 KiB, `APP_TELEMETRY_MOST` a minute for the process), masks them again, and keeps
+  `centauri_client_view` (a load of a page: Web Vitals, navigation, WebAssembly, frames, live screen, device,
+  journey), `centauri_client_action` and `centauri_client_error`, `Untrusted`, `APP_TELEMETRY_KEEP` days; the country
+  and city from a database of DB-IP (`APP_TELEMETRY_GEO`, `APP_TELEMETRY_GEO_FILE`, MMDB read in Cesia); the address
+  and the account only as said, and with `APP_TELEMETRY_CONSENT=ask` once the visitor said yes. With `APP_OTEL` on,
+  the actions are spans and the errors lines of the service `<app>-browser`.
+- `examples/invoices/tools/trace-serve.ce`: the invoices with OpenTelemetry on, for the tutorial; `bench/otel.ce`.
+- The book: [Telemetry](docs/book/telemetry.md), the settings and the Security rows of telemetry.
+
 HTTP/3 and WebTransport, two settings, both off by default: nothing changes until an app turns them on.
 
 - `APP_HTTP3=on` serves the same routes over HTTP/3 (QUIC) beside TCP, on `APP_HTTP3_PORT` (0, the default, is
