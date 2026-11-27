@@ -317,4 +317,71 @@ pour garder les messages, un ETag sur chaque ressource :
 
 et rien côté page : la reconnexion, la file des actions, la ligne qui le dit, la reprise d'une vue en direct.
 
+## 11. Ce que QUIC ajoute, et quand on revient à TCP
+
+*QUIC* (RFC 9000) est un transport sur UDP (qui envoie des paquets un par un, sans connexion ni ordre), là où TCP en est
+un sur IP (le protocole qui porte les paquets d'Internet) : *HTTP/3* (RFC 9114) passe par lui, et *WebTransport* donne
+à une page un canal sur lui, comme le fait WebSocket (la connexion qui reste ouverte entre la page et l'app, et porte
+des messages dans les deux sens) sur TCP. Deux réglages les allument, à côté de TCP, jamais à sa place :
+
+```bash
+APP_CERT=/etc/invoices/cert.pem APP_KEY=/etc/invoices/key.pem APP_HTTP3=on APP_WEBTRANSPORT=on cesia do serve
+```
+
+Les routes ne changent pas : les mêmes endpoints (les adresses de l'API de l'app) répondent en HTTP/1.1 et en HTTP/3,
+les mêmes screens en direct par WebSocket et par WebTransport, avec les mêmes frames et la même reprise
+(`examples/invoices/tests/http3.test.ce` lit les factures, leur CSV et une facture des deux façons, et en paie une deux
+fois en HTTP/3 avec sa clé : payée une fois).
+
+Ce que QUIC apporte à une page sur un mauvais réseau :
+
+- **Une connexion en un aller-retour, pas deux** : le *handshake* de QUIC (l'échange qui ouvre la connexion) porte
+  celui de TLS (le chiffrement de https). Chaque reconnexion de la page après une coupure gagne un aller-retour :
+  200 ms sur la 4G d'un train, à 100 ms dans chaque sens.
+- **Un paquet perdu ne retient que son stream** (un *stream* est un flux de la connexion, qui a son propre ordre) : sur
+  TCP, chaque requête et chaque frame d'une connexion attend derrière une perte ; sur QUIC, seul le stream auquel il
+  appartenait attend.
+
+Ce qu'il ne sait pas encore faire, avec le QUIC d'OpenSSL, celui qu'utilise Cesia :
+
+- **La connection migration** (RFC 9000, section 9), une connexion qui continue quand le téléphone passe du wifi à la
+  4G : pas dans OpenSSL. La page ouvre une nouvelle connexion, comme sur TCP, et la reprise de ce chapitre fait suivre
+  le screen, les actions, les envois et les téléchargements. Un QUIC avec migration épargnerait la reconnexion, jamais
+  la reprise : un serveur redémarré, un déploiement, ou une coupure plus longue que son *idle timeout* (le silence au
+  bout duquel une connexion est fermée) mettent fin à toute connexion.
+- **Le 0-RTT** (RFC 9001, section 4.6), une requête dans le premier paquet : pas dans OpenSSL ; une requête qu'un proxy
+  placé devant a prise dans les *early data* (les données envoyées avant la fin du handshake) et qui changerait quelque
+  chose reçoit `425 Too Early` (RFC 8470), et la page la renvoie.
+
+![Un téléchargement de 10 Mo dont le client change d'adresse à 2 Mo, de trois façons : sur QUIC avec migration (quic-go des deux côtés), les octets continuent après 0,5 ms sur un lien propre, 101 ms sur 25 ms dans chaque sens avec 1 % perdu ; sur TCP, le client voit la coupure, ouvre une nouvelle connexion et demande le reste avec Range, 1,8 et 155 ms (Go), 9 et 223 ms (Cesia) ; sur le QUIC de Cesia, sans migration, comme sur TCP, 22 et 171 ms.](images/quic-migration.svg)
+
+Et quand on revient à TCP, cela se fait tout seul :
+
+| quoi | ce qui se passe |
+|---|---|
+| UDP bloqué en chemin (certains réseaux d'entreprise) | le navigateur entend `Alt-Svc` (le header qui annonce HTTP/3), son QUIC ne reçoit aucune réponse, et il reste sur TCP ; la course du canal en direct (WebTransport et WebSocket ouverts ensemble, le premier prêt gardé) donne WebSocket, et la page n'essaie plus WebTransport pendant 10 minutes |
+| l'OpenSSL du système n'a pas QUIC (Ubuntu 22.04 et 24.04 : 3.0) | le démarrage dit `http3: off, TCP alone` et sert TCP |
+| un navigateur sans WebTransport (Safari avant 26.4, Firefox avant 114) | WebSocket, comme avant |
+| `APP_WEBTRANSPORT=off` | les pages ne l'essaient jamais (aucun `<meta name="webtransport">` en elles) |
+
+| réglage | par défaut | ce que c'est |
+|---|---|---|
+| `APP_HTTP3` | `off` | `on` : HTTP/3 à côté de TCP ; demande `APP_CERT` et `APP_KEY`, QUIC ne marche jamais en clair |
+| `APP_HTTP3_PORT` | 0 | son port UDP ; 0 est `APP_PORT`, là où regardent les navigateurs |
+| `APP_WEBTRANSPORT` | `off` | `on` : les screens en direct prennent des sessions WebTransport, et les pages le mettent en course avec WebSocket ; demande `APP_HTTP3=on` sur `APP_PORT` |
+
+Sur un lien qui perd des paquets, la migration a peu gagné ici : sa vérification du nouveau chemin prend un
+aller-retour, comme le handshake d'une nouvelle connexion QUIC (101 ms contre 103 ms pour quic-go) ; la nouvelle
+connexion de Cesia en paie un de plus pour Retry (171 ms), celle de TCP deux (223 ms). Ce que la migration garde, c'est
+l'état : pas de Range, pas de nouvelles clés, les streams continuent.
+
+Les deux réglages sont éteints par défaut, d'après la mesure (le livre de Cesia, HTTP/3, Ce que ça coûte :
+`bench/http3`) : sur le QUIC d'OpenSSL, celui qu'utilise Cesia, une requête coûte trois fois et demie le travail d'une
+requête en HTTP/1.1 (5 929 requêtes par seconde contre 20 513), et un téléchargement de 1 Mo sur un lien qui perd 1 % de
+ses paquets prend 4,7 s contre 1,8 s sur TCP, à cause du *congestion control* d'OpenSSL (la règle qui fixe le débit
+d'après ce que le réseau laisse passer : NewReno seul, une fenêtre qui grandit trop lentement ; le BBR de ngtcp2 prend
+0,47 s). Ce que HTTP/3 gagne aujourd'hui, ce sont les petites requêtes les plus lentes sur un tel lien (le 1 % le plus
+lent en 179 ms contre 306 ms) et une connexion en un aller-retour. Allumez-le pour une app dont les utilisateurs sont
+sur des téléphones et font de petites requêtes ; laissez-le éteint pour une app qui envoie de gros fichiers.
+
 Suite : [Prévenir un partenaire, et prendre ses réponses](partner.md).

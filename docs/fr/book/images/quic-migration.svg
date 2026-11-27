@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="434" viewBox="0 0 760 434">
+<title>A download whose client changes address at 2 MB: the pause before the next byte, for each way to carry on</title>
+<style>text{font-family:system-ui, sans-serif;font-size:12px;fill:#1f2328}.h{font-weight:600;font-size:13px}.s{fill:#57606a}.b{fill:#ebfbee;stroke:#2f9e44}.g{fill:#fff4e6;stroke:#e8590c}.r{stroke:#57606a;stroke-width:1.2}</style>
+<rect width="760" height="434" fill="#fff"/>
+<text class="h" x="16" y="24">Le client change d’adresse à 2 Mo sur 10 Mo : la pause avant l’octet suivant</text>
+<text class="s" x="16" y="42">médiane des tours, la ligne du plus court au plus long ; migrate.sh, puis python3 -I migration-svg.py</text>
+<text class="h" x="16" y="68">un lien propre</text>
+<text x="16" y="100">QUIC, migration (quic-go des deux côtés)</text>
+<rect class="b" x="400" y="88" width="2.0" height="16" rx="2"/>
+<line class="r" x1="400.3" y1="96" x2="400.6" y2="96"/>
+<text x="408.0" y="100">0,5 ms [0,4, 0,8]</text>
+<text x="16" y="130">QUIC, Cesia (OpenSSL : pas de migration), reconnecté</text>
+<rect class="g" x="400" y="118" width="18.2" height="16" rx="2"/>
+<line class="r" x1="411.7" y1="126" x2="424.2" y2="126"/>
+<text x="430.2" y="130">24 ms [15, 32]</text>
+<text x="16" y="160">TCP, une nouvelle connexion et Range (Go)</text>
+<rect class="g" x="400" y="148" width="2.0" height="16" rx="2"/>
+<line class="r" x1="401.1" y1="156" x2="401.5" y2="156"/>
+<text x="408.0" y="160">1,8 ms [1,5, 2,0]</text>
+<text x="16" y="190">TCP, une nouvelle connexion et le reste (Cesia)</text>
+<rect class="g" x="400" y="178" width="6.9" height="16" rx="2"/>
+<line class="r" x1="405.4" y1="186" x2="412.0" y2="186"/>
+<text x="418.0" y="190">9 ms [7, 16]</text>
+<text x="16" y="220">QUIC, une nouvelle connexion et le reste (Cesia)</text>
+<rect class="g" x="400" y="208" width="16.7" height="16" rx="2"/>
+<line class="r" x1="414.5" y1="216" x2="424.3" y2="216"/>
+<text x="430.3" y="220">22 ms [19, 32]</text>
+<text class="h" x="16" y="240">25 ms dans chaque sens, 1 % perdu</text>
+<text x="16" y="272">QUIC, migration (quic-go des deux côtés)</text>
+<rect class="b" x="400" y="260" width="76.5" height="16" rx="2"/>
+<line class="r" x1="476.4" y1="268" x2="477.6" y2="268"/>
+<text x="483.6" y="272">101 ms [101, 103]</text>
+<text x="16" y="302">QUIC, Cesia (OpenSSL : pas de migration), reconnecté</text>
+<rect class="g" x="400" y="290" width="134.2" height="16" rx="2"/>
+<line class="r" x1="533.2" y1="298" x2="535.2" y2="298"/>
+<text x="541.2" y="302">177 ms [176, 179]</text>
+<text x="16" y="332">TCP, une nouvelle connexion et Range (Go)</text>
+<rect class="g" x="400" y="320" width="117.1" height="16" rx="2"/>
+<line class="r" x1="514.7" y1="328" x2="564.1" y2="328"/>
+<text x="570.1" y="332">155 ms [152, 217]</text>
+<text x="16" y="362">TCP, une nouvelle connexion et le reste (Cesia)</text>
+<rect class="g" x="400" y="350" width="168.9" height="16" rx="2"/>
+<line class="r" x1="565.9" y1="358" x2="630.0" y2="358"/>
+<text x="636.0" y="362">223 ms [219, 304]</text>
+<text x="16" y="392">QUIC, une nouvelle connexion et le reste (Cesia)</text>
+<rect class="g" x="400" y="380" width="129.2" height="16" rx="2"/>
+<line class="r" x1="528.1" y1="388" x2="537.3" y2="388"/>
+<text x="543.3" y="392">171 ms [169, 182]</text>
+<text class="s" x="16" y="432">QUIC avec migration garde sa connexion ; les autres en ouvrent une nouvelle et demandent le reste, comme la reprise de Centauri.</text>
+</svg>

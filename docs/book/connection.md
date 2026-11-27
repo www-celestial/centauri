@@ -292,4 +292,62 @@ client that retries with the same key, a STOMP broker relay for messages kept, a
 and nothing of a page's side: the reconnection, the queue of actions, the line that says it, the resume of a live
 view.
 
+## 11. What QUIC adds, and when it falls back
+
+*QUIC* (RFC 9000) is a transport over UDP where TCP is one over IP: *HTTP/3* (RFC 9114) runs on it, and *WebTransport*
+gives a page a channel over it, as WebSocket does over TCP. Two settings turn them on, beside TCP, never in its place:
+
+```bash
+APP_CERT=/etc/invoices/cert.pem APP_KEY=/etc/invoices/key.pem APP_HTTP3=on APP_WEBTRANSPORT=on cesia do serve
+```
+
+The routes don't change: the same endpoints answer over HTTP/1.1 and HTTP/3, the same live screens over WebSocket and
+WebTransport, with the same frames and the same resume (`examples/invoices/tests/http3.test.ce` reads the invoices,
+their CSV and an invoice both ways and pays one over HTTP/3 twice with its key: paid once).
+
+What QUIC brings to a page on a poor network:
+
+- **A connection in one round trip, not two**: QUIC's handshake carries TLS's. Each reconnection of the page after a
+  break saves a round trip: 200 ms on a train's 4G of 100 ms each way.
+- **A packet lost holds up only its stream**: over TCP every request and frame of a connection waits behind a loss;
+  over QUIC only the stream it belonged to.
+
+What it can't do yet, with OpenSSL's QUIC, which Cesia uses:
+
+- **Connection migration** (RFC 9000, section 9), a connection that goes on when the phone goes from wifi to 4G: not in
+  OpenSSL. The page makes a new connection, as over TCP, and the resume of this chapter carries the screen, the actions
+  and the transfers over. QUIC with migration would save the reconnection, never the resume: a server restarted, a
+  deploy, or a break longer than its idle timeout end any connection.
+- **0-RTT** (RFC 9001, section 4.6), a request in the first packet: not in OpenSSL; a request that a proxy in front
+  took in early data and that would change something gets `425 Too Early` (RFC 8470), and the page sends it again.
+
+![A download of 10 MB whose client changes address at 2 MB, three ways: over QUIC with migration (quic-go on both sides) the bytes go on after 0.5 ms on a clean link, 101 ms over 25 ms each way with 1 % lost; over TCP the client sees the break, opens a new connection and asks the rest with Range, 1.8 and 155 ms (Go), 9 and 223 ms (Cesia); over Cesia's QUIC, without migration, the same as TCP, 22 and 171 ms.](images/quic-migration.svg)
+
+And when it falls back, by itself:
+
+| what | what happens |
+|---|---|
+| UDP blocked on the way (some company networks) | the browser hears `Alt-Svc`, its QUIC gets no answer, and it stays on TCP; the live channel's race gives WebSocket, and the page doesn't try WebTransport again for 10 minutes |
+| the system's OpenSSL has no QUIC (Ubuntu 22.04 and 24.04: 3.0) | the start says `http3: off, TCP alone` and serves TCP |
+| a browser without WebTransport (Safari before 26.4, Firefox before 114) | WebSocket, as before |
+| `APP_WEBTRANSPORT=off` | the pages never try it (no `<meta name="webtransport">` in them) |
+
+| setting | default | what it is |
+|---|---|---|
+| `APP_HTTP3` | `off` | `on`: HTTP/3 beside TCP; needs `APP_CERT` and `APP_KEY`, QUIC has no clear text |
+| `APP_HTTP3_PORT` | 0 | its UDP port; 0 is `APP_PORT`, where browsers look |
+| `APP_WEBTRANSPORT` | `off` | `on`: the live screens take WebTransport sessions, and the pages race it against WebSocket; needs `APP_HTTP3=on` on `APP_PORT` |
+
+On a link that loses packets, migration saved little here: its check of the new path takes a round trip, as a new
+QUIC connection's handshake does (101 ms against 103 ms for quic-go); Cesia's new connection pays one more for Retry
+(171 ms), TCP's two (223 ms). What migration keeps is the state: no Range, no new keys, the streams go on.
+
+Both settings are off by default, by measure (Cesia's book, HTTP/3, What it costs: `bench/http3`): over OpenSSL's QUIC,
+which Cesia uses, a request costs three and a half times the work of one over HTTP/1.1 (5,929 requests a second against
+20,513), and a download of 1 MB over a link that loses 1 % of its packets takes 4.7 s against 1.8 s over TCP, because of
+OpenSSL's congestion control (NewReno alone, a window that grows too slowly; ngtcp2's BBR takes 0.47 s). What HTTP/3
+gains today is the slowest small requests on such a link (the slowest 1 % in 179 ms against 306 ms) and a connection in
+one round trip. Turn it on for an app whose users are on phones and make small requests; keep it off for one that sends
+large files.
+
 Next: [Tell a partner, and take his answers](partner.md).
