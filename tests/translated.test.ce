@@ -47,6 +47,15 @@ defn isEveryTextOfTheAdminInFrench()
   value.Len(dict.Keys(pages.Words.Exact["fr"])) > 200
 end
 
+(* The texts of Ceres's band of keys for the widgets of a dock: its outliner, its tabs, a section of its inspector. *)
+dockKeys = ["close, open", "open", "previous tab, next", "open or close"]
+
+defn isTheBandOfTheDockInFrench()
+  lacking = [t for t in dockKeys if not dict.Has(t, pages.Words.Exact["fr"])]
+  bug.Assert(value.Len(lacking) == 0, "no French: $lacking")
+  true
+end
+
 defn isCentaurisCatalogueWhole()
   wrong = apptest.Untranslated([], i18n.Centauri, "fr")
   bug.Assert(value.Len(wrong) == 0, text.Join("\n", wrong))

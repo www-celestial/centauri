@@ -20,6 +20,8 @@ window.adminPlay = (() => {
     'Disable': 'Désactiver', 'Invoices — admin': 'Factures — administration', 'Events': 'Événements', 'Audit trail': 'Piste d’audit',
     'Keys of programs': 'Clés de programmes', 'Unpaid invoices': 'Factures impayées', 'Requests a second': 'Requêtes par seconde',
     'Invoices': 'Factures', 'User ': 'Utilisateur ', 'Tenant ': 'Tenant ', 'Roles of the invitation': 'Rôles de l’invitation',
+    "The changes of this page aren't saved.": 'Les changements de cette page ne sont pas enregistrés.',
+    'Changes not saved. Leave without saving?': 'Changements non enregistrés. Partir sans enregistrer ?', 'All kinds': 'Toutes les sortes',
   }
   const say = s => (document.documentElement.lang.startsWith('fr') && FR[s]) || s
   const wait = ms => new Promise(r => setTimeout(r, ms))
@@ -33,13 +35,47 @@ window.adminPlay = (() => {
   const node = async (role, name, ms) => until(async () => find(await tree(), named(role, name)), ms)
   const click = n => { const c = document.querySelector('canvas'), r = c.getBoundingClientRect()
     for (const type of ['pointerdown', 'pointerup'])
-      c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + Math.min(10, n.W / 2), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
-  const press = async (role, name) => { const n = await node(role, name); if (!n) return false; click(n); await wait(400); return true }
+      // a row at its middle, where no box that checks it is; anything else near its start
+      c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + (n.Role === 'row' ? n.W / 2 : Math.min(10, n.W / 2)), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
+  // a node out of the sight of its panel (a page taller than the center of the dock, or than the window in the layout of
+  // pages) brought into it as a person does, by the wheel over a part of the panel that no table takes (the wheel over
+  // a table that scrolls scrolls the table)
+  const pathTo = (n, f, up = []) => { if (!n) return null; const p = [...up, n]; if (f(n)) return p; for (const k of n.Kids || []) { const got = pathTo(k, f, p); if (got) return got } return null }
+  const inSight = async n => {
+    for (let k = 0; k < 40; k++) {
+      const t = await tree(), path = pathTo(t, x => x.Id === n.Id)
+      if (!path) return n
+      const m = path[path.length - 1], panel = [...path].reverse().find(x => x.Role === 'tabpanel')
+      if (!panel) {
+        // the layout of pages: the page scrolls under the top bar, a wheel over it (fit tables let it through)
+        if (m.Y >= 50 && m.Y + m.H <= innerHeight - 4) return m
+        const c = document.querySelector('canvas'), r = c.getBoundingClientRect(), side = find(t, x => x.Role === 'navigation')
+        const x = side ? side.X + side.W + 40 : 300
+        c.dispatchEvent(new WheelEvent('wheel', { clientX: r.left + x, clientY: r.top + innerHeight / 2, deltaY: m.Y < 50 ? -100 : 100, bubbles: true, cancelable: true }))
+        await wait(80)
+        continue
+      }
+      if (m.Y >= panel.Y && m.Y + m.H <= panel.Y + panel.H) return m
+      const tables = all(panel, x => x.Role === 'table'), x = panel.X + 12
+      let y = null
+      for (let at = panel.Y + 4; at < panel.Y + panel.H - 4 && y === null; at += 8)
+        if (!tables.some(b => x >= b.X && x < b.X + b.W && at >= b.Y && at < b.Y + b.H)) y = at
+      if (y === null) return m
+      const c = document.querySelector('canvas'), r = c.getBoundingClientRect()
+      c.dispatchEvent(new WheelEvent('wheel', { clientX: r.left + x, clientY: r.top + y, deltaY: m.Y < panel.Y ? -100 : 100, bubbles: true, cancelable: true }))
+      await wait(80)
+    }
+    return n
+  }
+  const press = async (role, name) => { let n = await node(role, name); if (!n) return false; n = await inSight(n); click(n); await wait(400); return true }
+  // a field's text replaced as a person does, its old text emptied first (End, then Backspace), then the new one typed
   const type = async (name, text) => {
     const f = await node('textbox', name); if (!f) return false
-    click(f)
+    click(await inSight(f))
     await until(async () => { const n = find(await tree(), named('textbox', name)); return n && n.Focused })
     const i = document.querySelector('input[aria-label="' + say(name) + '"]')
+    for (const key of ['End', ...Array(80).fill('Backspace')]) i.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+    await wait(100)
     i.value = text
     i.dispatchEvent(new InputEvent('input', { data: text, inputType: 'insertText' }))
     await wait(200)
@@ -48,7 +84,7 @@ window.adminPlay = (() => {
   // a field emptied as a person does: End, then Backspace until nothing is left
   const clear = async name => {
     const f = await node('textbox', name); if (!f) return false
-    click(f)
+    click(await inSight(f))
     await until(async () => { const n = find(await tree(), named('textbox', name)); return n && n.Focused })
     const i = document.querySelector('input[aria-label="' + say(name) + '"]')
     for (const key of ['End', ...Array(40).fill('Backspace')]) i.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
@@ -73,14 +109,33 @@ window.adminPlay = (() => {
   // the box of a part of the page for a picture: from the node top to the node bottom (or height pixels), right of
   // the menu unless wide, as wide as what shows there
   const box = async spec => {
+    if (spec.window) return { x: 0, y: 0, width: innerWidth, height: innerHeight }
     const t = await tree(), pick = s => s && find(t, named(s[0], s[1]))
     const top = pick(spec.top), bottom = pick(spec.bottom)
     if (!top) return null
     const y0 = Math.max(0, top.Y - 10), y1 = Math.min(innerHeight, bottom ? bottom.Y + bottom.H + 10 : y0 + (spec.height || 300))
-    const x0 = spec.wide ? 0 : 150
+    const side = find(t, n => n.Role === 'navigation'), x0 = spec.wide ? 0 : side ? side.X + side.W + 8 : 150
     const inside = all(t, n => n.W > 0 && n.Role !== 'page' && n.Y >= y0 && n.Y + n.H <= y1 + 1 && n.X >= x0 - 1)
     const x1 = Math.min(innerWidth, Math.max(...inside.map(n => n.X + n.W)) + 12)
     return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+  }
+  // a page of the admin, by its link in the side bar of the pages, or its row in the outliner of the dock (or a link
+  // of the page, as the kinds of the data)
+  const go = async name => {
+    if (find(await tree(), x => x.Role === 'navigation')) return press('link', name)
+    let n = await node('treeitem', name, 3000)
+    if (!n) return press('link', name)
+    // the outliner scrolled by the wheel until the row is in sight, then a click on its label, past its triangle
+    const c = document.querySelector('canvas'), r = c.getBoundingClientRect()
+    for (let k = 0; k < 60 && (n.Y < 70 || n.Y > innerHeight - 120); k++) {
+      c.dispatchEvent(new WheelEvent('wheel', { clientX: r.left + n.X + 60, clientY: r.top + innerHeight / 2, deltaY: n.Y < 70 ? -100 : 100, bubbles: true, cancelable: true }))
+      await wait(80)
+      n = find(await tree(), named('treeitem', name)) || n
+    }
+    for (const type of ['pointerdown', 'pointerup'])
+      c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + 14 * n.Level + 30, clientY: r.top + n.Y + n.H / 2, button: 0, bubbles: true }))
+    await wait(400)
+    return true
   }
   const choose = async name => { const r = await rowOf(name); if (!r) return false; click(r); await wait(500); return true }
   const steps = {
@@ -101,7 +156,7 @@ window.adminPlay = (() => {
       return line(asked, 'a user chosen, his disabling asked')
     },
     async openUser () {
-      await press('link', 'Users'); await wait(1200)
+      await go('Users'); await wait(1200)
       const opened = await choose('bruno@example.com') && await press('button', 'Open')
       await wait(1500)
       const seen = await says('Ways of signing in')
@@ -110,7 +165,7 @@ window.adminPlay = (() => {
       return line(opened && seen && asked, "a user's page: his factors, one session's end asked")
     },
     async openTenant () {
-      await press('link', 'Tenants'); await wait(1200)
+      await go('Tenants'); await wait(1200)
       const opened = await choose('Martin & Co') && await press('button', 'Open')
       await wait(1500)
       await type('E-mail to invite', 'cleo@example.com')
@@ -144,7 +199,7 @@ window.adminPlay = (() => {
     },
     async lang (want) {
       const l = await until(async () => document.documentElement.lang || null, 20000) || ''
-      return line(l === want && (want !== 'fr' || await node('button', 'Sign in', 20000) || await node('link', 'Users', 1000)), `the pages speak ${l}`)
+      return line(l === want && (want !== 'fr' || await node('button', 'Sign in', 20000) || await node('link', 'Users', 1000) || await node('treeitem', 'Users', 1000)), `the pages speak ${l}`)
     },
     async signIn () {
       if (!await node('textbox', 'E-mail', 20000)) return line(false, 'the sign-in shows')
@@ -155,9 +210,9 @@ window.adminPlay = (() => {
       setTimeout(() => press('button', 'Sign in'), 50)
       return line(masked, 'the password only dots in the tree, and a password input; signing in (the page loads again)')
     },
-    async signedIn () { return line(await node('link', 'Users', 20000), 'signed in: the menu of the admin') },
+    async signedIn () { return line(await node('link', 'Users', 20000) || await node('treeitem', 'Users', 1000), 'signed in: the pages of the admin') },
     async visit (name) {
-      await press('link', name)
+      await go(name)
       await wait(1500)
       const t = await tree(), bad = overflows(t)
       return line(all(t, n => n.Role === 'heading').length > 0 && bad.length === 0,
@@ -179,7 +234,7 @@ window.adminPlay = (() => {
       return line(asked && done && row && all(row, c => c.Role === 'cell').some(c => c.Name === say('yes')), 'a user chosen, disabled once asked, the table read again')
     },
     async edit (billTo) {
-      await press('link', 'invoice'); await wait(1500)
+      await go('Invoices'); await wait(1500)
       const first = all(await tree(), n => n.Role === 'row')[1]; if (!first) return line(false, 'an invoice in the data browser')
       click(first); await wait(700)
       await type('BillTo', billTo || '<b>Renamed</b><img src=x onerror="window.pwned=1"> by support ')
@@ -190,6 +245,29 @@ window.adminPlay = (() => {
       const refused = await says('422 Check the fields. (Total:')
       if (billTo) { await type('Total', '1280.5'); await press('button', 'Save') }
       return line(saved && refused, 'an invoice changed in place, a total that is no number refused with its field')
+    },
+    // a change not saved holds the way to another page: the band asks, Esc stays, Ctrl+D leaves without saving
+    async guard () {
+      const was = location.hash
+      await type('BillTo', 'Not saved')
+      await go('Dashboard'); await wait(600)
+      const ask = n => n.Role === 'alert' && (n.Name === say("The changes of this page aren't saved.") || n.Name === say('Changes not saved. Leave without saving?'))
+      const asked = !!find(await tree(), ask) && location.hash === was
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await wait(400)
+      const stayed = !find(await tree(), ask) && location.hash === was
+      await go('Dashboard'); await wait(600)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true })); await wait(1200)
+      const left = location.hash === '#/' && !!await node('heading', 'Dashboard', 5000)
+      return line(asked && stayed && left, 'a change not saved: asked before leaving, Esc stays, Ctrl+D leaves')
+    },
+    // Back and Forward of the browser go through the pages visited, each at its own address
+    async history () {
+      const inData = async () => location.hash.startsWith('#/data/') && !!await node('textbox', 'BillTo', 5000)
+      history.back(); await wait(1500)
+      const back = await inData()
+      history.forward(); await wait(1500)
+      const forward = location.hash === '#/' && !!await node('heading', 'Dashboard', 5000)
+      return line(back && forward, 'Back to the invoice chosen in its kind, Forward to the dashboard')
     },
     async pay () {
       const inv = all(await tree(), n => n.Role === 'row')[1]; if (!inv) return line(false, 'an unpaid invoice')
@@ -216,7 +294,7 @@ window.adminPlay = (() => {
       return line(shown && await says('on for everyone'), 'the flag of the export, its office, then on for everyone')
     },
     async user () {
-      await press('link', 'Users'); await wait(1200)
+      await go('Users'); await wait(1200)
       const bruno = await rowOf('bruno@example.com'); if (!bruno) return line(false, 'bruno in the users')
       click(bruno); await wait(500)
       await press('button', 'Open'); await wait(1500)

@@ -14,6 +14,44 @@ HTTP/3 and WebTransport, two settings, both off by default: nothing changes unti
 - The book: [When the connection drops](docs/book/connection.md) gains what QUIC adds and when it falls back, with a
   measured migration; settings and security rows.
 
+### The admin as the pages of a web app
+
+- On the web the admin is laid out as the pages of a web site (Ceres's `web.Shell`), by default: the app and its pages
+  in a side bar by what they are about (Data, People, Activity, Setup) with their counts and the jobs that failed,
+  where one is at the top, the palette of Ctrl+K, the buttons of the density and of the theme, who is signed in and
+  Sign out at the foot; a phone gets a drawer, rows as cards and the sheet over the whole window.
+- A thing of the data opens in a sheet beside its list, at its own address (`/admin/#/data/invoice/65616`), each field
+  with its name over its input; a change not saved is asked about in the sheet, inline. The fields an app keeps for
+  itself are left out (Search, those a rule gives; `pages.Kind(fields = [...])` names those shown instead), a link
+  shows the title of the thing it names as a link to its page, and the activity of the thing comes under its fields.
+- Every kind's page, one way for all: its name in capitals and plural with its count in the side bar, chips of the
+  values of a field of few with their counts, a search over its texts (/), New for a kind of the app
+  (`pages.Kind(create = false)` closes it), a box before each row and a band of the kind's actions and Delete for the
+  rows checked, each asked first; amounts with two decimals, grouped as the language writes them (1,280.50 €,
+  1 280,50 €). Their endpoints: `GET /admin/data/:kind?Where=&Search=`, `GET /admin/data/:kind/facets`,
+  `GET /admin/data/:kind/:id/history`, `POST /admin/data/:kind`, `DELETE /admin/data/:kind/:id`; `app.Kind(title = ...)`
+  names the field a link shows.
+- The dashboard watches the platform: a strip of its state, six graphs of its real numbers that share a crosshair, over
+  15 minutes, an hour, a day or a week, the log live by level with a pause, the first steps of a fresh app.
+- Settings, Look: the theme, the density of the rows, the layout on the web (pages, or the dock of a desktop tool) and
+  tabs for the pages opened, each kept on the machine; `AdminTheme` gives the theme of a machine that chose none.
+
+### The admin as a desktop tool, its pages at their own addresses
+
+- The admin pages laid out as a desktop tool, in Ceres's `web.Dock`: the pages in an outliner at the left (Platform,
+  Activity, Data with the app's kinds first and the platform's own in a row closed at first, Configuration, the app's
+  own pages), the page in the center, the thing chosen in the details at the right, the events, the log and the jobs
+  at the bottom, the app, Refresh and Sign out in a toolbar, the connection, who is signed in and the counts in a
+  status bar; the layout kept by the browser. The theme is a setting, `AdminTheme`: `dark` (the default), `light`, or
+  `system`.
+- Each page at its own address, the admin's with the page after a `#` (`/admin/#/users`): Back and Forward go through
+  the pages visited, an address kept or shared opens its page (after the sign-in when the session is gone), a row of
+  the outliner opens in a new tab with Ctrl or the middle button; a table found again has its order, its scroll and
+  its row chosen.
+- A thing changed in the details and not saved holds the way to another page, which asks first: save and leave, leave
+  without saving, or stay; closing the tab asks too. While no thing is chosen, the details show the kind: its name,
+  its module, its fields with their types.
+
 The admin pages in French, and the book in French. Nothing breaks: every endpoint answers as it did. What changes,
 each additive: in an app of several languages (`APP_LANGS`), `GET /auth/me` sends `Content-Language`, the language the
 app speaks to that user, and the actions of a live screen carry the browser's language, so their errors come in it;
@@ -78,6 +116,32 @@ live.js, `websocket.Dial`'s `last`) and Ceres's (the page's client, `web.Connect
 - Tests: `tests/drop.test.ce` (10), the invoices' `tests/drop.test.ce` (4), the browser test `cesia do drop-shot`
   (Chrome's offline mode, a proxy that drops TCP connections, a restart on the same database); `bench/drop.ce`,
   `bench/storm.ce`.
+
+### The dashboard's history
+
+- `admin.series` is the history of the process, sampled once for every page that watches it (each screen sampled for
+  itself before): from the start of the app (from the first page that asks when `AdminPath` is `off`), a point a
+  second for 15 minutes and a point a minute for 7 days, bounded in memory (about 6.6 MB once full, with the ten
+  minutes' ring). A page asks `{"Seconds": 900, "Minutes": 10080, "Tens": 1008}` at most, and gets them at once, 500
+  a frame; with no arguments, the last 300 seconds as before, the ones already sampled at once. A tick costs 0.012 ms
+  while no request comes (the metrics are read only when a request came; 0.26 ms before, for each page open), 0.9 ms
+  at 1,000 requests a second.
+- `PointRow` gains `Step` (1, a second's point; 60, a minute's; 600, ten minutes'), `Screens` (the live screens open
+  on the process), `SignedIn` and `FailedSignIns`. A minute's `P50` and `P99` are those of all its requests, within
+  1 % (DDSketch).
+- A third ring, a point every ten minutes for 7 days (1,008 points, `Step` 600), asked by `Tens` (0 to 1,008, none
+  unless given): its counts the sums of its minutes, its `P50` and `P99` those of all its requests (the minutes'
+  sketches merged). `{"Seconds": 900, "Minutes": 60, "Tens": 1008}` is 1,968 points, about 410 KB of JSON, where all
+  the minutes were 10,980 points and 2.3 MB.
+- `PointRow` gains `Cpu` (the share of a core over the second, in percent), `Memory` (bytes in RAM), `DiskUsed` and
+  `DiskTotal` (the file system of the folder of the new setting `AdminDisk`), each absent where the system doesn't
+  tell it, from Cesia's `sys.Usage()` and `sys.Disk(path)`. A database's writes have no source yet.
+- `GET /admin/series?Step=1|60|600&Count=n`, the history as columns (`{Step, Ats, Cols}`), oldest first: 83 KB for
+  the 900 seconds, 6 KB for the 60 last minutes, 96 KB for the 1,008 ten minutes, where the rows of `admin.series`
+  were 412 KB. The admin module serves it.
+- The metric `centauri_signins_total{result}`, `ok` or `failed`; `app.Screens` (the live screens open) and
+  `app.Times` (the times of the requests the log kept since a line) in the state of a process; `env.Own`, a table of
+  what a module keeps for the life of the process.
 
 ## 0.4.0 (not released)
 

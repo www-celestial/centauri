@@ -19,11 +19,11 @@ defn Keys(p)
   table = web.Table(rows, [web.Column(Say("Id"), k -> k.Id, sort = "Id", width = 80), web.Column(Say("Tenant"), k -> Cell(dict.Get("Tenant", k)), sort = "Tenant", width = 80),
     web.Column(Say("Name"), k -> k.Name, sort = "Name"), web.Column(Say("Roles"), k -> Cell(k.Roles), width = 160),
     web.Column(Say("Made"), k -> Local(k.Created), sort = "Created", width = 170), web.Column(Say("Ends"), k -> if dict.Has("Ends", k) Local(k.Ends) else Say("never") end, width = 170),
-    web.Column(Say("Last used"), k -> Local(dict.Get("Last", k)), width = 170)], height = 420, label = Say("Keys"))
+    web.Column(Say("Last used"), k -> Local(dict.Get("Last", k)), width = 170)], height = missing, label = Say("Keys"))
   web.Stack([
-    web.Title(Say("Keys of programs")),
+    web.Header(Say("Keys of programs")),
     web.Text(Say("A key is shown once, to the admin of its tenant who made it; the server keeps the hash of its secret only. A key revoked is refused at its next request."), color = gray),
-    web.Row([Label(Say("Tenant id"), width = 70), web.Input(tenant, label = Say("Tenant id"), width = 110, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8),
+    web.Row([Label(Say("Tenant id"), width = 70), web.Input(tenant, label = Say("Tenant id"), width = 110, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8, wrap = true),
     table,
     ListState(l, rows),
     () -> keyActions(Chosen(table, rows), asking, said, l, p),
@@ -47,7 +47,7 @@ defn Flags(p)
   said = web.Signal(missing)
   again = () -> web.Set(got, Call(api.AdminFlags, {}, p))
   web.Stack([
-    web.Title(Say("Feature flags")),
+    web.Header(Say("Feature flags")),
     web.Text(Say("The most precise wins: a user, then his tenant, then everyone, then the code's default. Every server sees a change within FlagsRefresh seconds."), color = gray),
     () -> shownReply(web.Get(web.Get(got)), rows -> if value.Len(rows) == 0 web.Text(Say("This app declares no flag (flags.Module)."), color = gray)
       else web.Stack([flagLine(f, p, said, again) for f in rows], gap = 14) end, "…"),

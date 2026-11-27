@@ -19,8 +19,12 @@ use std/value
 
 defn App(port, rows = 0, more = {})
   (** The app in memory, its data made, ready to serve on port: an Ok of its test t. more adds settings, as those of
-      TLS and HTTP/3 of tools/quic-check.ce. *)
-  t = apptest.Start(invoices.App, settings = dict.Merge({Origin: "http://127.0.0.1:$port", AdminPath: "/admin", LogRequests: "false"}, more), now = missing)?
+      TLS and HTTP/3 of tools/quic-check.ce. Its admin pages take the theme that APP_ADMIN_THEME names, dark by
+      default. *)
+  theme = sys.Env("APP_ADMIN_THEME")
+  base = {Origin: "http://127.0.0.1:$port", AdminPath: "/admin", LogRequests: "false",
+    AdminTheme: if value.IsText(theme) and theme != "" theme else "dark" end}
+  t = apptest.Start(invoices.App, settings = dict.Merge(base, more), now = missing)?
   boss = t.Super()?
   offices = [["ada@example.com", "Ada", "Martin & Co"], ["bruno@example.com", "Bruno", "Bruno Conseil"], ["chloe@example.com", "Chloé", "Atelier Chloé"],
     ["dan@example.com", "Dan", "Dan & Fils"], ["eva@example.com", "Eva", "Eva Studio"]]

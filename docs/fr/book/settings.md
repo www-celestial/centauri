@@ -127,8 +127,9 @@ Voici leurs seules différences ; rien d'autre ne change avec eux :
 - Chaque requête écrit une ligne de JSON : son numéro, sa méthode, sa route (le motif, jamais la query, la partie de
   l'adresse après `?`), son statut, son temps en millisecondes, son adresse, son utilisateur. Jamais un corps, un cookie
   (un petit texte que le navigateur garde et renvoie à chaque requête) ou un token.
-- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`), et
-  les `http_*` de std/metrics : sur `127.0.0.1:APP_ADMIN_PORT/metrics` pour Prometheus, et en lignes à
+- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`),
+  `centauri_signins_total{result}` (`ok`, une session ouverte par n'importe quelle entrée ; `failed`), et les `http_*`
+  de std/metrics : sur `127.0.0.1:APP_ADMIN_PORT/metrics` pour Prometheus, et en lignes à
   `GET /admin/metrics` pour le super-admin.
 
 ## 4. En production

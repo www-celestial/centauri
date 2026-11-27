@@ -1,45 +1,116 @@
-(* The dashboard: the counts of the platform, then the last five minutes of this process a second at a time (requests
-   and failures, the times of the requests, the refusals at the door and the signs of bots, the jobs), and the last
-   events as they are written. *)
+(* The dashboard, a board that watches the platform live: a strip of its state (the connection, requests, the times of
+   the requests, errors, jobs that failed, sessions, how long it has run), six graphs of this process that share a
+   crosshair (requests, their times, errors, sign-ins, live pages, refusals at the door) over a range of 15 minutes, an
+   hour, a day or a week, and the log as it is written, filtered by level, paused to read it. A fresh app shows its
+   first steps above. Every number comes from the server: the points of admin.series (a second each, Step 1; a minute
+   each, Step 60; ten minutes each, Step 600, as the server keeps them), the counts of AdminStats, the lines of
+   admin.logs. *)
 use deps/www-celestial/ceres/src/web
 use src/api
 use std/dict
+use std/json
 use std/list
 use std/math
-use std/plot
+use std/result
+use std/text
 use std/value
 
+(* The ranges of the board: their key, their label, their length in seconds, the step and the count of the points
+   the server gives for it. *)
+ranges = [["15m", "15 min", 900, 1, 900], ["1h", "1 h", 3600, 60, 60], ["24h", "24 h", 86400, 600, 144], ["7d", "7 days", 604800, 600, 1008]]
+
+(* The fields of a point: those summed when points are merged, those of the last one, those of the largest. *)
+summed = ["Requests", "Errors", "Origin", "Limit", "Signin", "Role", "SignedIn", "FailedSignIns", "Writes"]
+lasting = ["Failures", "Ready", "Running", "Dead", "Screens", "Memory", "DiskUsed", "DiskTotal"]
+largest = ["P50", "P99", "Cpu"]
+
 defn Dashboard(p)
-  (** The dashboard. *)
+  (** The board. *)
   points = web.Live("admin.series", p)
-  events = web.Live("admin.events", p)
+  logs = web.Live("admin.logs", p)
   stats = Call(api.AdminStats, {}, p)
+  range = web.Signal("15m")
+  cross = web.Signal(missing)
+  level = web.Signal("all")
+  paused = web.Signal(missing)
+  (* the history of the range read once (compact columns, AdminSeriesData), the seconds of the live show added to it as
+     they come; the graphs stay mounted and only redraw *)
+  all = web.Memo(() -> sorted(web.Get(points)))
+  base = web.Signal(missing)
+  asked = cell(missing)
+  cols = web.Memo(() -> rangeColumns(web.Get(range), replyOf(web.Get(base)), web.Get(all)))
   web.Stack([
-    web.Title(Say("Dashboard")),
-    Replied(stats, s -> web.Row([tile(Say("Users"), s.Users), tile(Say("Tenants"), s.Tenants), tile(Say("Sessions"), s.Sessions), tile(Say("Requests"), s.Requests),
-      tile(Say("Refused"), s.Refused), tile(Say("Failed sign-ins/min"), s.Failures)], gap = 8)),
-    () -> nowLine(web.Get(points)),
-    web.Row([
-      web.Plot(() -> lines(web.Get(points), [["Requests", Say("requests/s"), "#1f5fbf"], ["Errors", Say("5xx/s"), "#b3261e"]], Say("Requests a second"), "/s"), height = 210, width = 520,
-        label = Say("Requests a second")),
-      web.Plot(() -> lines(web.Get(points), [["P50", "p50", "#1e6b2e"], ["P99", "p99", "#8a5a00"]], Say("Time of a request (ms)"), "ms"), height = 210, width = 520,
-        label = Say("Time of a request")),
-    ], gap = 12, align = "start"),
-    web.Row([
-      web.Plot(() -> lines(web.Get(points), [["Origin", Say("other site"), "#b3261e"], ["Limit", Say("limit"), "#8a5a00"], ["Signin", Say("no session"), "#5f6670"],
-        ["Role", Say("role"), "#6a3fb3"], ["Failures", Say("failed sign-ins/min"), "#1f5fbf"]],
-        Say("Refused at the door, and failed sign-ins"), "/s"), height = 210, width = 520, label = Say("Refusals and bots")),
-      web.Plot(() -> lines(web.Get(points), [["Ready", Say("ready"), "#1f5fbf"], ["Running", Say("running"), "#1e6b2e"], ["Dead", Say("dead"), "#b3261e"]], Say("Jobs"), Say("jobs")), height = 210, width = 520,
-        label = Say("Jobs")),
-    ], gap = 12, align = "start"),
-    web.Text(Say("Last events"), font = "strong"),
-    () -> lastEvents(web.Get(events)),
+    web.Header(Say("Dashboard"), summary = Say("Platform health, live"),
+      actions = [web.Chips(range, [web.Chip(r[1], Say(r[2])) for r in ranges], label = Say("Range"))]),
+    () -> firstSteps(OkOf(web.Get(stats)), p),
+    () -> fetched(web.Get(range), web.Get(all), base, asked, p),
+    () -> strip(web.Get(all), OkOf(web.Get(stats)), p, web.Get(cols).N < 2),
+    board(cols, cross),
+    logCard(logs, level, paused, p),
   ], gap = 10)
 end
 
-defn tile(name, n)
-  (** A count in a box: its number, large, and what it counts. *)
-  web.Stack([web.Text(Num(n), size = 20, font = "code"), web.Text(name, color = gray)], gap = 2, pad = 8, border = 0xd0d5dd, width = 150)
+replyOf(r) = if web.IsSignal(r) OkOf(web.Get(r)) else missing end   (* The value of the history's reply, or missing. *)
+
+defn fetched(key, points, base, asked, p)
+  (** The history of a range asked of the server when the range changes, and for an hour or more each new minute or
+      ten minutes, so that the graph moves on. Nothing to show. *)
+  r = list.FindFirst(x -> x[1] == key, ranges)
+  last = if value.IsEmpty(points) 0 else points[value.Len(points)].At end
+  bucket = if r[4] == 1 0 else math.Div(math.Floor(last), r[4]) end
+  want = "$key $bucket"
+  if peek(asked) != want
+    stash(want, asked)
+    web.Set(base, Call(api.AdminSeriesData, {Step: r[4], Count: r[5]}, p))
+  end
+  missing
+end
+
+defn rangeColumns(key, data, live)
+  (** The columns of a range: the history the server gave (oldest first), the seconds of the live show after its last
+      for 15 minutes, in at most 300 points (a graph is about as many pixels wide); the live seconds alone while no history came (an older server). *)
+  r = list.FindFirst(x -> x[1] == key, ranges)
+  if not value.IsDict(data) or not value.IsArray(dict.Get("Ats", data))
+    return seriesOf(inRange(live, key))
+  end
+  ats = data.Ats
+  cs = dict.GetOr("Cols", {}, data)
+  fields = list.Concat(list.Concat(summed, lasting), largest)
+  out = {}
+  for f in fields
+    out[f] = dict.GetOr(f, [0 for a in ats], cs)
+  end
+  if r[4] == 1
+    lastAt = if value.IsEmpty(ats) 0 else ats[value.Len(ats)] end
+    newer = [x for x in live if stepOf(x) == 1 and x.At > lastAt]
+    ats = list.Concat(ats, [x.At for x in newer])
+    for f in fields
+      out[f] = list.Concat(out[f], [dict.GetOr(f, 0, x) for x in newer])
+    end
+    cut = list.Max(0, value.Len(ats) - r[5])
+    ats = list.Skip(cut, ats)
+    for f in fields
+      out[f] = list.Skip(cut, out[f])
+    end
+  end
+  k = list.Max(1, math.Div(value.Len(ats) + 299, 300))
+  if k > 1
+    groups = [[i, list.Min(value.Len(ats), i + k - 1)] for i in 1..value.Len(ats) if math.Mod(i - 1, k) == 0]
+    for f in summed
+      out[f] = [list.Sum(out[f][g[1]..g[2]]) for g in groups]
+    end
+    for f in lasting
+      out[f] = [out[f][g[2]] for g in groups]
+    end
+    for f in largest
+      out[f] = [list.Max(out[f][g[1]..g[2]]) for g in groups]
+    end
+    ats = [ats[g[2]] for g in groups]
+  end
+  n = value.Len(ats)
+  {N: n, Step: data.Step * k, At: ats, Requests: out.Requests, Errors: out.Errors, P50: [tenth(v) for v in out.P50], P99: [tenth(v) for v in out.P99],
+    Refused: [out.Origin[i] + out.Limit[i] + out.Signin[i] + out.Role[i] for i in 1..n], Origin: out.Origin, Limit: out.Limit, Signin: out.Signin, Role: out.Role,
+    SignedIn: out.SignedIn, FailedSignIns: out.FailedSignIns, Screens: out.Screens}
 end
 
 defn sorted(points)
@@ -47,35 +118,206 @@ defn sorted(points)
   list.SortBy(x -> x.At, points)
 end
 
-defn nowLine(points)
-  (** The last second in words: what the graphs end at. *)
-  if value.Len(points) == 0
-    return web.Text(Say("Waiting for the first second…"), color = gray)
+stepOf(x) = dict.GetOr("Step", 1, x)   (* A point's step: 1 for a second's, 60 for a minute's. *)
+
+defn seriesOf(ps)
+  (** The points of a range as columns, one list a field, with their count, their step and their times. *)
+  col = f -> [dict.GetOr(f, 0, x) for x in ps]
+  {N: value.Len(ps), Step: if value.IsEmpty(ps) 1 else stepOf(ps[1]) end, At: [x.At for x in ps], Requests: col("Requests"), Errors: col("Errors"),
+    P50: [tenth(v) for v in col("P50")], P99: [tenth(v) for v in col("P99")], Refused: [x.Origin + x.Limit + x.Signin + x.Role for x in ps], Origin: col("Origin"),
+    Limit: col("Limit"), Signin: col("Signin"), Role: col("Role"), SignedIn: col("SignedIn"), FailedSignIns: col("FailedSignIns"), Screens: col("Screens")}
+end
+
+defn inRange(points, key)
+  (** The points of a range, by their time: the seconds for 15 minutes, the minutes for an hour, the ten minutes for a
+      day and a week, as the server keeps them (else the finest it has), in at most 300 points (a graph is about as many pixels wide), each a sum (or the
+      last) of those it holds. *)
+  r = list.FindFirst(x -> x[1] == key, ranges)
+  all = points
+  if value.IsEmpty(all)
+    return []
   end
-  ps = sorted(points)
-  last = ps[value.Len(ps)]
+  now = all[value.Len(all)].At
+  of = step -> [x for x in all if stepOf(x) == step and x.At > now - r[3]]
+  want = if key == "15m" [1] else if key == "1h" [60, 1] else [600, 60, 1] end
+  got = []
+  for step in want
+    if value.Len(got) < 2
+      got = of(step)
+    end
+  end
+  merged(got, list.Max(1, math.Div(value.Len(got) + 299, 300)))
+end
+
+defn merged(points, k)
+  (** Every k points as one: the counts summed, the times of the requests and the jobs the last. *)
+  if k <= 1
+    return points
+  end
+  out = []
+  i = 1
+  n = value.Len(points)
+  while i <= n
+    part = points[i..list.Min(n, i + k - 1)]
+    last = part[value.Len(part)]
+    sum = f -> list.Sum([dict.GetOr(f, 0, x) for x in part])
+    out = list.Append({At: last.At, Step: stepOf(last) * k, Requests: sum("Requests"), Errors: sum("Errors"), Origin: sum("Origin"), Limit: sum("Limit"), Signin: sum("Signin"),
+      Role: sum("Role"), SignedIn: sum("SignedIn"), FailedSignIns: sum("FailedSignIns"), Failures: last.Failures, P50: list.Max([x.P50 for x in part]),
+      P99: list.Max([x.P99 for x in part]), Ready: last.Ready, Running: last.Running, Dead: last.Dead, Screens: dict.GetOr("Screens", 0, last)}, out)
+    i += k
+  end
+  out
+end
+
+defn clock(at, step)
+  (** The time of a point as the axis shows it: hours, minutes and seconds for seconds, the day for a week. *)
+  t = Local(at)
+  parts = text.Split(" ", t)
+  hm = if value.Len(parts) >= 2 parts[2] else t end
+  day = if value.Len(parts[1]) < 10 parts[1] else if french() text.Slice(1, 5, parts[1]) else text.Slice(6, 10, parts[1]) end
+  if step >= 600 "$day $(text.Slice(1, list.Min(5, value.Len(hm)), hm))" else if step >= 60 text.Slice(1, list.Min(5, value.Len(hm)), hm) else hm end
+end
+
+defn strip(points, s, p, waiting = false)
+  (** The state of the platform in a line: live or not, the requests of the last minute, the times of the last second,
+      the errors now, the jobs that failed, the sessions, how long the app has run. *)
+  ps = [x for x in points if stepOf(x) == 1]
+  last = if value.IsEmpty(ps) missing else ps[value.Len(ps)] end
   minute = list.Skip(list.Max([0, value.Len(ps) - 60]), ps)
-  web.Text(Say("Last second: {Requests} requests, {Errors} failed, p50 {P50} ms, p99 {P99} ms · last minute: {Minute} requests, {Refused} refused · jobs: {Ready} ready, {Running} running, {Dead} dead",
-    {Requests: Num(last.Requests), Errors: Num(last.Errors), P50: Num(last.P50), P99: Num(last.P99), Minute: Num(list.Sum([x.Requests for x in minute])),
-      Refused: Num(list.Sum([x.Origin + x.Limit + x.Signin + x.Role for x in minute])), Ready: Num(last.Ready), Running: Num(last.Running), Dead: Num(last.Dead)}), font = "code")
+  live = web.Row([web.Connection(p, say = t -> Say(t))], gap = 6)
+  if value.IsMissing(last)
+    return web.Strip([live, web.Text(Say("Waiting for the first second…"), color = gray)])
+  end
+  stat = (n, what, tone) -> web.Row([web.Text(n, font = "strong", color = tone), web.Text(what, color = if value.IsMissing(tone) gray else tone end)], gap = 5)
+  errors = list.Sum([x.Errors for x in minute])
+  cells = [live, stat(Num(list.Sum([x.Requests for x in minute])), Say("requests/min"), missing),
+    web.Row([web.Text(Say("p50"), color = gray), web.Text(Say("{N} ms", {N: Num(tenth(last.P50))}), font = "strong"), web.Text(Say("· p99"), color = gray), web.Text(Say("{N} ms", {N: Num(tenth(last.P99))}), font = "strong")], gap = 5),
+    stat(Num(errors), Say("errors in the last minute"), if errors > 0 red else missing end),
+    web.Link(Say("{N} jobs failed", {N: Num(last.Dead)}), "/jobs"),
+    if value.IsDict(s) stat(Num(s.Sessions), Say("sessions"), missing) else missing end,
+    if value.IsNumber(dict.Get("Cpu", last)) web.Row([web.Text(Say("CPU"), color = gray), web.Text(Say("{N} %", {N: Num(math.Round(last.Cpu))}), font = "strong")], gap = 5) else missing end,
+    if value.IsNumber(dict.Get("Memory", last)) web.Row([web.Text(Say("Memory"), color = gray), web.Text(Say("{N} MB", {N: Num(math.Round(last.Memory / 1048576))}), font = "strong")], gap = 5) else missing end,
+    if value.IsNumber(dict.Get("DiskUsed", last)) and value.IsNumber(dict.Get("DiskTotal", last)) and last.DiskTotal > 0
+      web.Row([web.Text(Say("Disk"), color = gray), web.Text(Say("{N} %", {N: Num(math.Round(last.DiskUsed * 100 / last.DiskTotal))}), font = "strong")], gap = 5) else missing end,
+    if value.IsNumber(dict.Get("Writes", last)) stat(Num(list.Sum([dict.GetOr("Writes", 0, x) for x in minute])), Say("writes/min"), missing) else missing end,
+    () -> upCell(web.Get(dict.Get("App", p.Site)))]
+  if waiting
+    return web.Stack([web.Strip(cells), web.Text(Say("Waiting for the first seconds…"), color = gray)], gap = 10)
+  end
+  web.Strip(cells)
 end
 
-defn lines(points, series, title, unit)
-  (** A graph of some fields of the points, one line each, over the seconds before the last. *)
-  ps = sorted(points)
-  if value.Len(ps) < 2
-    return plot.Of([plot.Line([-1, 0], [0, 0], label = Say("waiting"))], title = title, x = "s", y = unit)
-  end
-  last = ps[value.Len(ps)].At
-  xs = [x.At - last for x in ps]
-  plot.Of([plot.Line(xs, [x[s[1]] for x in ps], label = s[2], color = s[3], width = 1.5) for s in series], title = title, x = "s", y = unit)
+defn tenth(x)
+  (** A time to a tenth of a millisecond, a whole number when it is one. *)
+  r = math.Div(math.Round(x * 10), 1)
+  if math.Mod(r, 10) == 0 math.Div(r, 10) else r / 10 end
 end
 
-defn lastEvents(rows)
-  (** The last 12 events, the newest first. *)
-  if value.Len(rows) == 0
-    return web.Text(Say("No event in the last hour."), color = gray)
+defn upCell(r)
+  (** How long the app has run, for the strip. *)
+  v = if value.IsMissing(r) missing else OkOf(web.Get(r)) end
+  if value.IsMissing(v) web.Text("…", color = gray) else web.Row([web.Text(Say("up"), color = gray), web.Text(Span(v.Uptime), font = "strong")], gap = 5) end
+end
+
+defn board(cols, cross)
+  (** The six graphs, three a row, sharing the crosshair, made once: each reads the columns of the range as they
+      change and only redraws. *)
+  c = () -> web.Get(cols)
+  per = () -> (if c().Step == 1 "/s" else if c().Step == 60 "/min" else if c().Step == 600 Say("/10 min") else "/$(Span(c().Step))" end)
+  at = i -> clock(c().At[i], c().Step)
+  pick = (f, i) -> (if c().N == 0 0 else if value.IsMissing(i) c()[f][c().N] else c()[f][i] end)
+  m = (title, figure, series, unit, note, style) -> web.Grow(web.Metric(title, figure, series, unit = unit, note = note, at = at, cross = cross, style = style, say = t -> Say(t)))
+  web.Stack([
+    web.Row([m(Say("Requests"), i -> Num(pick("Requests", i)), () -> [{Values: c().Requests, Tone: "S1"}], per, () -> Say("peak {N}", {N: Num(list.Max(list.Append(0, c().Requests)))}), "area"),
+      m(Say("Response time"), i -> "$(Num(pick("P50", i))) / $(Num(pick("P99", i)))", () -> [{Values: c().P50, Tone: "S1"}, {Values: c().P99, Tone: "S4"}], "ms", "p50 / p99", "line"),
+      m(Say("Errors"), i -> Num(pick("Errors", i)), () -> [{Values: c().Errors, Tone: "Danger"}], per, () -> Say("{N} in this range", {N: Num(list.Sum(c().Errors))}), "bars")],
+      gap = 8, align = "start"),
+    web.Row([m(Say("Sign-ins"), i -> Say("{Ok} ok · {Failed} failed", {Ok: Num(pick("SignedIn", i)), Failed: Num(pick("FailedSignIns", i))}),
+        () -> [{Values: c().SignedIn, Tone: "Ok"}, {Values: c().FailedSignIns, Tone: "Danger"}], per, () -> Say("{N} failed in this range", {N: Num(list.Sum(c().FailedSignIns))}), "bars"),
+      m(Say("Live pages"), i -> Num(pick("Screens", i)), () -> [{Values: c().Screens, Tone: "S1"}], Say("open now"), Say("kept up to date"), "area"),
+      m(Say("Refused at the door"), i -> Num(pick("Refused", i)), () -> [{Values: c().Origin, Tone: "S2"}, {Values: c().Limit, Tone: "S4"}, {Values: c().Signin, Tone: "S5"},
+        {Values: c().Role, Tone: "S3"}], per, Say("site, limit, sign-in, role"), "bars")], gap = 8, align = "start"),
+  ], gap = 8)
+end
+
+defn logCard(logs, level, paused, p)
+  (** The log as it is written, the newest first, a line each as one reads it: its time, its level, where it comes
+      from, what happened (a request as GET /admin/ 200) and at its right its time or its address; All, Warnings (and
+      errors) or Errors; Pause keeps the lines in sight while one reads them; a line clicked shows all its fields in
+      the sheet. *)
+  read = cell(dict.Dict())
+  rows = web.Memo(defn ()
+    frozen = web.Get(paused)
+    all = if value.IsSome(frozen) frozen else web.Get(logs) end
+    lv = web.Get(level)
+    shown = list.Take(200, list.Reverse(list.SortBy(x -> x.Seq, [x for x in all if lv == "all" or lv == "warn" and x.Level != "info" or lv == "error" and x.Level == "error"])))
+    (* each line read once: a new line costs its own JSON, not the 200 shown *)
+    known = peek(read)
+    fresh = dict.Dict()
+    out = []
+    for x in shown
+      one = dict.Get(x.Seq, known)
+      line = if value.IsSome(one) one else lineOf(x) end
+      fresh[x.Seq] = line
+      out = list.Append(line, out)
+    end
+    stash(fresh, read)
+    out
+  end)
+  tone = x -> (if x.Level == "error" red else if x.Level == "warn" amber else missing end)
+  web.Stack([
+    web.Spread(web.Row([web.Text(Say("Live log"), font = "strong"), web.Text(Say("newest first"), color = gray)], gap = 6),
+      web.Row([web.Chips(level, [web.Chip("all", Say("All")), web.Chip("warn", Say("Warnings")), web.Chip("error", Say("Errors"))], label = Say("Level")),
+        () -> web.Button(if value.IsSome(web.Get(paused)) Say("Resume") else Say("Pause") end, () -> web.Set(paused, if value.IsSome(web.Get(paused)) missing else web.Get(logs) end),
+          icon = if value.IsSome(web.Get(paused)) "play" else "pause" end, key = "M-p")], gap = 8)),
+    web.Table(rows, [web.Column(Say("At"), x -> web.Text(clock(x.At, 1), size = "small", color = gray), width = 84),
+      web.Column(Say("Level"), x -> web.Text(text.Upper(x.Level), font = "strong", size = "small", color = if value.IsMissing(tone(x)) gray else tone(x) end), width = 64),
+      web.Column(Say("Source"), x -> web.Text(x.Source, size = "small", color = if value.IsMissing(tone(x)) gray else tone(x) end), width = 110),
+      web.Column(Say("Message"), x -> web.Text(x.What, color = tone(x))), web.Column("", x -> web.Text(x.Side, size = "small", color = gray), align = "right", width = 150)],
+      height = 320, label = Say("Live log"), key = x -> x.Seq, open = x -> web.Set(p.Site.Sheet, lineSheet(x, p))),
+  ], gap = 8)
+end
+
+defn lineOf(x)
+  (** A line of the log as the board shows it: its source, what happened, what goes at its right, its fields read. *)
+  got = json.Parse(x.Fields)
+  f = if result.IsOk(got) and value.IsDict(got.Value) got.Value else {} end
+  if x.Message == "request"
+    m = dict.GetOr("Method", "", f)
+    route = value.Text(dict.GetOr("Route", "", f))
+    what = "$(if text.StartsWith("$m ", route) route else "$m $route" end) $(value.Text(dict.GetOr("Status", "", f)))"
+    ms = dict.Get("Ms", f)
+    return {Seq: x.Seq, At: x.At, Level: x.Level, Source: "http", What: what, Side: if value.IsNumber(ms) Say("{N} ms", {N: Num(ms)}) else value.Text(dict.GetOr("Ip", "", f)) end, Fields: f, Message: x.Message}
   end
-  newest = list.Take(12, list.Reverse(list.SortBy(e -> e.At, rows)))
-  web.Stack([web.Row([web.Text(Local(e.At), font = "code"), web.Text(e.Kind, font = "strong"), web.Text(e.Ip, font = "code"), web.Text(e.Detail)], gap = 10) for e in newest], gap = 2)
+  parts = text.Split(":", x.Message)
+  source = if value.Len(parts) > 1 text.Trim(parts[1]) else dict.GetOr("Module", "app", f) end
+  what = if value.Len(parts) > 1 text.Trim(text.Join(":", list.Skip(1, parts))) else x.Message end
+  {Seq: x.Seq, At: x.At, Level: x.Level, Source: value.Text(source), What: what, Side: value.Text(dict.GetOr("Ip", "", f)), Fields: f, Message: x.Message}
+end
+
+defn fieldLine(pair)
+  (** A field of a line of the log: its name over its value. *)
+  web.Stack([web.Text(pair.Key, size = "small", font = "strong", color = gray), web.Text(if value.IsText(pair.Value) pair.Value else json.Text(pair.Value) end)], gap = 2)
+end
+
+defn lineSheet(x, p)
+  (** A line of the log in the sheet: its message, its time and level, each of its fields. *)
+  body = () -> web.Stack([fieldLine(pair) for pair in dict.Pairs(x.Fields)], gap = 10)
+  {Title: x.What, Kicker: "$(Say("Log")) · $(Local(x.At)) · $(text.Upper(x.Level))", Sub: x.Source, Body: body, Close: () -> web.Set(p.Site.Sheet, missing)}
+end
+
+defn firstSteps(s, p)
+  (** The first steps of a fresh app, while it has no tenant or one user only: what to do first, each with its page. *)
+  if not value.IsDict(s) or s.Tenants > 0 and s.Users > 1
+    return missing
+  end
+  web.Stack([web.Row([web.Icon("rocket", color = "Link"), web.Text(Say("Get started"), font = "strong")], gap = 8),
+    web.Steps([{Title: Say("A tenant"), About: Say("A tenant is made when someone signs up in the app, or by its own code."), Done: s.Tenants > 0,
+        Action: web.Button(Say("Tenants"), () -> web.Go("/tenants", p))},
+      {Title: Say("A user besides you"), About: Say("Users sign up in the app; their tenants and roles are changed here."), Done: s.Users > 1,
+        Action: web.Button(Say("Users"), () -> web.Go("/users", p))},
+      {Title: Say("A key for a program"), About: Say("A program calls the app with a key of its own, never a password."), Done: false,
+        Action: web.Button(Say("Keys"), () -> web.Go("/keys", p))},
+      {Title: Say("A webhook"), About: Say("The app tells another service what happened, signed."), Done: false, Action: web.Button(Say("Webhooks"), () -> web.Go("/hooks", p))}],
+      say = t -> Say(t))], gap = 10, pad = 12, fill = "Panel", border = "Edge", radius = 4)
 end

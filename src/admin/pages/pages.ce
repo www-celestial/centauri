@@ -12,10 +12,12 @@ use deps/www-celestial/ceres/src/web
 use src/api
 use std/dict
 use std/encode
+use std/fiber
 use std/http
 use std/js
 use std/json
 use std/list
+use std/math
 use std/result
 use std/text
 use std/value
@@ -28,11 +30,16 @@ use std/value
       Page("Unpaid", "/unpaid", p -> web.Text("…")).Path --> "/unpaid" *)
 Page(title, path, view) = {Title: title, Path: path, View: view}
 
-(** How the data browser shows a kind: its name (as app.Kind has it), its title (said in the pages' language), its
-    columns (pages.Column; its first fields when none) and its actions on the thing chosen (pages.Action).
+(** How the data browser shows a kind: its name (as app.Kind has it), its title (said in the pages' language; its
+    name in capitals and plural by default), its columns (pages.Column; its first fields when none), its actions on a
+    thing (pages.Action), also on the things checked; fields, the fields its sheet shows, in this order (by default
+    all but the internal ones: a field named Search, the folded copy an app keeps for its search, and those a rule
+    gives); create = false hides New (a kind of the app makes its things in the admin by default).
 
-      Kind("invoice", columns = [Column("Number")]).Columns[1].Field --> "Number" *)
-Kind(name, title = missing, columns = [], actions = []) = {Name: name, Title: if value.IsMissing(title) name else title end, Columns: columns, Actions: actions}
+      Kind("invoice", columns = [Column("Number")]).Columns[1].Field --> "Number"
+      Kind("invoice", fields = ["Number", "Total"]).Fields[2] --> "Total" *)
+Kind(name, title = missing, columns = [], actions = [], fields = [], create = true) = {Name: name, Title: if value.IsMissing(title) name else title end, Columns: columns,
+  Actions: actions, Fields: fields, Create: create}
 
 (** A column of a kind's table: a field of its things, its title (the field by default, said in the pages' language:
     a field the catalogue lacks shows as it is), show(v), what a cell shows of a value (pages.Cell by default), and
@@ -56,7 +63,7 @@ own = [{Title: "Dashboard", Path: "/", View: Dashboard}, {Title: "Users", Path: 
   {Title: "Flags", Path: "/flags", View: Flags}]
 
 (* The pages reached from another, not in the menu. *)
-inner = [{Path: "/users/:id", View: User}, {Path: "/tenants/:id", View: Tenant}, {Path: "/data/:kind", View: Data}]
+inner = [{Path: "/users/:id", View: User}, {Path: "/tenants/:id", View: Tenant}, {Path: "/data/:kind", View: Data}, {Path: "/data/:kind/:id", View: Data}]
 
 defn fetchJson(path, method = "GET", body = "")
   (** A request of HTTP to the app from the page, with its cookie: {Status, Data, Lang}, Data the JSON of its body or
@@ -77,50 +84,369 @@ defn Run(title = "Admin", more = [], kinds = [], shows = [], words = missing)
       (pages.Kind), and the app's own live shows (shows, api.Live endpoints of the role super) on the page's screen,
       which web.Live reads by their names. The pages speak the language of the server's answer to /auth/me (its
       Content-Language: the account's language, else the browser's, among the app's), with Centauri's words (Words)
-      and the app's (words, a catalogue of i18n: its titles and the texts of its pages, said by Say). *)
+      and the app's (words, a catalogue of i18n: its titles and the texts of its pages, said by Say). On the web they
+      are laid out as pages (web.Shell: a side bar, each page at its address, the thing opened in a sheet), or as a
+      desktop tool (web.Dock) when the person chose it in the settings, on his machine. *)
   me = fetchJson("/auth/me")
   speak(me.Lang, words)
   js.Call("./admin.js", "Lang", [peek(spoken).Lang])
   shown = Say(title)
+  theme = themeOf(js.Call("./admin.js", "Theme", []))
   if me.Status != 200 or not value.IsDict(me.Data) or me.Data.Super != true
     note = if me.Status == 200 Say("{Email} is no super-admin of this platform.", {Email: me.Data.Email}) else "" end
-    browser.Run(web.App([web.Route("/", p -> signIn(p, shown, note))], title = shown, say = t -> Say(t)))
+    (* the sign-in at the address of any page, which the page loads again once signed in: a link to a page kept or
+       shared opens on it after the sign-in *)
+    paths = list.Concat(list.Concat([x.Path for x in own], [x.Path for x in inner]), [x.Path for x in more])
+    browser.Run(web.App([web.Route(x, p -> signIn(p, shown, note)) for x in paths], title = shown, say = t -> Say(t), theme = theme))
     return missing
   end
-  asked = [{Show: s.Name, Args: {}} for s in list.Concat(api.AdminShows, shows)]
+  (* the dashboard's live points: the last minute's seconds, then each new one; its history comes by AdminSeriesData *)
+  asked = [{Show: s.Name, Args: if s.Name == "admin.series" {Seconds: 60} else {} end} for s in list.Concat(api.AdminShows, shows)]
   live = "/live?shows=$(encode.UrlEncode(json.Text(asked)))"
-  menu = list.Concat(own, [{Title: x.Title, Path: x.Path, View: x.View} for x in more])
-  site = {Title: shown, Me: me.Data, Menu: menu, Kinds: dict.Dict([{Key: k.Name, Value: k} for k in kinds]), App: web.Signal(missing)}
+  mine = [{Title: x.Title, Path: x.Path, View: x.View} for x in more]
+  menu = list.Concat(own, mine)
+  site = {Title: shown, Me: me.Data, Menu: menu, More: mine, Kinds: dict.Dict([{Key: k.Name, Value: k} for k in kinds]), App: web.Signal(missing), AppAsked: cell(false),
+    Page: web.Signal(missing), Detail: web.Signal(missing), Sheet: web.Signal(missing), Desk: cell(missing), Tree: cell(missing), Lists: cell(dict.Dict()),
+    Layout: js.Call("./admin.js", "Layout", []), Tabs: js.Call("./admin.js", "Tabs", [])}
   routes = [web.Route(m.Path, framed(m, site)) for m in list.Concat(menu, inner)]
-  browser.Run(web.App(routes, live = live, title = shown, say = t -> Say(t)))
+  browser.Run(web.App(routes, live = live, title = shown, say = t -> Say(t), theme = theme, frame = (p, page) -> frameOf(p, page, site)))
+end
+
+defn themeOf(name)
+  (** The theme of the pages, as the setting AdminTheme names it: dark, light, or system, which follows the browser's. *)
+  if name == "light" web.Light else if name == "system" web.System() else web.Dark end
+end
+
+defn stash(v, c)
+  (** Puts v in a cell of std/fiber, in place of its value. *)
+  _ = fiber.Receive(c, timeout = 0)
+  fiber.Send(v, c)
 end
 
 defn framed(m, site)
-  (** The view of a page inside the frame of the admin: the band at the top, the menu at the left. *)
-  p -> frame(p, m, site)
+  (** The view of a page, inside the frame of the admin. *)
+  p -> pageOf(p, m, site)
 end
 
-defn frame(p, m, site)
-  (** The frame of every page: who is signed in and the app, the menu, the page. *)
+defn pageOf(p, m, site)
+  (** A page of the admin: what it shows under the sign-in again (when the session ended) and the conflicts of its
+      actions; the thing it chose and the sheet start empty. *)
   q = p
   q.Site = site
-  if value.IsMissing(web.Get(site.App))
+  (* the app read once, at the first page: a flag of its own, not the signal, so that the page doesn't read what it
+     sets, which would draw it twice *)
+  if not peek(site.AppAsked)
+    stash(true, site.AppAsked)
     web.Set(site.App, Call(api.AdminApp, {}, p))
   end
+  web.Set(site.Detail, missing)
+  web.Set(site.Sheet, missing)
+  web.Set(site.Page, {Menu: m, P: q})
+  tree = peek(site.Tree)
+  if value.IsSome(tree)
+    (* the dock's outliner: the row of the page, a thing's kind for a thing opened *)
+    web.Set(tree.Chosen, rowOf(text.Split("?", p.Path)[1]))
+  end
+  web.Stack([() -> againView(web.Get(p.Screen.Status), q, site), web.Conflicts(q, say = t -> Say(t)), web.Grow(m.View(q))], gap = 0)
+end
+
+defn frameOf(p, page, site)
+  (** What stands around every page, made once: the pages of a web app (web.Shell), or the dock of a desktop tool. *)
+  q = p
+  q.Site = site
+  if site.Layout == "dock" desk(q, page, site) else shell(q, page, site) end
+end
+
+defn rowOf(path)
+  (** The row of the outliner of a path: its own (a page, the data of a kind), or the page it is inside, /users for
+      /users/42. *)
+  if path == "/"
+    return path
+  end
+  parts = text.Split("/", path)
+  if parts[2] == "data" and value.Len(parts) >= 3
+    return "/data/$(parts[3])"
+  end
+  "/$(parts[2])"
+end
+
+(* The icon of each page, by its path, as the outliner and the center's tab show it. *)
+pageIcons = [["/", "layout-dashboard"], ["/users", "user"], ["/tenants", "building"], ["/events", "radio"], ["/logs", "logs"], ["/jobs", "wrench"],
+  ["/audit", "rotate-ccw-clock"], ["/data", "database"], ["/settings", "settings"], ["/hooks", "webhook"], ["/files", "files"], ["/keys", "key"], ["/flags", "flag"]]
+
+defn iconOf(path)
+  (** The icon of a page's path: its own, a kind's for the data of a kind, a page's for the app's own pages. *)
+  if text.StartsWith("/data/", path)
+    return "box"
+  end
+  got = list.FindFirst(x -> x[1] == path, pageIcons)
+  if value.IsMissing(got) "file-text" else got[2] end
+end
+
+(* ---- The pages of a web app: web.Shell *)
+
+defn shell(p, page, site)
+  (** The pages in the layout of a web app: the app and its pages in the side bar, by what they are about, with their
+      counts; who is signed in and the connection at its foot; where one is at the top; the thing opened in a sheet. *)
+  stats = Call(api.AdminStats, {}, p)
+  kinds = Call(api.AdminKinds, {}, p)
+  points = web.Live("admin.series", p)
+  (* what the side bar shows of the points, as numbers that change rarely: the nav and its foot are drawn again only
+     when they change, not at each second *)
+  dead = web.Memo(() -> newest(web.Get(points), "Dead"))
+  p50 = web.Memo(() -> newest(web.Get(points), "P50"))
+  web.Shell(p, page,
+    side = [() -> brand(site), web.Nav(() -> navGroups(p, site, OkOf(web.Get(stats)), OkOf(web.Get(kinds)), web.Get(dead)), label = Say("Pages")), web.Spacer(),
+      () -> liveLine(p, web.Get(p50)), meLine(site)],
+    top = [() -> crumbs(web.Get(p.Nav), site, p)],
+    sheet = () -> sheetOf(web.Get(site.Sheet)),
+    find = () -> commands(p, site, OkOf(web.Get(kinds))),
+    view = () -> viewOfPath(web.Get(p.Nav)), label = site.Title, say = t -> Say(t), tabs = site.Tabs == true, title = () -> pageTitle(site))
+end
+
+defn viewOfPath(path)
+  (** The view of a path: a thing of a kind opened (/data/invoice/65691) is in its kind's view. *)
+  parts = text.Split("/", text.Split("?", path)[1])
+  if value.Len(parts) >= 4 and parts[2] == "data" "/data/$(parts[3])" else text.Split("?", path)[1] end
+end
+
+defn initials(s)
+  (** The first letters of the first two words of a name, in capitals: IA for Invoices admin. *)
+  ws = [w for w in text.Split(" ", text.Replace("—", " ", text.Replace("-", " ", s))) if text.Trim(w) != ""]
+  text.Upper(text.Join("", [text.Slice(1, 1, w) for w in list.Take(2, ws)]))
+end
+
+defn brand(site)
+  (** The app at the top of the side bar: its mark, its name, its version and its profile. *)
+  r = web.Get(site.App)
+  v = if value.IsMissing(r) missing else OkOf(web.Get(r)) end
+  mark = web.Stack([web.Text(initials(site.Title), font = "strong", size = "small", color = 0xffffff)], width = 26, height = 26, pad = 4, fill = "Accent", radius = 6, align = "center")
+  line = if value.IsMissing(v) web.Text("…", size = "small", color = gray) else web.Row([web.Text(v.Version, size = "small", color = gray), web.Pill(v.Profile, tone = "Warn", dot = false)], gap = 6) end
+  web.Row([mark, web.Stack([web.Text(site.Title, font = "strong"), line], gap = 0)], gap = 8)
+end
+
+defn newest(points, field)
+  (** A field of the newest point, or missing: one pass, no sort. *)
+  best = missing
+  for x in points
+    if value.IsMissing(best) or x.At > best.At
+      best = x
+    end
+  end
+  if value.IsMissing(best) missing else tenth(dict.GetOr(field, 0, best)) end
+end
+
+defn navGroups(p, site, s, ks, dead0)
+  (** The groups of the side bar: the dashboard; the data of the app's kinds (the platform's under All kinds); the
+      people with their counts; the activity, the jobs with those that failed; the setup; the app's own pages. *)
+  known = if value.IsArray(ks) ks else [] end
+  apps = [k for k in known if not text.StartsWith("centauri_", k.Name)]
+  count = name -> if value.IsDict(s) Num(dict.Get(name, s)) else missing end
+  dead = if value.IsMissing(dead0) 0 else dead0 end
+  page = (title, path, n) -> web.Item(Say(title), icon = iconOf(path), to = path, count = n, key = path)
+  out = [web.Group("", [page("Dashboard", "/", missing)]),
+    web.Group(Say("Data"), list.Append(web.Item(Say("All kinds"), icon = "database", to = "/data", key = "/data"),
+      [web.Item(kindTitle(k.Name, p), icon = "box", to = "/data/$(k.Name)", key = "/data/$(k.Name)", count = if value.IsNumber(dict.Get("Count", k)) Num(k.Count) else missing end) for k in apps])),
+    web.Group(Say("People"), [page("Users", "/users", count("Users")), page("Tenants", "/tenants", count("Tenants"))]),
+    web.Group(Say("Activity"), [page("Events", "/events", missing), page("Log", "/logs", missing),
+      web.Item(Say("Jobs"), icon = "wrench", to = "/jobs", key = "/jobs", count = if dead > 0 Say("{N} failed", {N: Num(dead)}) else missing end, tone = if dead > 0 "Danger" else missing end),
+      page("Audit", "/audit", missing)]),
+    web.Group(Say("Setup"), [page("Settings", "/settings", missing), page("Webhooks", "/hooks", missing), page("Files", "/files", missing), page("Keys", "/keys", missing),
+      page("Flags", "/flags", missing)])]
+  if value.IsEmpty(site.More)
+    return out
+  end
+  list.Append(web.Group(site.Title, [web.Item(Say(x.Title), icon = "file-text", to = x.Path, key = x.Path) for x in site.More]), out)
+end
+
+defn liveLine(p, p50)
+  (** The connection at the foot of the side bar, and the time of the requests of the last second. *)
+  web.Row([web.Connection(p, say = t -> Say(t)), if value.IsMissing(p50) missing else web.Text(Say("· p50 {N} ms", {N: Num(p50)}), size = "small", color = gray) end], gap = 6)
+end
+
+defn meLine(site)
+  (** Who is signed in, at the foot of the side bar. *)
+  e = site.Me.Email
+  web.Row([web.Stack([web.Text(initials(text.Replace("@", " ", text.Replace(".", " ", e))), font = "strong", size = "small", color = gray)], width = 28, height = 28, pad = 5, fill = "Raised",
+    radius = 14, align = "center"), web.Grow(web.Stack([web.Text(e, font = "strong", size = "small"), web.Text(Say("Every tenant · Super"), size = "small", color = gray)], gap = 0)),
+    web.IconButton("log-out", Say("Sign out"), () -> signOut(), key = "C-q")], gap = 8)
+end
+
+defn crumbs(path, site, p)
+  (** Where one is, at the left of the top bar: the app, the group of the page, the page, and the thing opened. *)
+  bare = text.Split("?", path)[1]
+  parts = text.Split("/", bare)
+  pg = web.Get(site.Page)
+  title = if value.IsMissing(pg) Say("Dashboard") else pageTitle(site) end
+  group = groupOf(rowOf(bare))
+  sep = () -> web.Icon("chevron-right", size = 12, color = gray)
+  items = [web.Text(site.Title, color = gray)]
+  if group != ""
+    items = list.Concat(items, [sep(), web.Text(Say(group), color = gray)])
+  end
+  (* on a phone, where one is only *)
+  web.Row([web.Wide(web.Row(list.Append(sep(), items), gap = 6)), web.Text(title, font = "strong")], gap = 6)
+end
+
+defn groupOf(row)
+  (** The group of the side bar a page is in, by its row. *)
+  if text.StartsWith("/data", row) "Data" else if row in ["/users", "/tenants"] "People" else if row in ["/events", "/logs", "/jobs", "/audit"] "Activity"
+    else if row in ["/settings", "/hooks", "/files", "/keys", "/flags"] "Setup" else "" end
+end
+
+defn commands(p, site, ks)
+  (** The commands of the palette: every page, the data of every kind, signing out. *)
+  pages = [web.Command(Say(m.Title), to = m.Path, group = Say("Pages"), icon = iconOf(m.Path)) for m in site.Menu]
+  known = if value.IsArray(ks) ks else [] end
+  data = [web.Command(kindTitle(k.Name, p), to = "/data/$(k.Name)", group = Say("Data"), icon = "box") for k in known]
+  acts = [web.Command(Say("Refresh"), on = () -> web.Set(site.Page, web.Get(site.Page)), group = Say("Actions"), icon = "refresh-cw", key = "f5"),
+    web.Command(Say("Sign out"), on = () -> signOut(), group = Say("Actions"), icon = "log-out", key = "C-q")]
+  list.Concat(list.Concat(pages, data), acts)
+end
+
+defn sheetOf(s)
+  (** The sheet of the thing opened, as its page gives it (Sheet): {Title, Body, Close, Kicker, Sub, Tag, Tools, Foot}. *)
+  if value.IsMissing(s)
+    return missing
+  end
+  web.Sheet(s.Title, s.Body(), close = s.Close, kicker = dict.Get("Kicker", s), sub = dict.Get("Sub", s), tag = dict.Get("Tag", s), tools = dict.GetOr("Tools", [], s),
+    foot = dict.GetOr("Foot", [], s), say = t -> Say(t))
+end
+
+(* ---- The dock of a desktop tool: web.Dock *)
+
+defn desk(p, page, site)
+  (** The dock of the admin, made once: the page in the center, the thing it chose in the details at the right, the
+      pages in an outliner at the left, the events, the log and the jobs at the bottom, the app and the actions of every
+      page in the toolbar, the connection and who is signed in in the status bar; its layout is the browser's to keep
+      (the dock admin). *)
+  stats = Call(api.AdminStats, {}, p)
+  kinds = Call(api.AdminKinds, {}, p)
+  tree = web.Tree(() -> outline(p, site, stats, kinds), chosen = "/", closed = ["platform-kinds"], label = Say("Pages"))
+  stash(tree, site.Tree)
+  web.Dock([web.Panel(() -> pageTitle(site), page, icon = () -> iconOf(rowOf(pagePath(site))), key = "Page")],
+    left = [web.Panel(Say("Pages"), tree, icon = "list-tree", key = "Pages")],
+    right = [web.Panel(Say("Details"), () -> details(site), icon = "sliders-horizontal", key = "Details")],
+    bottom = [web.Panel(Say("Events"), once(() -> web.Grow(eventsConsole(p))), icon = "radio", key = "Events"),
+      web.Panel(Say("Log"), once(() -> web.Grow(logConsole(p))), icon = "logs", key = "Log"), web.Panel(Say("Jobs"), once(() -> jobsConsole(p)), icon = "wrench", key = "Jobs")],
+    toolbar = web.Toolbar([web.Icon("server", color = "Link"), web.Text(site.Title, font = "strong"), web.Divider(), () -> appLine(web.Get(site.App)), web.Spacer(),
+      web.Button(Say("Refresh"), () -> web.Set(site.Page, web.Get(site.Page)), icon = "refresh-cw", key = "f5"), web.Divider(),
+      web.Button(Say("Sign out"), () -> signOut(), icon = "log-out", key = "C-q")]),
+    status = web.StatusBar([web.Connection(p, say = t -> Say(t)), web.Divider(), web.Icon("circle-user", color = "Muted"), web.Text(site.Me.Email), web.Divider(),
+      web.Text(Say("every tenant"), color = "Muted"), web.Spacer(), () -> counts(OkOf(web.Get(stats)))]),
+    key = "admin", sizes = {Left: 220, Right: 360, Bottom: 180})
+end
+
+defn pagePath(site)
+  (** The path of the page shown, or /. *)
+  pg = web.Get(site.Page)
+  if value.IsMissing(pg) "/" else text.Split("?", pg.P.Path)[1] end
+end
+
+defn pageTitle(site)
+  (** The title of the page shown, on the center's tab: its own in the menu, a kind's, or the page it is inside and
+      what it shows, as Users · 42. *)
+  pg = web.Get(site.Page)
+  if value.IsMissing(pg)
+    return Say("Dashboard")
+  end
+  if "Title" in pg.Menu
+    return Say(pg.Menu.Title)
+  end
+  path = pagePath(site)
+  if text.StartsWith("/data/", path)
+    return kindTitle(dict.GetOr("kind", "", pg.P.Params), pg.P)
+  end
+  parent = list.FindFirst(x -> x.Path == rowOf(path), site.Menu)
+  last = text.Split("/", path)[value.Len(text.Split("/", path))]
+  if value.IsMissing(parent) path else "$(Say(parent.Title)) · $last" end
+end
+
+defn details(site)
+  (** The details of the thing that the page shown chose, as its page gives them (Detail), or what to do to see some. *)
+  d = web.Get(site.Detail)
+  if value.IsMissing(d)
+    return web.Text(Say("Choose a row of a table to see its fields here."), color = gray)
+  end
+  d()
+end
+
+defn outline(p, site, stats, kinds)
+  (** The rows of the outliner: the pages of the admin by what they are about, the kinds of the data under Data (the
+      app's first, the platform's own in a row of their own, closed at first), the app's own pages last; the counts of
+      the platform beside its pages. Each row of a page is a link to it: in a browser, its address is the admin's own
+      with the page after its # (/admin/#/users), and Ctrl or the middle button opens it in a new tab. *)
+  s = OkOf(web.Get(stats))
+  ks = OkOf(web.Get(kinds))
+  row = (title, path, n) -> web.Item(Say(title), icon = iconOf(path), key = path, to = path, count = n)
+  kind = k -> web.Item(kindTitle(k.Name, p), icon = "box", key = "/data/$(k.Name)", to = "/data/$(k.Name)")
+  known = if value.IsArray(ks) ks else [] end
+  own = [k for k in known if text.StartsWith("centauri_", k.Name)]
+  data = [kind(k) for k in known if not text.StartsWith("centauri_", k.Name)]
+  if not value.IsEmpty(own)
+    data = list.Append(web.Item(Say("Platform kinds"), icon = "server", key = "platform-kinds", kids = [kind(k) for k in own]), data)
+  end
+  count = name -> if value.IsDict(s) Num(dict.Get(name, s)) else missing end
+  out = [web.Item(Say("Platform"), icon = "building", key = "platform", kids = [row("Dashboard", "/", missing), row("Users", "/users", count("Users")),
+      row("Tenants", "/tenants", count("Tenants"))]),
+    web.Item(Say("Activity"), icon = "activity", key = "activity", kids = [row("Events", "/events", missing), row("Log", "/logs", missing), row("Jobs", "/jobs", missing),
+      row("Audit", "/audit", missing)]),
+    web.Item(Say("Data"), icon = "database", key = "/data", to = "/data", kids = data),
+    web.Item(Say("Configuration"), icon = "settings", key = "configuration", kids = [row("Settings", "/settings", missing), row("Webhooks", "/hooks", missing),
+      row("Files", "/files", missing), row("Keys", "/keys", missing), row("Flags", "/flags", missing)])]
+  if value.IsEmpty(site.More)
+    return out
+  end
+  list.Append(web.Item(site.Title, icon = "package", key = "app", kids = [row(x.Title, x.Path, missing) for x in site.More]), out)
+end
+
+defn counts(s)
+  (** The counts of the platform in a line, for the status bar. *)
+  if not value.IsDict(s)
+    return missing
+  end
+  web.Text(text.Join(" · ", [Say("{N} users", {N: Num(s.Users)}), Say("{N} tenants", {N: Num(s.Tenants)}), Say("{N} sessions", {N: Num(s.Sessions)})]), color = gray, font = "code")
+end
+
+defn once(make)
+  (** A part of the page made the first time it shows, by make(), and the same one each time after: a panel of the
+      console that stays behind another, as the log behind the events, makes nothing and sorts nothing until it is
+      chosen. *)
+  made = cell(missing)
+  defn ()
+    if value.IsMissing(peek(made))
+      stash(make(), made)
+    end
+    peek(made)
+  end
+end
+
+defn eventsConsole(p)
+  (** The events of the last hour as they are written, the newest first, for the console at the bottom. *)
+  rows = web.Live("admin.events", p)
+  newest = web.Memo(() -> list.Reverse(list.SortBy(e -> e.At, web.Get(rows))))
+  web.Table(newest, [web.Column(Say("At"), e -> Local(e.At), width = 160), web.Column(Say("Kind"), e -> e.Kind, width = 150), web.Column(Say("IP"), e -> e.Ip, width = 110),
+    web.Column(Say("Detail"), e -> e.Detail)], label = Say("Last events"))
+end
+
+defn logConsole(p)
+  (** The log of this process as it is written, the newest first. *)
+  rows = web.Live("admin.logs", p)
+  newest = web.Memo(() -> list.Reverse(list.SortBy(x -> x.Seq, web.Get(rows))))
+  web.Table(newest, [web.Column(Say("At"), x -> Local(x.At), width = 160), web.Column(Say("Level"), x -> x.Level, width = 60), web.Column(Say("Message"), x -> x.Message),
+    web.Column(Say("Fields"), x -> x.Fields, width = 320)], label = Say("Log"))
+end
+
+defn jobsConsole(p)
+  (** The jobs of the app as the last second counts them, and the way to their page. *)
+  points = web.Live("admin.series", p)
+  last = () -> (if value.IsEmpty(web.Get(points)) missing else list.Reverse(list.SortBy(x -> x.At, web.Get(points)))[1] end)
   web.Stack([
-    web.Stack([
-      web.Row([web.Text(site.Title, font = "strong"), () -> appLine(web.Get(site.App)), web.Spacer(), web.Text(site.Me.Email, color = gray),
-        web.Button(Say("Sign out"), () -> signOut(), key = "C-q")], gap = 12),
-      (* the state of the connection on a line of its own, at the right, so that a long one never pushes the band out *)
-      web.Row([web.Spacer(), web.Connection(p, say = t -> Say(t))], gap = 8),
-    ], gap = 2, pad = 6, fill = 0xf2f4f7),
-    () -> againView(web.Get(p.Screen.Status), p, site),
-    web.Conflicts(p, say = t -> Say(t)),
-    web.Row([
-      web.Stack([web.Link(Say(x.Title), x.Path) for x in site.Menu], gap = 6, width = 130),
-      web.Grow(m.View(q)),
-    ], align = "start", gap = 16),
-  ], gap = 10)
+    () -> (if value.IsMissing(last()) web.Text(Say("Waiting for the first second…"), color = gray) else web.Stack([
+      web.Property(Say("ready"), web.Text(Num(last().Ready), font = "code")), web.Property(Say("running"), web.Text(Num(last().Running), font = "code")),
+      web.Property(Say("dead"), web.Text(Num(last().Dead), font = "code", color = red if last().Dead > 0 else gray))], gap = 2) end),
+    web.Row([web.Button(Say("Jobs"), () -> web.Go("/jobs", p), icon = "wrench")]),
+  ], gap = 6)
 end
 
 defn appLine(r)
@@ -153,10 +479,10 @@ defn againView(st, p, site)
   web.Stack([
     web.Text(Say("The session ended: sign in again, and the actions that wait go then."), color = red),
     web.Row([Label(Say("E-mail")), web.Input(email, label = Say("E-mail"), width = 240), Label(Say("Password")), web.Input(password, label = Say("Password"), width = 200, secret = true, onEnter = go),
-      web.Button(Say("Sign in"), go)], gap = 8),
+      web.Button(Say("Sign in"), go)], gap = 8, wrap = true),
     () -> stepView(web.Get(step), code, send),
     () -> web.Text(web.Get(said), color = red),
-  ], gap = 6, pad = 8, fill = 0xfdecea, border = red)
+  ], gap = 6, pad = 8, fill = "Header", border = red)
 end
 
 defn signOut()
