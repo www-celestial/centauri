@@ -138,10 +138,10 @@ Voici leurs seules différences ; rien d'autre ne change avec eux :
   `centauri_signins_total{result}` (`ok`, une session ouverte par n'importe quelle entrée ; `failed`), et les `http_*`
   de std/metrics : sur `127.0.0.1:APP_ADMIN_PORT/metrics` pour Prometheus, et en lignes à `GET /admin/metrics` pour le
   super-admin. Avec `APP_OTEL=on`, les mêmes nombres vont aussi à un collector d'OpenTelemetry, avec les traces des
-  requêtes et les lignes du log ([la télémétrie](telemetry.md)) : une seule source, deux vues. Une métrique tient au
-  plus 2 000 séries, les autres comptées dans une seule, `otel_metric_overflow="true"`, comme le conseille
-  OpenTelemetry : un label (une étiquette qui découpe une métrique en séries, comme `route`) fait à partir des requêtes
-  ne peut pas remplir la mémoire.
+  requêtes et les lignes du log ([la télémétrie](telemetry.md)) : une seule source, deux vues. Aucun label (une
+  étiquette qui découpe une métrique en séries, comme `route`) ne tient ce qu'écrit un client (une route est son motif,
+  une méthode l'une des dix que connaît OpenTelemetry ou `_OTHER`) : les requêtes ne peuvent pas remplir la mémoire de
+  séries.
 
 ## 4. En production
 

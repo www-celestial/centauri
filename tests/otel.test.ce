@@ -221,3 +221,17 @@ defn isOffByDefaultAndCostsNothing()
   got = t.Raw("GET", "/notes/1")
   value.IsMissing(t.Env.Otel) and value.IsMissing(http.HeaderValue("server-timing", got.Headers)) and value.IsMissing(otel.Header())
 end
+
+defn isMadeUpMethodNamedHttp()
+  (** A method that a client made up never names a span, as OpenTelemetry's conventions say: it is HTTP in the name,
+      _OTHER in http.request.method, the one sent kept in http.request.method_original; a known one names it. *)
+  x = started()
+  _ = x.T.Raw("BREW", "/coffee")
+  _ = x.T.Raw("GET", "/nowhere")
+  names = [s.name for s in sent(x).Spans if s.kind == 2]
+  bug.Assert(value.Equal(names, ["HTTP", "GET"]), "names: $names")
+  y = started()
+  _ = y.T.Raw("BREW", "/coffee")
+  s = server(sent(y))
+  attrOf(s, "http.request.method") == "_OTHER" and attrOf(s, "http.request.method_original") == "BREW"
+end
