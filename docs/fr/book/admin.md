@@ -192,12 +192,27 @@ sa variable, sa valeur (un secret est `(secret)`) et d'où il vient.
 
 ![Les fichiers : le kind des scans des factures et ses choses, leurs noms, types et tailles.](images/admin-files.png)
 
-**Changer une chose sur place.** Le kind dans la barre latérale, un clic sur la chose : elle s'ouvre dans le panneau
-de droite, à sa propre adresse (`/admin/#/data/invoice/65616`), chaque champ avec son nom et son type au-dessus de sa
-case ; changez-en un, puis Enregistrer (Ctrl+S). Une valeur du mauvais type est refusée avec son champ, et le
-changement est dans l'Audit.
+**Trouver des choses.** Un kind dans la barre latérale (son nom avec une majuscule et au pluriel, comme Clients, avec
+son nombre) : sa page dit combien il en a, des pastilles (*chips*) des valeurs d'un champ qui en a peu (son Statut ou
+son État d'abord, comme Tout 30, Impayées 20, Payées 10) avec leurs nombres, et une recherche dans ses textes, que la
+touche / atteint de partout. Un lien montre le titre de la chose qu'il nomme (son premier texte), son id seulement à
+côté, en gris ; un montant ses deux décimales, ses milliers séparés comme la langue les écrit (1,280.50 €, 1 280,50 €).
 
-![Le navigateur de données sur les factures : le tableau de leurs Numéro, « Facturé à », Statut en pastille et Total, la première ouverte, et à droite le panneau de ses champs (Tenant, Number, Client, BillTo changé, Search, Date, Due, Status, Total), chacun avec son type, l'action de l'app « Marquer payée », Annuler et Enregistrer.](images/admin-data-edit.png)
+**Changer une chose sur place.** Un clic sur la chose : elle s'ouvre dans le panneau de droite, à sa propre adresse
+(`/admin/#/data/invoice/65616`), chaque champ avec son nom au-dessus de sa case ; un lien avec le titre de la chose
+qu'il nomme, un lien vers sa page ; les actions de l'app sur elle ; dessous, son activité, qui a changé quoi et quand,
+tirée de l'historique que garde la base. Changez un champ, puis Enregistrer (Ctrl+S). Une valeur du mauvais type est
+refusée avec son champ, et le changement est dans l'Audit. Les champs qu'une app garde pour elle sont laissés de côté :
+un champ nommé Search (la copie repliée de sa recherche) et ceux qu'une règle donne ; `pages.Kind(fields = [...])` nomme
+plutôt ceux que le panneau montre.
+
+**Créer, agir sur plusieurs, supprimer.** Nouveau (Alt+N) ouvre un panneau vide (`/admin/#/data/invoice/new`) pour un
+kind de l'app ; Enregistrer la crée et l'ouvre à son adresse. Une case devant chaque ligne la coche, celle de l'en-tête
+toutes celles montrées ; la bande qui vient dit combien sont cochées et porte les actions du kind (pages.Action) et
+Supprimer, chacune confirmée d'abord. Supprimer est aussi au pied du panneau ; les règles de la base peuvent le
+refuser, et disent pourquoi. `pages.Kind(create = false)` laisse les choses d'un kind créées par l'app seulement.
+
+![Le navigateur de données sur les factures : le tableau de leurs Numéro, « Facturé à », Statut en pastille et Total, la première ouverte, et à droite le panneau de ses champs, l'action de l'app « Marquer payée », son activité, Annuler et Enregistrer.](images/admin-data-edit.png)
 
 ![La piste d'audit : chaque changement d'un super-admin, quand, quel changement, par qui, depuis quelle adresse et quelle route, et quoi.](images/admin-audit.png)
 

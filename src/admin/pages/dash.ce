@@ -15,8 +15,14 @@ use std/result
 use std/text
 use std/value
 
-(* The ranges of the board: their key, their label, their length in seconds. *)
-ranges = [["15m", "15 min", 900], ["1h", "1 h", 3600], ["24h", "24 h", 86400], ["7d", "7 days", 604800]]
+(* The ranges of the board: their key, their label, their length in seconds, the step and the count of the points
+   the server gives for it. *)
+ranges = [["15m", "15 min", 900, 1, 900], ["1h", "1 h", 3600, 60, 60], ["24h", "24 h", 86400, 600, 144], ["7d", "7 days", 604800, 600, 1008]]
+
+(* The fields of a point: those summed when points are merged, those of the last one, those of the largest. *)
+summed = ["Requests", "Errors", "Origin", "Limit", "Signin", "Role", "SignedIn", "FailedSignIns", "Writes"]
+lasting = ["Failures", "Ready", "Running", "Dead", "Screens", "Memory", "DiskUsed", "DiskTotal"]
+largest = ["P50", "P99", "Cpu"]
 
 defn Dashboard(p)
   (** The board. *)
@@ -27,17 +33,84 @@ defn Dashboard(p)
   cross = web.Signal(missing)
   level = web.Signal("all")
   paused = web.Signal(missing)
-  (* the points sorted once a change, then the columns of the range: the graphs stay mounted and only redraw *)
+  (* the history of the range read once (compact columns, AdminSeriesData), the seconds of the live show added to it as
+     they come; the graphs stay mounted and only redraw *)
   all = web.Memo(() -> sorted(web.Get(points)))
-  cols = web.Memo(() -> seriesOf(inRange(web.Get(all), web.Get(range))))
+  base = web.Signal(missing)
+  asked = cell(missing)
+  cols = web.Memo(() -> rangeColumns(web.Get(range), replyOf(web.Get(base)), web.Get(all)))
   web.Stack([
     web.Header(Say("Dashboard"), summary = Say("Platform health, live"),
       actions = [web.Chips(range, [web.Chip(r[1], Say(r[2])) for r in ranges], label = Say("Range"))]),
     () -> firstSteps(OkOf(web.Get(stats)), p),
+    () -> fetched(web.Get(range), web.Get(all), base, asked, p),
     () -> strip(web.Get(all), OkOf(web.Get(stats)), p, web.Get(cols).N < 2),
     board(cols, cross),
     logCard(logs, level, paused, p),
   ], gap = 10)
+end
+
+replyOf(r) = if web.IsSignal(r) OkOf(web.Get(r)) else missing end   (* The value of the history's reply, or missing. *)
+
+defn fetched(key, points, base, asked, p)
+  (** The history of a range asked of the server when the range changes, and for an hour or more each new minute or
+      ten minutes, so that the graph moves on. Nothing to show. *)
+  r = list.FindFirst(x -> x[1] == key, ranges)
+  last = if value.IsEmpty(points) 0 else points[value.Len(points)].At end
+  bucket = if r[4] == 1 0 else math.Div(math.Floor(last), r[4]) end
+  want = "$key $bucket"
+  if peek(asked) != want
+    stash(want, asked)
+    web.Set(base, Call(api.AdminSeriesData, {Step: r[4], Count: r[5]}, p))
+  end
+  missing
+end
+
+defn rangeColumns(key, data, live)
+  (** The columns of a range: the history the server gave (oldest first), the seconds of the live show after its last
+      for 15 minutes, in at most 300 points (a graph is about as many pixels wide); the live seconds alone while no history came (an older server). *)
+  r = list.FindFirst(x -> x[1] == key, ranges)
+  if not value.IsDict(data) or not value.IsArray(dict.Get("Ats", data))
+    return seriesOf(inRange(live, key))
+  end
+  ats = data.Ats
+  cs = dict.GetOr("Cols", {}, data)
+  fields = list.Concat(list.Concat(summed, lasting), largest)
+  out = {}
+  for f in fields
+    out[f] = dict.GetOr(f, [0 for a in ats], cs)
+  end
+  if r[4] == 1
+    lastAt = if value.IsEmpty(ats) 0 else ats[value.Len(ats)] end
+    newer = [x for x in live if stepOf(x) == 1 and x.At > lastAt]
+    ats = list.Concat(ats, [x.At for x in newer])
+    for f in fields
+      out[f] = list.Concat(out[f], [dict.GetOr(f, 0, x) for x in newer])
+    end
+    cut = list.Max(0, value.Len(ats) - r[5])
+    ats = list.Skip(cut, ats)
+    for f in fields
+      out[f] = list.Skip(cut, out[f])
+    end
+  end
+  k = list.Max(1, math.Div(value.Len(ats) + 299, 300))
+  if k > 1
+    groups = [[i, list.Min(value.Len(ats), i + k - 1)] for i in 1..value.Len(ats) if math.Mod(i - 1, k) == 0]
+    for f in summed
+      out[f] = [list.Sum(out[f][g[1]..g[2]]) for g in groups]
+    end
+    for f in lasting
+      out[f] = [out[f][g[2]] for g in groups]
+    end
+    for f in largest
+      out[f] = [list.Max(out[f][g[1]..g[2]]) for g in groups]
+    end
+    ats = [ats[g[2]] for g in groups]
+  end
+  n = value.Len(ats)
+  {N: n, Step: data.Step * k, At: ats, Requests: out.Requests, Errors: out.Errors, P50: [tenth(v) for v in out.P50], P99: [tenth(v) for v in out.P99],
+    Refused: [out.Origin[i] + out.Limit[i] + out.Signin[i] + out.Role[i] for i in 1..n], Origin: out.Origin, Limit: out.Limit, Signin: out.Signin, Role: out.Role,
+    SignedIn: out.SignedIn, FailedSignIns: out.FailedSignIns, Screens: out.Screens}
 end
 
 defn sorted(points)
@@ -57,7 +130,7 @@ end
 
 defn inRange(points, key)
   (** The points of a range, by their time: the seconds for 15 minutes, the minutes for an hour, the ten minutes for a
-      day and a week, as the server keeps them (else the finest it has), in at most 400 points, each a sum (or the
+      day and a week, as the server keeps them (else the finest it has), in at most 300 points (a graph is about as many pixels wide), each a sum (or the
       last) of those it holds. *)
   r = list.FindFirst(x -> x[1] == key, ranges)
   all = points
@@ -73,7 +146,7 @@ defn inRange(points, key)
       got = of(step)
     end
   end
-  merged(got, list.Max(1, math.Div(value.Len(got) + 399, 400)))
+  merged(got, list.Max(1, math.Div(value.Len(got) + 299, 300)))
 end
 
 defn merged(points, k)
@@ -122,6 +195,11 @@ defn strip(points, s, p, waiting = false)
     stat(Num(errors), Say("errors in the last minute"), if errors > 0 red else missing end),
     web.Link(Say("{N} jobs failed", {N: Num(last.Dead)}), "/jobs"),
     if value.IsDict(s) stat(Num(s.Sessions), Say("sessions"), missing) else missing end,
+    if value.IsNumber(dict.Get("Cpu", last)) web.Row([web.Text(Say("CPU"), color = gray), web.Text(Say("{N} %", {N: Num(math.Round(last.Cpu))}), font = "strong")], gap = 5) else missing end,
+    if value.IsNumber(dict.Get("Memory", last)) web.Row([web.Text(Say("Memory"), color = gray), web.Text(Say("{N} MB", {N: Num(math.Round(last.Memory / 1048576))}), font = "strong")], gap = 5) else missing end,
+    if value.IsNumber(dict.Get("DiskUsed", last)) and value.IsNumber(dict.Get("DiskTotal", last)) and last.DiskTotal > 0
+      web.Row([web.Text(Say("Disk"), color = gray), web.Text(Say("{N} %", {N: Num(math.Round(last.DiskUsed * 100 / last.DiskTotal))}), font = "strong")], gap = 5) else missing end,
+    if value.IsNumber(dict.Get("Writes", last)) stat(Num(list.Sum([dict.GetOr("Writes", 0, x) for x in minute])), Say("writes/min"), missing) else missing end,
     () -> upCell(web.Get(dict.Get("App", p.Site)))]
   if waiting
     return web.Stack([web.Strip(cells), web.Text(Say("Waiting for the first seconds…"), color = gray)], gap = 10)
@@ -167,11 +245,24 @@ defn logCard(logs, level, paused, p)
       from, what happened (a request as GET /admin/ 200) and at its right its time or its address; All, Warnings (and
       errors) or Errors; Pause keeps the lines in sight while one reads them; a line clicked shows all its fields in
       the sheet. *)
+  read = cell(dict.Dict())
   rows = web.Memo(defn ()
     frozen = web.Get(paused)
     all = if value.IsSome(frozen) frozen else web.Get(logs) end
     lv = web.Get(level)
-    [lineOf(x) for x in list.Take(200, list.Reverse(list.SortBy(x -> x.Seq, [x for x in all if lv == "all" or lv == "warn" and x.Level != "info" or lv == "error" and x.Level == "error"])))]
+    shown = list.Take(200, list.Reverse(list.SortBy(x -> x.Seq, [x for x in all if lv == "all" or lv == "warn" and x.Level != "info" or lv == "error" and x.Level == "error"])))
+    (* each line read once: a new line costs its own JSON, not the 200 shown *)
+    known = peek(read)
+    fresh = dict.Dict()
+    out = []
+    for x in shown
+      one = dict.Get(x.Seq, known)
+      line = if value.IsSome(one) one else lineOf(x) end
+      fresh[x.Seq] = line
+      out = list.Append(line, out)
+    end
+    stash(fresh, read)
+    out
   end)
   tone = x -> (if x.Level == "error" red else if x.Level == "warn" amber else missing end)
   web.Stack([

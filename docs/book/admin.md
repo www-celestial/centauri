@@ -171,11 +171,26 @@ variable, its value (a secret is `(secret)`) and where it came from.
 
 ![The files: the kind of the scans of the invoices and its things, their names, types and sizes.](images/admin-files.png)
 
-**Change a thing in place.** The kind in the side bar, a click on the thing: it opens in the sheet at the right, at its
-own address (`/admin/#/data/invoice/65616`), each field with its name and type over its input; change one, then Save
-(Ctrl+S). A value of the wrong type is refused with its field, and the change is in the Audit.
+**Find things.** A kind in the side bar (its name in capitals and plural, as Clients, with its count): its page says
+how many it holds, chips of the values of a field that has few (its Status or State first, as All 30, Unpaid 20, Paid
+10) with their counts, and a search over its texts, which / reaches from anywhere. A link shows the title of the thing
+it names (its first text), its id only beside, muted; an amount its two decimals, its thousands apart as the language
+writes them (1,280.50 €, 1 280,50 €).
 
-![The data browser on the invoices: the table of their number, client, state as a pill and total, the first opened, and at the right the sheet of its fields (Tenant, Number, Client, BillTo changed, Search, Date, Due, Status, Total), each with its type, the app's action Mark paid, Cancel and Save.](images/admin-data-edit.png)
+**Change a thing in place.** A click on the thing: it opens in the sheet at the right, at its own address
+(`/admin/#/data/invoice/65616`), each field with its name over its input; a link with the title of the thing it names,
+a link to its page; the app's actions on it; under them its activity, who changed what and when, from the history the
+database keeps. Change a field, then Save (Ctrl+S). A value of the wrong type is refused with its field, and the change
+is in the Audit. The fields an app keeps for itself are left out: a field named Search (the folded copy of its search)
+and those a rule gives; `pages.Kind(fields = [...])` names those the sheet shows instead.
+
+**Make, act on several, delete.** New (Alt+N) opens an empty sheet (`/admin/#/data/invoice/new`) for a kind of the app;
+Save makes it and opens it at its address. A box before each row checks it, the one of the header all those shown; the
+band that comes says how many are checked and holds the kind's actions (pages.Action) and Delete, each asked first.
+Delete is in the sheet's foot too; the database's rules may refuse it, and say why. `pages.Kind(create = false)` keeps a
+kind's things made only by the app.
+
+![The data browser on the invoices: the table of their number, client, state as a pill and total, the first opened, and at the right the sheet of its fields, the app's action Mark paid, its activity, Cancel and Save.](images/admin-data-edit.png)
 
 ![The audit trail: each change of a super-admin, when, which change, by whom, from which address and route, and what.](images/admin-audit.png)
 

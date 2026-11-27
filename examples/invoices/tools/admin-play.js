@@ -35,7 +35,8 @@ window.adminPlay = (() => {
   const node = async (role, name, ms) => until(async () => find(await tree(), named(role, name)), ms)
   const click = n => { const c = document.querySelector('canvas'), r = c.getBoundingClientRect()
     for (const type of ['pointerdown', 'pointerup'])
-      c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + Math.min(10, n.W / 2), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
+      // a row at its middle, where no box that checks it is; anything else near its start
+      c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + (n.Role === 'row' ? n.W / 2 : Math.min(10, n.W / 2)), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
   // a node out of the sight of its panel (a page taller than the center of the dock, or than the window in the layout of
   // pages) brought into it as a person does, by the wheel over a part of the panel that no table takes (the wheel over
   // a table that scrolls scrolls the table)

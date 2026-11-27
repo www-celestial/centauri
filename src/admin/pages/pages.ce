@@ -100,9 +100,8 @@ defn Run(title = "Admin", more = [], kinds = [], shows = [], words = missing)
     browser.Run(web.App([web.Route(x, p -> signIn(p, shown, note)) for x in paths], title = shown, say = t -> Say(t), theme = theme))
     return missing
   end
-  (* the dashboard's points: the seconds of 15 minutes, the minutes of an hour, the ten minutes of a week (about 2,000
-     rows, 400 KB of JSON once) *)
-  asked = [{Show: s.Name, Args: if s.Name == "admin.series" {Seconds: 900, Minutes: 60, Tens: 1008} else {} end} for s in list.Concat(api.AdminShows, shows)]
+  (* the dashboard's live points: the last minute's seconds, then each new one; its history comes by AdminSeriesData *)
+  asked = [{Show: s.Name, Args: if s.Name == "admin.series" {Seconds: 60} else {} end} for s in list.Concat(api.AdminShows, shows)]
   live = "/live?shows=$(encode.UrlEncode(json.Text(asked)))"
   mine = [{Title: x.Title, Path: x.Path, View: x.View} for x in more]
   menu = list.Concat(own, mine)
@@ -189,9 +188,13 @@ defn shell(p, page, site)
   stats = Call(api.AdminStats, {}, p)
   kinds = Call(api.AdminKinds, {}, p)
   points = web.Live("admin.series", p)
+  (* what the side bar shows of the points, as numbers that change rarely: the nav and its foot are drawn again only
+     when they change, not at each second *)
+  dead = web.Memo(() -> newest(web.Get(points), "Dead"))
+  p50 = web.Memo(() -> newest(web.Get(points), "P50"))
   web.Shell(p, page,
-    side = [() -> brand(site), web.Nav(() -> navGroups(p, site, OkOf(web.Get(stats)), OkOf(web.Get(kinds)), web.Get(points)), label = Say("Pages")), web.Spacer(),
-      () -> liveLine(p, web.Get(points)), meLine(site)],
+    side = [() -> brand(site), web.Nav(() -> navGroups(p, site, OkOf(web.Get(stats)), OkOf(web.Get(kinds)), web.Get(dead)), label = Say("Pages")), web.Spacer(),
+      () -> liveLine(p, web.Get(p50)), meLine(site)],
     top = [() -> crumbs(web.Get(p.Nav), site, p)],
     sheet = () -> sheetOf(web.Get(site.Sheet)),
     find = () -> commands(p, site, OkOf(web.Get(kinds))),
@@ -219,18 +222,28 @@ defn brand(site)
   web.Row([mark, web.Stack([web.Text(site.Title, font = "strong"), line], gap = 0)], gap = 8)
 end
 
-defn navGroups(p, site, s, ks, points)
+defn newest(points, field)
+  (** A field of the newest point, or missing: one pass, no sort. *)
+  best = missing
+  for x in points
+    if value.IsMissing(best) or x.At > best.At
+      best = x
+    end
+  end
+  if value.IsMissing(best) missing else tenth(dict.GetOr(field, 0, best)) end
+end
+
+defn navGroups(p, site, s, ks, dead0)
   (** The groups of the side bar: the dashboard; the data of the app's kinds (the platform's under All kinds); the
       people with their counts; the activity, the jobs with those that failed; the setup; the app's own pages. *)
   known = if value.IsArray(ks) ks else [] end
   apps = [k for k in known if not text.StartsWith("centauri_", k.Name)]
   count = name -> if value.IsDict(s) Num(dict.Get(name, s)) else missing end
-  last = if value.IsEmpty(points) missing else list.Reverse(list.SortBy(x -> x.At, points))[1] end
-  dead = if value.IsMissing(last) 0 else last.Dead end
+  dead = if value.IsMissing(dead0) 0 else dead0 end
   page = (title, path, n) -> web.Item(Say(title), icon = iconOf(path), to = path, count = n, key = path)
   out = [web.Group("", [page("Dashboard", "/", missing)]),
     web.Group(Say("Data"), list.Append(web.Item(Say("All kinds"), icon = "database", to = "/data", key = "/data"),
-      [web.Item(kindTitle(k.Name, p), icon = "box", to = "/data/$(k.Name)", key = "/data/$(k.Name)") for k in apps])),
+      [web.Item(kindTitle(k.Name, p), icon = "box", to = "/data/$(k.Name)", key = "/data/$(k.Name)", count = if value.IsNumber(dict.Get("Count", k)) Num(k.Count) else missing end) for k in apps])),
     web.Group(Say("People"), [page("Users", "/users", count("Users")), page("Tenants", "/tenants", count("Tenants"))]),
     web.Group(Say("Activity"), [page("Events", "/events", missing), page("Log", "/logs", missing),
       web.Item(Say("Jobs"), icon = "wrench", to = "/jobs", key = "/jobs", count = if dead > 0 Say("{N} failed", {N: Num(dead)}) else missing end, tone = if dead > 0 "Danger" else missing end),
@@ -243,10 +256,9 @@ defn navGroups(p, site, s, ks, points)
   list.Append(web.Group(site.Title, [web.Item(Say(x.Title), icon = "file-text", to = x.Path, key = x.Path) for x in site.More]), out)
 end
 
-defn liveLine(p, points)
+defn liveLine(p, p50)
   (** The connection at the foot of the side bar, and the time of the requests of the last second. *)
-  last = if value.IsEmpty(points) missing else list.Reverse(list.SortBy(x -> x.At, points))[1] end
-  web.Row([web.Connection(p, say = t -> Say(t)), if value.IsMissing(last) missing else web.Text(Say("· p50 {N} ms", {N: Num(tenth(last.P50))}), size = "small", color = gray) end], gap = 6)
+  web.Row([web.Connection(p, say = t -> Say(t)), if value.IsMissing(p50) missing else web.Text(Say("· p50 {N} ms", {N: Num(p50)}), size = "small", color = gray) end], gap = 6)
 end
 
 defn meLine(site)
