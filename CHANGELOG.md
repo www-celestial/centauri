@@ -21,7 +21,9 @@ measure without asking.
 - The pages' telemetry (`APP_TELEMETRY_CLIENT`, on): `POST /telemetry` takes their batches, bounded (300 a minute an
   address, 64 KiB, `APP_TELEMETRY_MOST` a minute for the process), masks them again, and keeps
   `centauri_client_view` (a load of a page: Web Vitals, navigation, WebAssembly, frames, live screen, device,
-  journey), `centauri_client_action` and `centauri_client_error`, `Untrusted`, `APP_TELEMETRY_KEEP` days; the country
+  journey), `centauri_client_action` and `centauri_client_error`, `Untrusted`, `APP_TELEMETRY_KEEP` days, as fields
+  what the data pages sort and count by (41 in all, since each field costs every start) and the rest in `Detail`, a
+  JSON object (`app.Split`, `app.Flat`); the country
   and city from a database of DB-IP (`APP_TELEMETRY_GEO`, `APP_TELEMETRY_GEO_FILE`, MMDB read in Cesia); the address
   and the account only as said, and with `APP_TELEMETRY_CONSENT=ask` once the visitor said yes. With `APP_OTEL` on,
   the actions are spans and the errors lines of the service `<app>-browser`.
