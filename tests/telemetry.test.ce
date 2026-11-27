@@ -49,12 +49,12 @@ defn post(t, b, ip = "198.51.100.7", raw = missing)
 end
 
 defn views(t)
-  (** The things of client_view, with their fields. *)
-  [cepheus.Get(app.ClientView, i.Id, t.Db)! for i in cepheus.Find(2, (v, w) -> {Where: [[v, app.ClientView.View, w]], Give: {Id: v}}, t.Db)!]
+  (** The things of client_view, their fields and Detail side by side. *)
+  [app.Flat(cepheus.Get(app.ClientView, i.Id, t.Db)!) for i in cepheus.Find(2, (v, w) -> {Where: [[v, app.ClientView.View, w]], Give: {Id: v}}, t.Db)!]
 end
 
-actionsOf(t) = [cepheus.Get(app.ClientAction, i.Id, t.Db)! for i in cepheus.Find(2, (e, w) -> {Where: [[e, app.ClientAction.View, w]], Give: {Id: e}}, t.Db)!]
-errorsOf(t) = [cepheus.Get(app.ClientError, i.Id, t.Db)! for i in cepheus.Find(2, (e, w) -> {Where: [[e, app.ClientError.View, w]], Give: {Id: e}}, t.Db)!]
+actionsOf(t) = [app.Flat(cepheus.Get(app.ClientAction, i.Id, t.Db)!) for i in cepheus.Find(2, (e, w) -> {Where: [[e, app.ClientAction.View, w]], Give: {Id: e}}, t.Db)!]
+errorsOf(t) = [app.Flat(cepheus.Get(app.ClientError, i.Id, t.Db)!) for i in cepheus.Find(2, (e, w) -> {Where: [[e, app.ClientError.View, w]], Give: {Id: e}}, t.Db)!]
 
 defn isBatchKeptAsAView()
   (** A batch is a view: its route, its speed, its device, its actions by their names, its errors apart; all of it the
@@ -80,7 +80,7 @@ defn isWhatAPageSaysMasked()
   all = json.Text([v, es])
   bug.Assert(not text.Contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", all) and not text.Contains("ana@example.com", all) and not text.Contains("secret=42", all)
     and not text.Contains("term=private", all), "masked: $all")
-  bug.Assert(v.Ref == "https://search.example" and text.Contains("<email>", v.Utm), "ref $(v.Ref), utm $(v.Utm)")
+  bug.Assert(v.Ref == "https://search.example" and text.Contains("<email>", json.Text(v.Utm)), "ref $(v.Ref), utm $(v.Utm)")
   bug.Assert("error" in [e.Type for e in es] and not ("made-up" in [e.Type for e in es]), "types: $([e.Type for e in es])")
   _ = post(t, batch(view = "ffffffffffff0001", items = [{K: "view", Route: "/users/<b>ana</b>"}, {K: "view", Route: "/notes/12345"}]))
   w = list.First([x for x in views(t) if x.View == "ffffffffffff0001"])

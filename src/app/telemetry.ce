@@ -103,6 +103,40 @@ end
 
 traceOk(t) = if value.IsSome(otel.Parse(t)) t else missing end   (* A traceparent, when it is one. *)
 
+defn Split(f, kind, was)
+  (** What a thing of a kind of the pages' telemetry writes: those of f that are fields of the kind, and the others in
+      Detail, a JSON object, with the keys that was (the thing before, Flat) holds there and f doesn't change.
+
+        Split({Route: "/", Lang: "fr"}, ClientView, {Net: "4g"}) --> {Route: "/", Detail: "{\"Net\":\"4g\",\"Lang\":\"fr\"}"} *)
+  own = dict.Get("fields", kind)
+  fields = {}
+  detail = dict.Dict([p for p in dict.Pairs(was) if not dict.Has(p.Key, own)])
+  changed = false
+  for p in dict.Pairs(f)
+    if dict.Has(p.Key, own)
+      fields[p.Key] = p.Value
+    else
+      detail[p.Key] = p.Value
+      changed = true
+    end
+  end
+  if changed
+    fields.Detail = json.Text(detail)
+  end
+  fields
+end
+
+defn Flat(thing)
+  (** A thing of the pages' telemetry as its batches told it: its fields and the keys of its Detail side by side.
+
+        Flat({Route: "/", Detail: "{\"Lang\":\"fr\"}"}) --> {Route: "/", Lang: "fr"} *)
+  if not value.IsDict(thing)
+    return thing
+  end
+  more = if value.IsText(dict.Get("Detail", thing)) json.Parse(thing.Detail) else result.Ok({}) end
+  dict.Merge(dict.Drop("Detail", thing), if result.IsOk(more) and value.IsDict(more.Value) more.Value else {} end)
+end
+
 defn telemetryOf()
   (** The route of the pages' batches, beside the administration's. *)
   [{Endpoint: api.Telemetry, Handler: took, Module: "centauri"}]
@@ -132,7 +166,7 @@ defn took(r, x)
     return missing
   end
   now = r.Now
-  old = if value.IsSome(before) cepheus.Get(ClientView, before.Id, r.Db)? else missing end
+  old = if value.IsSome(before) Flat(cepheus.Get(ClientView, before.Id, r.Db)?) else missing end
   f = if value.IsMissing(before) {View: x.View, Session: x.Session, At: now, Untrusted: true, Errors: 0, ActionCount: 0} else {} end
   if value.IsSome(old)
     f.Reconnects = dict.Get("Reconnects", old)
@@ -160,7 +194,7 @@ defn took(r, x)
       if value.IsMissing(before) and value.IsMissing(dict.Get("Route", f))
         f.Route = route
         f.Ref = originOk(i.Ref)
-        f.Utm = if value.IsDict(i.Utm) json.Text(dict.Dict([{Key: p.Key, Value: Masked(p.Value, most = 100)} for p in dict.Pairs(i.Utm) if value.IsText(p.Value)])) else missing end
+        f.Utm = if value.IsDict(i.Utm) dict.Dict([{Key: p.Key, Value: Masked(p.Value, most = 100)} for p in dict.Pairs(i.Utm) if value.IsText(p.Value)]) else missing end
       end
       if route != ""
         journey = list.Append(route, journey)
@@ -233,19 +267,20 @@ defn took(r, x)
   if value.Len(errors) > 0
     f.Errors = dict.GetOr("Errors", 0, was) + value.Len(errors)
   end
-  kept = dict.Dict([p for p in dict.Pairs(f) if value.IsSome(p.Value)])
+  kept = Split(dict.Dict([p for p in dict.Pairs(f) if value.IsSome(p.Value)]), ClientView, was)
   id = if value.IsMissing(before) cepheus.Insert(ClientView, kept, r.Db, why = "telemetry")? else before.Id end
   if value.IsSome(before) and value.Len(kept) > 0
     cepheus.Update(ClientView, id, kept, r.Db, why = "telemetry")?
   end
   route = dict.GetOr("Route", dict.GetOr("Route", "", was), f)
   for a in actions
-    _ = cepheus.Insert(ClientAction, dict.Dict([p for p in dict.Pairs({View: x.View, Session: x.Session, Route: route, At: now, Name: a.Name, Ms: a.Ms, Ok: a.Ok,
-      Waited: a.Waited, Trace: a.Trace, Server: a.Server, Untrusted: true}) if value.IsSome(p.Value)]), r.Db, why = "telemetry")?
+    _ = cepheus.Insert(ClientAction, Split(dict.Dict([p for p in dict.Pairs({View: x.View, Session: x.Session, Route: route, At: now, Name: a.Name, Ms: a.Ms, Ok: a.Ok,
+      Waited: a.Waited, Trace: a.Trace, Server: a.Server, Untrusted: true}) if value.IsSome(p.Value)]), ClientAction, {}), r.Db, why = "telemetry")?
   end
   for e in dict.Values(errors)
-    _ = cepheus.Insert(ClientError, dict.Dict([p for p in dict.Pairs({View: x.View, Session: x.Session, Route: route, At: now, Type: e.Type, Message: e.Message, Stack: e.Stack,
-      Source: e.Source, Count: e.Count, Browser: dict.Get("Browser", f), Version: dict.Get("Version", f), Os: dict.Get("Os", f), Untrusted: true}) if value.IsSome(p.Value)]), r.Db, why = "telemetry")?
+    _ = cepheus.Insert(ClientError, Split(dict.Dict([p for p in dict.Pairs({View: x.View, Session: x.Session, Route: route, At: now, Type: e.Type, Message: e.Message, Stack: e.Stack,
+      Source: e.Source, Count: e.Count, Browser: dict.GetOr("Browser", dict.Get("Browser", was), f), Version: dict.GetOr("Version", dict.Get("Version", was), f),
+      Os: dict.GetOr("Os", dict.Get("Os", was), f), Untrusted: true}) if value.IsSome(p.Value)]), ClientError, {}), r.Db, why = "telemetry")?
   end
   forwarded(r.Env.State.Browser, x, route, actions, dict.Values(errors), now)
   missing
