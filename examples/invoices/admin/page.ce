@@ -57,5 +57,5 @@ end
 pages.Run(title = "Invoices — admin", words = words.Words,
   kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number", width = 80), pages.Column("Client"), pages.Column("Due", width = 110),
     pages.Column("Status", show = v -> web.Pill(pages.Capital(pages.Say(v)), tone = if v == "paid" "Ok" else if v == "unpaid" "Warn" else "Muted" end), width = 100),
-    pages.Column("Total", show = v -> pages.Money(v, currency = "€"), width = 110)], actions = [pages.Action("Mark paid", e.AdminPay)])],
+    pages.Column("Total", width = 110)], actions = [pages.Action("Mark paid", e.AdminPay)], currency = "€")],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])

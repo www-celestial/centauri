@@ -23,6 +23,7 @@ Words = i18n.Catalog("fr", [
   ["{N} unpaid invoices", {one: "{N} facture impayée", other: "{N} factures impayées"}],
   ["Invoices — admin", "Factures — administration"],
   ["Invoices", "Factures"],
+  ["Invoice", "Facture"],
   ["Number", "Numéro"],
   ["Client", "Client"],
   ["Bill to", "Facturé à"],

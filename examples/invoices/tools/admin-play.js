@@ -220,7 +220,9 @@ window.adminPlay = (() => {
     },
     async markup () {
       const made = document.body.querySelectorAll('b, img, iframe, script:not([src])').length
-      const shown = (await texts()).some(t => t.includes('<b>Renamed</b>')) || [...document.body.querySelectorAll('*')].some(e => (e.textContent || '').includes('<b>Renamed</b>'))
+      // shown as text: in a text of the page, or as the value of the field it was typed in (the sheet's BillTo)
+      const shown = (await texts()).some(t => t.includes('<b>Renamed</b>')) || all(await tree(), n => typeof n.Value === 'string' && n.Value.includes('<b>Renamed</b>')).length > 0 ||
+        [...document.body.querySelectorAll('*')].some(e => (e.textContent || '').includes('<b>Renamed</b>'))
       return line(made === 0 && !window.pwned && shown, `markup typed stays a text: ${made} elements made of it`)
     },
     async disable () {
