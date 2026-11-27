@@ -176,6 +176,19 @@ defn isLogTailedOnce()
   next.Seq == first.Seq + 2 and value.Len(next.Lines) == 2 and value.Len(none.Lines) == 0
 end
 
+defn isRequestTimesReadOnce()
+  (** The times of the requests since a line, as the sampler of the dashboard reads them: those of requests alone, each
+      once, numbered as Tail numbers the lines. *)
+  t = apptest.Start(App)?
+  first = app.Times(0, t.Env.State)
+  _ = t.Raw("GET", "/health/live")
+  _ = t.Raw("GET", "/nowhere")
+  app.Keep({At: 0, Level: "info", Message: "not a request", Fields: {}}, t.Env.State)
+  next = app.Times(first.Seq, t.Env.State)
+  none = app.Times(next.Seq, t.Env.State)
+  next.Seq == first.Seq + 3 and next.Seq == app.Tail(0, t.Env.State).Seq and value.Len(next.Ms) == 2 and list.All([value.IsNumber(x) for x in next.Ms]) and value.Len(none.Ms) == 0
+end
+
 defn served(db)
   (** The app served on a free port: {Port, Env}. *)
   l = net.Listen(0)!
@@ -192,9 +205,12 @@ defn signedIn(port, email, password)
   text.Split(";", http.HeaderValue("set-cookie", out.Headers))[1]
 end
 
-defn screen(port, cookie, shows)
-  (** A screen with these shows, its hello sent. *)
-  q = encode.UrlEncode(json.Text([{Show: s, Args: {}} for s in shows]))
+(** A screen with these shows, of no arguments, its hello sent. *)
+screen(port, cookie, shows) = screenOf(port, cookie, [{Show: s, Args: {}} for s in shows])
+
+defn screenOf(port, cookie, shows)
+  (** A screen with these shows, each {Show, Args}, its hello sent. *)
+  q = encode.UrlEncode(json.Text(shows))
   c = ws.Dial("ws://localhost:$port/live?shows=$q", headers = [{Name: "origin", Value: "http://localhost:$port"}, {Name: "cookie", Value: cookie}])!
   ws.Send(json.Text({Hello: 1}), c)!
   c
@@ -235,4 +251,63 @@ defn isLiveForSuperOnly()
   bug.Assert(value.Len(points) >= 1 and value.IsNumber(points[1].Requests) and value.IsNumber(points[1].P99), "a point a second: $points")
   bug.Assert(list.Any([text.Contains("health", l.Fields) or text.Contains("signin", l.Fields) for l in logs]), "the log lines: $logs")
   list.Any([e.Kind == "signin" for e in events])
+end
+
+defn pointsOf(got)
+  (** The points of the show admin.series that frames brought, at once and as they came. *)
+  list.Flatten([dict.GetOr("Rows", dict.GetOr("Added", [], m), m) for m in got if dict.Get("Show", m) == "admin.series"])
+end
+
+defn isSeriesOneSamplerForEveryScreen()
+  (** The screens of the dashboard share the one sampler of the process, started at the first that asks (a test runs
+      no start): a board a second whatever their number, the same rows for each. One of a window of one second gets
+      back, as Removed, the very row that leaves it; one that comes later gets the points kept at once; the sign-ins
+      and the screens open are counted; a window past the rings is refused. *)
+  db = cepheus.Fork(cepheus.Empty, App.Kinds)!
+  one = served(db)
+  auth.MakeSuper("boss@example.com", "correct horse boss", one.Env.Keys, db)!
+  boss = signedIn(one.Port, "boss@example.com", "correct horse boss")
+  bug.Assert(value.IsMissing(fiber.Recall("admin.series", 0, one.Env.Own)), "no sampler before a screen asks")
+  a = screen(one.Port, boss, ["admin.series"])
+  b = screen(one.Port, boss, ["admin.series"])
+  c = screenOf(one.Port, boss, [{Show: "admin.series", Args: {Seconds: 1, Minutes: 10080, Tens: 1008}}])
+  _ = signedIn(one.Port, "boss@example.com", "correct horse boss")
+  _ = http.Fetch("http://localhost:$(one.Port)/auth/signin", method = "POST", body = json.Text({Email: "boss@example.com", Password: "wrong horse boss"}),
+    headers = [{Name: "content-type", Value: "application/json"}])
+  ga = frames(a, 3.4)
+  gb = frames(b, 0.1)
+  gc = frames(c, 0.1)
+  board = fiber.Recall("admin.series", 0, one.Env.Own)
+  pa = pointsOf(ga)
+  pb = pointsOf(gb)
+  bug.Assert(board.SecondN >= 2 and board.SecondN <= 5 and value.Len(pa) >= 2, "a point a second, one sampler for three screens: $(board.SecondN), $(value.Len(pa))")
+  bug.Assert(json.Text(pa[1]) == json.Text(pb[1]) and json.Text(pa[2]) == json.Text(pb[2]), "the same rows for each screen: $(pa[1]) $(pb[1])")
+  bug.Assert(list.All([p.Step == 1 for p in pa]) and list.Any([p.Screens >= 3 for p in pa]), "seconds, and the screens open: $pa")
+  bug.Assert(list.Any([p.SignedIn >= 1 for p in pa]) and list.Any([p.FailedSignIns >= 1 for p in pa]), "the sign-ins, done and failed: $pa")
+  came = [json.Text(p) for p in pointsOf(gc)]
+  gone = list.Flatten([dict.GetOr("Removed", [], m) for m in gc if dict.Get("Show", m) == "admin.series"])
+  bug.Assert(value.Len(gone) >= 1 and list.All([json.Text(p) in came for p in gone]), "the very rows that left: $gone")
+  d = screen(one.Port, boss, ["admin.series"])
+  late = frames(d, 0.3)
+  first = list.FindFirst(m -> dict.Get("Show", m) == "admin.series", late)
+  bug.Assert(value.Len(first.Rows) >= 2, "the points kept, at once: $first")
+  wide = frames(screenOf(one.Port, boss, [{Show: "admin.series", Args: {Seconds: 901}}]), 0.5)
+  bug.Assert(value.Len(wide) == 1 and text.Contains("Check the arguments", wide[1].Error.Message), "a window past the ring: $wide")
+  open = app.Screens(one.Env.State)
+  for x in [a, b, c, d]
+    ws.Close(x)
+  end
+  sys.Sleep(0.3)
+  open == 4 and app.Screens(one.Env.State) == 0
+end
+
+defn isSamplerStartedWithTheAppUnlessPagesOff()
+  (** The module's start makes the sampler, so that the dashboard has the hours before it opens; with the pages off,
+      none until a screen asks. *)
+  on = apptest.Start(App)?
+  off = apptest.Start(App, settings = {AdminPath: "off"})?
+  m = list.FindFirst(x -> x.Name == "admin", App.Modules)
+  m.Start(on.Env)
+  m.Start(off.Env)
+  value.IsSome(fiber.Recall("admin.series", 0, on.Env.Own)) and value.IsMissing(fiber.Recall("admin.series", 0, off.Env.Own))
 end

@@ -156,8 +156,9 @@ end
 
 defn Start(a, s, db, readDb = missing, clock = missing)
   (** What every request of an app shares, env: its settings s (as Read gives them), its database, the database of a
-      token that reads only (for GetDb = "read"), the state of the process, the keys of libsodium, and the time (the
-      clock of a test, when given). An Ok of env; Handler(env) serves it. *)
+      token that reads only (for GetDb = "read"), the state of the process, the keys of libsodium, the time (the clock
+      of a test, when given), and Own, a fiber.Table of what a module keeps for as long as the process runs, one key of
+      its name each (the admin's sampler of the dashboard: "admin.series"). An Ok of env; Handler(env) serves it. *)
   keys = crypto.Open()?
   hashSlots = dict.GetOr("HashSlots", 2, s)
   rates = {Ip: ipRate(s.LimitIp), User: ipRate(s.LimitUser), Tenant: ipRate(s.LimitTenant)}
@@ -189,7 +190,8 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s), SessionKeyOf: sessionKey,
     WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards),
-    KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]), Words: words}
+    KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]), Words: words,
+    Own: fiber.Table(64)}
   result.Ok(env)
 end
 

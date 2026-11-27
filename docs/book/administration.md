@@ -27,7 +27,22 @@ event of the history, and nobody disables himself or takes the role from himself
 | `GET /admin/flags`, `PUT /admin/flags/:name` | the feature flags the code declares, with what was set over them; one set for everyone, a share of the users, a tenant or a user, or cleared (served by `flags.Module`: [flags](flags.md)) |
 | `GET /admin/jobs?State=&Kind=`, `POST /admin/jobs/:id/retry`, `POST /admin/jobs/:id/cancel` | the jobs of a state and a kind; a dead one run again; a waiting one made dead (a running one: 409) |
 | `PATCH /admin/data/:kind/:id` | fields of a thing changed (`Fields`, a JSON object), each through the shape of its type; a secret one refused |
-| the live shows `admin.series`, `admin.events`, `admin.logs` | a point of the dashboard each second, the events of the last hour as they come, the log of the process as it goes |
+| the live shows `admin.series`, `admin.events`, `admin.logs` | the points of the dashboard, a second's for 15 minutes, a minute's and ten minutes' for 7 days, the events of the last hour as they come, the log of the process as it goes |
+
+`admin.series` is the history of the process, sampled once whatever the pages that watch it: from the start of the app
+(from the first page that asks, when `AdminPath` is `off`), a point each second, the last 900 kept, a point each
+minute, the last 10,080, and a point every ten minutes, the last 1,008, in memory (about 6.6 MB once full, after 7
+days). A page asks the last `Seconds` (0 to 900, 300 unless it says), the last `Minutes` (0 to 10,080) and the last
+`Tens` (0 to 1,008), none of these two unless it says: `{"Show": "admin.series", "Args": {"Seconds": 900, "Minutes":
+60, "Tens": 1008}}`, 15 minutes by the second, the last hour by the minute and 7 days by ten minutes, is 1,968 points,
+about 410 KB of JSON (all the minutes, 10,980 points, 2.3 MB). It gets them at once, 500 points a frame at most, the
+newest first, then each new point, and the points that leave its window as `Removed`. `Step` tells a second's point
+(1) from a minute's (60) and ten minutes' (600); `At` is the end of its second or the start of its minute or ten
+minutes. A minute's point sums its seconds (requests, 5xx, refusals, sign-ins), and ten minutes' their minutes; each
+keeps its last second's `Failures`, jobs and `Screens`, and its `P50` and `P99` are those of every request of its span,
+within 1 % (DDSketch: Masson, Rim and Lee, *PVLDB* 12(12), 2019; the sketches of the minutes merge into ten minutes'
+with no loss). The other fields: `Screens`, the live screens open on the
+process; `SignedIn` and `FailedSignIns`, the sign-ins that opened a session and those refused.
 
 `GET /admin/events` also takes `Route`, `Since` and `Until` (ISO 8601). `GET /admin/data/:kind` and `GET /admin/kinds`
 never give a field that `app.Kind(..., secret = [...])` names: it comes as `(secret)`, and `Secret` marks it among the

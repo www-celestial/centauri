@@ -116,9 +116,9 @@ Their only differences, and nothing else changes with them:
   probes ask.
 - Each request writes one line of JSON: its number, method, route (the pattern, never the query), status, time in
   milliseconds, address, user; never a body, a cookie or a token.
-- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`), and
-  `http_*` of std/metrics: on `127.0.0.1:APP_ADMIN_PORT/metrics` for Prometheus, and as rows at `GET /admin/metrics`
-  for the super-admin.
+- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`),
+  `centauri_signins_total{result}` (`ok`, a session opened by any way in; `failed`), and `http_*` of std/metrics: on
+  `127.0.0.1:APP_ADMIN_PORT/metrics` for Prometheus, and as rows at `GET /admin/metrics` for the super-admin.
 
 ## 4. Production
 
