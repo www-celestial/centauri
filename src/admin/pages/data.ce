@@ -4,10 +4,12 @@
    "(secret)" and never changed. The app's actions on a thing (pages.Action) are buttons beside it. *)
 use deps/www-celestial/ceres/src/web
 use src/api
+use std/date
 use std/dict
 use std/fiber
 use std/json
 use std/list
+use std/math
 use std/result
 use std/text
 use std/value
@@ -137,7 +139,7 @@ defn Things(p, name, height = missing)
   kinds = Call(api.AdminKinds, {}, p)
   b = browseOf(p, name)
   raw = dict.GetOr("id", "", p.Params)
-  Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, b, idOf(raw), raw == "new", height))
+  Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, b, idOf(raw), raw == "new", height, ks))
 end
 
 defn facetOf(fs)
@@ -164,7 +166,7 @@ defn creatable(kind, p)
   not text.StartsWith("centauri_", kind.Name) and (value.IsMissing(own) or dict.GetOr("Create", true, own) != false)
 end
 
-defn thingsOf(kind, p, b, id, fresh, height)
+defn thingsOf(kind, p, b, id, fresh, height, ks)
   (** The list of a kind's things, its chips and its search, what to do with the rows checked, and the thing opened (or
       a new one) in the sheet of the web's layout, in the details of the dock. *)
   if value.IsMissing(kind)
@@ -186,7 +188,7 @@ defn thingsOf(kind, p, b, id, fresh, height)
     web.Spread(() -> chipsOf(facetOf(OkOf(web.Get(facets))), b, kind), web.Input(b.Search, label = Say("Search"), placeholder = Say("Search the texts"), icon = "search", hint = "/", width = 260)),
     (* what is done to the rows checked, and what it asks and answers: nothing high while there is nothing *)
     web.Stack([web.Bulk(b.Checks, bulkOf(kind, p, b, asking, said), say = t -> Say(t)), Question(asking), () -> said1(web.Get(said))], gap = 0),
-    () -> listPart(kind, p, b, id, fresh, height, dock, web.Get(b.Search), web.Get(b.Chip), facets),
+    () -> listPart(kind, p, b, id, fresh, height, dock, web.Get(b.Search), web.Get(b.Chip), facets, ks),
   ], gap = 10)
 end
 
@@ -200,7 +202,7 @@ defn refresh(b)
   end
 end
 
-defn listPart(kind, p, b, id, fresh, height, dock, search, chip, facets)
+defn listPart(kind, p, b, id, fresh, height, dock, search, chip, facets, ks)
   (** The table of the things a search and a chip find, and the thing opened in the sheet or the details. The facets
       are read only for a chip chosen, so that their reply doesn't read the list again. *)
   site = p.Site
@@ -209,7 +211,7 @@ defn listPart(kind, p, b, id, fresh, height, dock, search, chip, facets)
   l = got.L
   rows = got.Rows
   table = web.Table(rows, columnsOf(kind, p), height = height, label = kind.Name, key = t -> t.Id, open = t -> web.Go("/data/$(kind.Name)/$(t.Id)", p),
-    picked = web.Signal(id), checks = b.Checks)
+    picked = web.Signal(id), checks = b.Checks, title = t -> thingTitle(kind, t))
   if dock
     table = web.Grow(table)
   end
@@ -218,19 +220,67 @@ defn listPart(kind, p, b, id, fresh, height, dock, search, chip, facets)
   thing = () -> (if fresh {Id: missing} else if value.IsMissing(id) missing else list.FindFirst(t -> t.Id == id, web.Get(rows)) end)
   back = () -> web.Go("/data/$(kind.Name)", p)
   if dock
-    web.Set(site.Detail, () -> editor(thing(), kind, p, l, said, asking).View)
+    web.Set(site.Detail, () -> editor(thing(), kind, p, l, said, asking, ks, facets).View)
   else if value.IsSome(id) or fresh
-    title = if fresh Say("New {Kind}", {Kind: text.Lower(kindTitle(kind.Name, p))}) else value.Text(id) end
+    (* the thing's own title (Invoice 1027, Client 1), as soon as its row is read; its id in the kicker, muted *)
+    title = if fresh Say("New {Kind}", {Kind: text.Lower(kindTitle(kind.Name, p))}) else () -> thingTitle(kind, thingOr(thing(), id)) end
     tools = if fresh [] else [web.IconButton("link", Say("Copy the link"), () -> web.CopyLink(p, done = Say("Link copied")))] end
-    foot = [web.Text(Say("Ctrl S save · Esc close"), size = "small", color = gray), web.Spacer(), web.Button(Say("Cancel"), back, style = "ghost"),
-      web.Button(Say("Save"), () -> saveOf(thing(), kind, p, l, said), key = "C-s", style = "primary")]
-    if not fresh and creatable(kind, p)
-      foot = list.Prepend(Confirm(asking, Say("Delete"), () -> deleting([id], kind, p, b, said, back), question = Say("Delete {Kind} {Id}", {Kind: text.Lower(kindTitle(kind.Name, p)), Id: id})), foot)
+    (* Delete at the left when the thing may be deleted, else the keys of the sheet: both don't fit a sheet in French *)
+    foot = [web.Spacer(), web.Button(Say("Cancel"), back, style = "ghost"), web.Button(Say("Save"), () -> saveOf(thing(), kind, p, l, said), key = "C-s", style = "primary")]
+    foot = if not fresh and creatable(kind, p)
+      list.Prepend(Confirm(asking, Say("Delete"), () -> deleting([id], kind, p, b, said, back), question = Say("Delete {Kind} {Id}", {Kind: text.Lower(kindTitle(kind.Name, p)), Id: id})), foot)
+    else
+      list.Prepend(web.Text(Say("Ctrl S save · Esc close"), size = "small", color = gray), foot)
     end
     web.Set(site.Sheet, {Title: title, Kicker: if fresh kindTitle(kind.Name, p) else "$(kindTitle(kind.Name, p)) · $(Say("id {Id}", {Id: id}))" end,
-      Body: () -> editor(thing(), kind, p, l, said, asking).Form, Close: back, Sub: kind.Module, Tools: tools, Foot: foot})
+      Tag: if fresh missing else () -> tagOf(kind, thing(), p) end, Body: () -> editor(thing(), kind, p, l, said, asking, ks, facets).Form, Close: back, Sub: kind.Module,
+      Tools: tools, Foot: foot})
   end
   web.Stack([table, ListState(l, rows)], gap = 6)
+end
+
+thingOr(t, id) = if value.IsSome(t) t else {Id: id} end   (* The thing read, or its id alone while its row isn't. *)
+
+defn Singular(name)
+  (** A kind's name as the name of one thing: its words apart, the first in capitals.
+
+        Singular("invoice") --> "Invoice"
+        Singular("centauri_user") --> "Centauri user" *)
+  words = [w for w in text.Split(" ", text.Replace("_", " ", text.Replace("-", " ", name))) if w != ""]
+  if value.IsEmpty(words)
+    return name
+  end
+  words[1] = Capital(words[1])
+  text.Join(" ", words)
+end
+
+defn thingTitle(kind, t)
+  (** What names a thing: the field its kind names (app.Kind title, else its first text), a number after the kind's
+      name (Invoice 1027), a text as it is (Client 1); its id while it has none. *)
+  tf = dict.Get("Title", kind)
+  v = if value.IsText(tf) and value.IsDict(t) dict.Get(tf, t) else missing end
+  if value.IsNumber(v)
+    return "$(Say(Singular(kind.Name))) $(value.Text(v))"
+  end
+  if value.IsText(v) and text.Trim(v) != ""
+    return v
+  end
+  if value.IsDict(t) and value.IsSome(dict.Get("Id", t)) "#$(t.Id)" else "" end
+end
+
+defn tagOf(kind, t, p)
+  (** The state of a thing beside its title, as its list shows it: its field Status or State, by the app's column when
+      it gives one (a pill), else a pill of its word. *)
+  if not value.IsDict(t)
+    return missing
+  end
+  f = list.FindFirst(x -> x.Name in ["Status", "State"], kind.Fields)
+  if value.IsMissing(f) or value.IsMissing(dict.Get(f.Name, t))
+    return missing
+  end
+  own = dict.Get(kind.Name, p.Site.Kinds)
+  c = if value.IsSome(own) list.FindFirst(x -> x.Field == f.Name and value.IsSome(x.Show), own.Columns) else missing end
+  if value.IsSome(c) c.Show(t[f.Name]) else web.Pill(Capital(Say(value.Text(t[f.Name])))) end
 end
 
 defn bulkOf(kind, p, b, asking, said)
@@ -275,20 +325,22 @@ defn columnsOf(kind, p)
   (** The columns of a kind's table: the app's (pages.Kind), else its id and its first six fields shown, each as its
       type says (a date in the reader's time, an amount with its two decimals, a link the title of what it names). *)
   own = dict.Get(kind.Name, p.Site.Kinds)
-  first = web.Column(Say("Id"), t -> web.Text(t.Id, size = "small", color = gray), sort = "Id", width = 80)
+  first = web.Column(Say("Id"), t -> web.Text(t.Id, size = "small", color = gray), sort = "Id", width = 80, card = false)
+  money = if value.IsSome(own) dict.Get("Currency", own) else missing end
   if value.IsSome(own) and value.Len(own.Columns) > 0
     return list.Concat([first],
-      [web.Column(Say(c.Title), if value.IsSome(c.Show) (t -> c.Show(dict.Get(c.Field, t))) else cellOf(list.FindFirst(f -> f.Name == c.Field, kind.Fields), c.Field) end,
+      [web.Column(Say(c.Title), if value.IsSome(c.Show) (t -> c.Show(dict.Get(c.Field, t))) else cellOf(list.FindFirst(f -> f.Name == c.Field, kind.Fields), c.Field, money) end,
         sort = c.Field, width = c.Width) for c in own.Columns])
   end
   fields = list.Take(6, [f for f in kind.Fields if f.Name != "Search" and dict.Get("Derived", f) != true and f.Secret != true])
-  list.Concat([first], [web.Column(f.Name, cellOf(f, f.Name), sort = f.Name) for f in fields])
+  list.Concat([first], [web.Column(f.Name, cellOf(f, f.Name, money), sort = f.Name) for f in fields])
 end
 
-defn cellOf(f, name)
-  (** How a cell shows a field, by its type: a date in the reader's time, an amount, the title a link names. *)
+defn cellOf(f, name, currency)
+  (** How a cell shows a field, by its type: a date in the reader's time, an amount (in the kind's currency), the
+      title a link names. *)
   t = if value.IsMissing(f) "" else f.Type end
-  if t == "date" (x -> Local(dict.Get(name, x))) else if t == "money" (x -> Money(dict.Get(name, x))) else if t == "link" (x -> linkCell(x, name))
+  if t == "date" (x -> Local(dict.Get(name, x))) else if t == "money" (x -> Money(dict.Get(name, x), currency = currency)) else if t == "link" (x -> linkCell(x, name))
   else (x -> Cell(dict.Get(name, x))) end
 end
 
@@ -334,8 +386,16 @@ defn typed(s, f)
 end
 
 defn inputsOf(thing, kind)
-  (** The inputs of a thing's fields, each its field, its value as shown, and the signal of what is typed. *)
-  [{Field: f, Was: shownValue(dict.Get(f.Name, thing), f), Value: web.Signal(shownValue(dict.Get(f.Name, thing), f))} for f in kind.Fields]
+  (** The inputs of a thing's fields, each its field, its value as shown, the signal of what is typed, and Day for a
+      date of a day (or none yet), which a calendar chooses, as YYYY-MM-DD. *)
+  [inputOf(dict.Get(f.Name, thing), f) for f in kind.Fields]
+end
+
+defn inputOf(v, f)
+  (** The input of a field of a value. *)
+  day = f.Type == "date" and not f.Many and (value.IsMissing(v) or value.IsNumber(v) and math.Floor(v) == v and math.Mod(math.Floor(v), 86400) == 0)
+  shown = if day (if value.IsMissing(v) "" else date.FormatDate(date.FromUnix(v)) end) else shownValue(v, f) end
+  {Field: f, Was: shown, Value: web.Signal(shown), Day: day}
 end
 
 defn saving(thing, kind, p, l, said, inputs)
@@ -380,7 +440,7 @@ defn saveOf(thing, kind, p, l, said)
   end
 end
 
-defn editor(thing, kind, p, l, said, asking)
+defn editor(thing, kind, p, l, said, asking, ks = [], facets = missing)
   (** The fields of the thing chosen, each in an input, saved together: only those changed are sent. {View, Form}:
       View for the details of the dock, as an inspector; Form for the sheet of the web's layout, a label over each
       field. While nothing is chosen, the kind's summary. *)
@@ -409,7 +469,7 @@ defn editor(thing, kind, p, l, said, asking)
     () -> said1(web.Get(said)),
     () -> toasted(web.Get(said), p),
     () -> (if fresh made(web.Get(said), kind, p) else missing end),
-    web.Stack([fieldForm(x, save, said, thing) for x in [list.FindFirst(i -> i.Field.Name == f.Name, inputs) for f in shownFields(kind, p)] if value.IsSome(x)], gap = 10),
+    web.Stack([fieldForm(x, save, said, thing, kind, p, ks, facets) for x in [list.FindFirst(i -> i.Field.Name == f.Name, inputs) for f in shownFields(kind, p)] if value.IsSome(x)], gap = 10),
     if fresh missing else () -> activity(OkOf(web.Get(history))) end,
   ], gap = 10)
   {View: view, Form: form}
@@ -431,17 +491,88 @@ defn toasted(r, p)
   missing
 end
 
-defn fieldForm(x, save, said, thing)
-  (** A field of the sheet: its name over it, its input (or "(secret)"), and what the server found wrong with it at
-      the last save under it. A link shows the thing it names, its title a link to its page, its id muted beside, and
-      its input under, to name another. *)
+defn fieldForm(x, save, said, thing, kind, p, ks, facets)
+  (** A field of the sheet: its name over it, the input its type takes, and what the server found wrong with it at the
+      last save under it. A link is one line, the title of the thing it names as a link to its page, its id muted, and
+      Pick, which opens a choice among the things of its kind; a day a calendar; the field of the kind's state a
+      choice among its values; an amount its currency at its right; a secret "(secret)". *)
   f = x.Field
-  box = if f.Secret == true web.Text(Say("(secret)"), color = gray) else web.Input(x.Value, label = f.Name, width = 100000, onEnter = save, invalid = () -> fieldWrong(said, f.Name) != "") end
-  l = if f.Type == "link" linked(thing, f.Name) else missing end
-  shown = if value.IsSome(l) web.Row([web.Icon("link", size = 14, color = gray), web.Link(if value.IsText(dict.Get("Title", l)) l.Title else value.Text(l.Id) end, addressOf(l)),
-    web.Text("#$(l.Id)", size = "small", color = gray)], gap = 6) else missing end
-  web.Stack([web.Text(f.Name, size = "small", font = "strong", color = gray), shown, box,
+  wrong = () -> fieldWrong(said, f.Name) != ""
+  own = dict.Get(kind.Name, p.Site.Kinds)
+  box = if f.Secret == true web.Text(Say("(secret)"), color = gray)
+    else if f.Type == "link" and not f.Many linkLine(x, thing, kind, p, ks)
+    else if x.Day web.DateInput(x.Value, label = f.Name, width = 100000, say = t -> Say(t), show = d -> Local(Seconds(d)))
+    else if f.Type == "money" web.Input(x.Value, label = f.Name, width = 100000, onEnter = save, invalid = wrong, unit = if value.IsSome(own) dict.Get("Currency", own) else missing end)
+    else () -> choiceOr(x, OkOf(if web.IsSignal(facets) web.Get(facets) else missing end), save, wrong) end
+  web.Stack([web.Text(f.Name, size = "small", font = "strong", color = gray), box,
     () -> (if fieldWrong(said, f.Name) == "" missing else web.Text(fieldWrong(said, f.Name), size = "small", color = red) end)], gap = 4)
+end
+
+defn choiceOr(x, fs, save, wrong)
+  (** The field of the kind's chips, its state (Status, State, else its first field of few values): a choice among its
+      values, the one it holds among them; any other field an input, as a text of few values (a name to bill) may
+      take a new one. *)
+  f = x.Field
+  top = facetOf(fs)
+  facet = if value.IsSome(top) and top.Field == f.Name top else missing end
+  if value.IsMissing(facet)
+    return web.Input(x.Value, label = f.Name, width = 100000, onEnter = save, invalid = wrong)
+  end
+  options = [v.Value for v in facet.Values]
+  now = web.Get(x.Value)
+  if now != "" and not (now in options)
+    options = list.Append(now, options)
+  end
+  web.Select(x.Value, options, o -> o, o -> Capital(Say(o)), name = f.Name, width = 100000)
+end
+
+defn linkLine(x, thing, kind, p, ks)
+  (** A link field in one line: the title of the thing it names (the one chosen, until saved) as a link to its page,
+      its id muted, and Pick, which reads the things of the kind it names and opens a choice among them. *)
+  f = x.Field
+  l = linked(thing, f.Name)
+  target = if value.IsSome(l) l.Kind else if value.IsText(dict.Get("To", f)) f.To else linkedName(f.Name, ks) end
+  tk = list.FindFirst(k -> k.Name == target, ks)
+  asked = web.Signal(missing)
+  change = () -> web.Set(asked, Call(api.AdminData, {kind: target}, p))
+  web.Stack([
+    () -> linkShown(web.Get(x.Value), x, l, target, tk, web.Get(asked), f, change),
+    () -> picker(web.Get(asked), x, tk, f),
+  ], gap = 4)
+end
+
+defn linkedName(field, ks)
+  (** The kind a link field names by its name, as the server reads it: Client a client, Tenant centauri_tenant. *)
+  low = text.Lower(field)
+  if list.Any([k.Name == low for k in ks]) low else "centauri_$low" end
+end
+
+defn titleIn(t, tk)
+  (** The title of a thing of the kind tk, from its row. *)
+  if value.IsMissing(tk) "#$(t.Id)" else thingTitle(tk, t) end
+end
+
+defn linkShown(now, x, l, target, tk, asked, f, change)
+  (** The line of a link: what it names now, a link to its page, its id muted, and Pick. *)
+  rows = if web.IsSignal(asked) and value.IsDict(OkOf(web.Get(asked))) [parsed(r) for r in OkOf(web.Get(asked)).Rows] else [] end
+  id = text.Number(now)
+  chosen = if value.IsNumber(id) list.FindFirst(r -> r.Id == id, rows) else missing end
+  label = if now == "" Say("None")
+    else if now == x.Was and value.IsSome(l) and value.IsText(dict.Get("Title", l)) l.Title
+    else if value.IsSome(chosen) titleIn(chosen, tk) else "#$now" end
+  to = if value.IsNumber(id) addressOf({Id: id, Kind: target}) else missing end
+  web.Row([web.Icon("link", size = 14, color = gray), if value.IsSome(to) web.Link(label, to) else web.Text(label, color = gray) end,
+    if value.IsNumber(id) web.Text("#$now", size = "small", color = gray) else missing end, web.Spacer(),
+    web.Button(Say("Pick"), change, icon = "pencil", style = "ghost")], gap = 6)
+end
+
+defn picker(asked, x, tk, f)
+  (** The choice among the things of a link's kind, once Pick read them: the first page of them, by their titles. *)
+  if not web.IsSignal(asked)
+    return missing
+  end
+  Replied(asked, page -> web.Select(x.Value, [parsed(r) for r in page.Rows], r -> value.Text(r.Id), r -> titleIn(r, tk), name = f.Name, placeholder = Say("Choose"),
+    width = 100000))
 end
 
 defn activity(entries)
