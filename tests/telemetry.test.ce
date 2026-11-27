@@ -256,3 +256,13 @@ defn isPlacedByTheDatabaseOnly()
   v = views(c)[1]
   v.Country == "FR" and value.IsMissing(dict.Get("City", v))
 end
+
+defn isOwnTelemetryRouteKept()
+  (** An app that served POST /telemetry before keeps it: Centauri's takes no route of the app's, and its pages then
+      tell nothing. *)
+  Mine = api.Post("/telemetry", body = check.Record({Text: check.Text(0, 100, optional = true)}), out = check.Record({Mine: check.Bool()}), role = api.Public)
+  own = app.Of([auth.Module(), app.Module("mine", serve = [app.Serve(Mine, (r, x) -> {Mine: true})])], name = "mine")
+  t = apptest.Start(own)!
+  got = post(t, missing, raw = json.Text({Text: "hello"}))
+  got.Status == 201 and json.Parse(got.Body)!.Mine == true and t.Env.Settings.TelemetryClient == "off"
+end

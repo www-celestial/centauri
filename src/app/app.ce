@@ -180,7 +180,13 @@ defn Start(a, s, db, readDb = missing, clock = missing)
       ends = dict.Get("Ends", m)
     end
   end
-  served = [rated(b, whoModule) for b in list.Concat(list.Concat(adminOfApp(), telemetryOf()), a.Served)]
+  (* an app that serves POST /telemetry itself keeps it, and its pages tell nothing: Centauri's never takes its place *)
+  taken = list.Any([b.Endpoint.Method == "POST" and b.Endpoint.Path == api.Telemetry.Path for b in a.Served])
+  if taken and s.TelemetryClient == "on"
+    log.Warn("telemetry of the pages: off, the app serves POST $(api.Telemetry.Path) itself")
+    s.TelemetryClient = "off"
+  end
+  served = [rated(b, whoModule) for b in list.Concat(list.Concat(adminOfApp(), if taken [] else telemetryOf() end), a.Served)]
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
   guards = Guards(s.Csp, text.StartsWith("https://", s.Origin))
   words = wordsOf(a, s)

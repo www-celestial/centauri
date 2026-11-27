@@ -184,7 +184,8 @@ dispatchEvent(new CustomEvent('ceres-consent', { detail: true }))     // or fals
 ```
 
 **What a page sends.** A batch every `APP_TELEMETRY_EVERY` seconds (30) while something happened, and the last one by
-the browser's beacon when the tab is hidden or closes, to `POST /telemetry` of its own app: no other site, so no third
+the browser's beacon when the tab is hidden or closes, to `POST /telemetry` of its own app (an app that served that
+route before keeps it, and its pages then tell nothing): no other site, so no third
 party, no CORS, and the app's limits apply. The page masks its texts (addresses of mail, runs of 6 digits or more,
 tokens, the query and fragment of addresses) and the app masks them again; its routes, names of actions and kinds of
 errors are checked against those the app knows. With `APP_OTEL` on, the actions are spans and the errors lines of log

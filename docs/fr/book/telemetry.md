@@ -206,7 +206,8 @@ dispatchEvent(new CustomEvent('ceres-consent', { detail: true }))     // or fals
 
 **Ce qu'envoie une page.** Un batch toutes les `APP_TELEMETRY_EVERY` secondes (30) tant qu'il s'est passé quelque
 chose, et le dernier par le beacon du navigateur (un envoi qui part même quand la page se ferme) quand l'onglet est
-caché ou se ferme, vers le `POST /telemetry` de sa propre app : aucun autre site, donc aucun tiers, pas de CORS (les
+caché ou se ferme, vers le `POST /telemetry` de sa propre app (une app qui servait déjà cette route la garde, et ses
+pages ne disent alors rien) : aucun autre site, donc aucun tiers, pas de CORS (les
 règles qui laissent une page appeler un autre site), et les limites de l'app s'appliquent. La page masque ses textes
 (les adresses de mail, les suites de 6 chiffres ou plus, les tokens, des jetons secrets qui prouvent un droit, la query
 et le fragment des adresses, la partie après `#`) et l'app les masque à nouveau ; ses routes, ses noms d'actions et ses

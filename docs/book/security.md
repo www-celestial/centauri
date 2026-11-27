@@ -141,6 +141,7 @@ in `tests/otel.test.ce` (otel), `tests/telemetry.test.ce` (telemetry) and Cesia'
 | a collector slow, gone or that asks to wait | a queue of `APP_OTEL_QUEUE` that never makes a request wait: past it, dropped and counted (`otel_dropped_total`); tries again with full jitter or `Retry-After`, five at most; each export in a fiber of its own | std/otel `-- a dead collector never slows a request` (2,000 requests in less than a second), `-- a queue past its size drops, and counts`, `-- the collector asks to wait` |
 | a `traceparent` from the internet, to choose a trace or force its sampling | `APP_OTEL_TRUST=restart`: a new trace, its sampling the app's, a link to the one given; a malformed one ignored; `tracestate` dropped, or kept within 512 bytes and 32 members when trusted | otel `isTraceparentFromOutsideRestarted`; std/otel `-- a traceparent from the internet` |
 | the data of a request not sampled leaving | no span of it is made, its children neither; its info lines stay out; only its own span when it failed or was slow (`APP_OTEL_ALWAYS`) | otel `isNotSampledLeavingNothing`; std/otel `-- not sampled: nothing of it leaves` |
+| a route of the app taken by Centauri's | an app that serves `POST /telemetry` itself keeps it; its pages then tell nothing | telemetry `isOwnTelemetryRouteKept` |
 | the key of a vendor in a log | `APP_OTEL_HEADERS` is a secret: masked in the admin, never logged | app `isAdminOfTheApp` (settings masked) |
 
 What Centauri does not do yet: the third wall, a token of Cepheus per role that reads only its kinds (G16), for roles
