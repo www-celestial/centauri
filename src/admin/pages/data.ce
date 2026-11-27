@@ -122,7 +122,7 @@ end
 defn editor(thing, kind, p, l, said, asking)
   (** The fields of the thing chosen, each in an input, saved together: only those changed are sent. *)
   if value.IsMissing(thing)
-    return web.Text(Say("Choose a thing in the table to see all its fields and change them."), color = gray)
+    return kindSummary(kind, p)
   end
   inputs = [{Field: f, Was: shownValue(dict.Get(f.Name, thing), f), Value: web.Signal(shownValue(dict.Get(f.Name, thing), f))} for f in kind.Fields]
   save = defn ()
@@ -152,6 +152,19 @@ defn editor(thing, kind, p, l, said, asking)
     web.Section("$(kindTitle(kind.Name, p)) $(thing.Id)", [fieldRow(x, save, said) for x in inputs]),
   ])
 end
+
+defn kindSummary(kind, p)
+  (** The details while no thing is chosen: what to do to see one, the kind (its name, the module that declares it)
+      and its fields, each with its type, as the editor of a thing shows them. *)
+  web.Inspector([
+    web.Text(Say("Choose a thing in the table to see all its fields and change them."), color = gray),
+    web.Section(kindTitle(kind.Name, p), [web.Property(Say("Name"), web.Text(kind.Name, font = "code")), web.Property(Say("Module"), web.Text(kind.Module))]),
+    web.Section(Say("Fields"), [web.Property(f.Name, web.Text(typeOf(f), color = gray)) for f in kind.Fields]),
+  ])
+end
+
+(* The type of a field as the details show it: its type, and list, unique or secret when it is. *)
+typeOf(f) = "$(f.Type)$(if f.Many " $(Say("list"))" else "" end)$(if f.Unique " $(Say("unique"))" else "" end)$(if f.Secret == true " $(Say("secret"))" else "" end)"
 
 defn fieldRow(x, save, said)
   (** A field of the editor: its name, its input (or "(secret)"), its type, and what the server found wrong with it
