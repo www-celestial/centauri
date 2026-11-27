@@ -179,9 +179,12 @@ it names (its first text), its id only beside, muted; an amount its two decimals
 writes them (1,280.50 €, 1 280,50 €).
 
 **Change a thing in place.** A click on the thing: it opens in the sheet at the right, at its own address
-(`/admin/#/data/invoice/65616`), each field with its name over its input; a link with the title of the thing it names,
-a link to its page; the app's actions on it; under them its activity, who changed what and when, from the history the
-database keeps. Change a field, then Save (Ctrl+S). A value of the wrong type is refused with its field, and the change
+(`/admin/#/data/invoice/65616`), titled by the thing itself (Invoice 3, Client 1) with its state as a pill beside it,
+its kind and id above, muted; each field with its name over it, in the input its type takes: a link in one line, the
+title of the thing it names as a link to its page, its id muted, and Pick, a choice among the things of its kind; a day
+in a calendar (Ceres's `web.DateInput`); the kind's state (the field of its chips) a choice among its values; an amount
+with its currency (`pages.Kind(currency = "€")`); the app's actions on it; under them its activity, who changed what and
+when, from the history the database keeps. Change a field, then Save (Ctrl+S). A value of the wrong type is refused with its field, and the change
 is in the Audit. The fields an app keeps for itself are left out: a field named Search (the folded copy of its search)
 and those a rule gives; `pages.Kind(fields = [...])` names those the sheet shows instead.
 
@@ -284,8 +287,7 @@ end
 
 pages.Run(title = "Invoices — admin", words = words.Words,
   kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number", width = 80), pages.Column("Client"), pages.Column("Due", width = 110),
-    pages.Column("Status", width = 100), pages.Column("Total", show = v -> pages.Money(v, currency = "€"), width = 110)],
-    actions = [pages.Action("Mark paid", e.AdminPay)])],
+    pages.Column("Status", width = 100), pages.Column("Total", width = 110)], actions = [pages.Action("Mark paid", e.AdminPay)], currency = "€")],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])
 ```
 
@@ -294,10 +296,11 @@ The whole file is `examples/invoices/admin/page.ce` (with `byOffice` and `paying
 
 - `pages.Page(title, path, view)`: a page in the menu after Centauri's; `view(p)` gives its widgets, and calls the
   app's endpoints by `pages.Call(endpoint, args, p)`, or reads one of pages by `pages.Lister`.
-- `pages.Kind(name, title, columns, actions, fields, create)`: how the data browser shows a kind; `pages.Column(field,
+- `pages.Kind(name, title, columns, actions, fields, create, currency)`: how the data browser shows a kind; `pages.Column(field,
   title, show, width)` a column (its first fields when none), shown as its type says without `show` (a date in the
   reader's time, an amount, the title a link names); `fields` the fields the sheet shows (all but those the app keeps
-  for itself when none); `create = false` keeps New away; `pages.Action(label, endpoint, args, confirm)` a button on
+  for itself when none); `create = false` keeps New away; `currency` the currency of its amounts, in their cells and
+  fields; `pages.Action(label, endpoint, args, confirm)` a button on
   the thing chosen and on the rows checked, `{id: its id}` by default, asked first unless `confirm = false`.
 - the tools of every page: `pages.Lister`, `ListRows`, `ListState`, `More`, `Again`, `Chosen` (the row a click chose,
   in the order the table shows), `Confirm` and `Question`, `Replied` (a reply shown, or its problem), `Local` (a time

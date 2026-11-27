@@ -225,10 +225,12 @@ defn listPart(kind, p, b, id, fresh, height, dock, search, chip, facets, ks)
     (* the thing's own title (Invoice 1027, Client 1), as soon as its row is read; its id in the kicker, muted *)
     title = if fresh Say("New {Kind}", {Kind: text.Lower(kindTitle(kind.Name, p))}) else () -> thingTitle(kind, thingOr(thing(), id)) end
     tools = if fresh [] else [web.IconButton("link", Say("Copy the link"), () -> web.CopyLink(p, done = Say("Link copied")))] end
-    foot = [web.Text(Say("Ctrl S save · Esc close"), size = "small", color = gray), web.Spacer(), web.Button(Say("Cancel"), back, style = "ghost"),
-      web.Button(Say("Save"), () -> saveOf(thing(), kind, p, l, said), key = "C-s", style = "primary")]
-    if not fresh and creatable(kind, p)
-      foot = list.Prepend(Confirm(asking, Say("Delete"), () -> deleting([id], kind, p, b, said, back), question = Say("Delete {Kind} {Id}", {Kind: text.Lower(kindTitle(kind.Name, p)), Id: id})), foot)
+    (* Delete at the left when the thing may be deleted, else the keys of the sheet: both don't fit a sheet in French *)
+    foot = [web.Spacer(), web.Button(Say("Cancel"), back, style = "ghost"), web.Button(Say("Save"), () -> saveOf(thing(), kind, p, l, said), key = "C-s", style = "primary")]
+    foot = if not fresh and creatable(kind, p)
+      list.Prepend(Confirm(asking, Say("Delete"), () -> deleting([id], kind, p, b, said, back), question = Say("Delete {Kind} {Id}", {Kind: text.Lower(kindTitle(kind.Name, p)), Id: id})), foot)
+    else
+      list.Prepend(web.Text(Say("Ctrl S save · Esc close"), size = "small", color = gray), foot)
     end
     web.Set(site.Sheet, {Title: title, Kicker: if fresh kindTitle(kind.Name, p) else "$(kindTitle(kind.Name, p)) · $(Say("id {Id}", {Id: id}))" end,
       Tag: if fresh missing else () -> tagOf(kind, thing(), p) end, Body: () -> editor(thing(), kind, p, l, said, asking, ks, facets).Form, Close: back, Sub: kind.Module,

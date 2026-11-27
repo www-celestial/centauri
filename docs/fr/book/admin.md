@@ -200,9 +200,12 @@ touche / atteint de partout. Un lien montre le titre de la chose qu'il nomme (so
 côté, en gris ; un montant ses deux décimales, ses milliers séparés comme la langue les écrit (1,280.50 €, 1 280,50 €).
 
 **Changer une chose sur place.** Un clic sur la chose : elle s'ouvre dans le panneau de droite, à sa propre adresse
-(`/admin/#/data/invoice/65616`), chaque champ avec son nom au-dessus de sa case ; un lien avec le titre de la chose
-qu'il nomme, un lien vers sa page ; les actions de l'app sur elle ; dessous, son activité, qui a changé quoi et quand,
-tirée de l'historique que garde la base. Changez un champ, puis Enregistrer (Ctrl+S). Une valeur du mauvais type est
+(`/admin/#/data/invoice/65616`), titrée par la chose elle-même (Facture 3, Client 1) avec son état en pastille à côté,
+son kind et son id au-dessus, en gris ; chaque champ avec son nom au-dessus, dans la case que prend son type : un lien
+sur une ligne, le titre de la chose qu'il nomme en lien vers sa page, son id en gris, et Choisir, un choix parmi les
+choses de son kind ; un jour dans un calendrier (le `web.DateInput` de Ceres) ; l'état du kind (le champ de ses
+pastilles) un choix parmi ses valeurs ; un montant avec sa devise (`pages.Kind(currency = "€")`) ; les actions de l'app
+sur elle ; dessous, son activité, qui a changé quoi et quand, tirée de l'historique que garde la base. Changez un champ, puis Enregistrer (Ctrl+S). Une valeur du mauvais type est
 refusée avec son champ, et le changement est dans l'Audit. Les champs qu'une app garde pour elle sont laissés de côté :
 un champ nommé Search (la copie repliée de sa recherche) et ceux qu'une règle donne ; `pages.Kind(fields = [...])` nomme
 plutôt ceux que le panneau montre.
@@ -311,8 +314,7 @@ end
 
 pages.Run(title = "Invoices — admin", words = words.Words,
   kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number", width = 80), pages.Column("Client"), pages.Column("Due", width = 110),
-    pages.Column("Status", width = 100), pages.Column("Total", show = v -> pages.Money(v, currency = "€"), width = 110)],
-    actions = [pages.Action("Mark paid", e.AdminPay)])],
+    pages.Column("Status", width = 100), pages.Column("Total", width = 110)], actions = [pages.Action("Mark paid", e.AdminPay)], currency = "€")],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])
 ```
 
@@ -322,11 +324,12 @@ Le fichier entier est `examples/invoices/admin/page.ce` (avec `byOffice` et `pay
 - `pages.Page(title, path, view)` : une page dans le menu, après celles de Centauri. `view(p)` donne ses widgets (les
   éléments de la page : un titre, un tableau, un bouton...) ; il appelle les endpoints de l'app par
   `pages.Call(endpoint, args, p)`, ou en lit un qui rend des pages par `pages.Lister`.
-- `pages.Kind(name, title, columns, actions, fields, create)` : comment le navigateur de données montre un kind.
+- `pages.Kind(name, title, columns, actions, fields, create, currency)` : comment le navigateur de données montre un kind.
   `pages.Column(field, title, show, width)` : une colonne (ses premiers champs quand il n'y en a aucune), montrée
   comme son type le dit sans `show` (une date à l'heure du lecteur, un montant, le titre que nomme un lien).
   `fields` : les champs que montre le panneau (tous sauf ceux que l'app garde pour elle quand il n'y en a aucun) ;
-  `create = false` retire Nouveau. `pages.Action(label, endpoint, args, confirm)` : un bouton sur la chose choisie et
+  `create = false` retire Nouveau ; `currency` : la devise de ses montants, dans leurs cellules et leurs cases.
+  `pages.Action(label, endpoint, args, confirm)` : un bouton sur la chose choisie et
   sur les lignes cochées, avec `{id: its id}` par défaut, confirmé d'abord sauf si `confirm = false`.
 - les outils de chaque page : `pages.Lister`, `ListRows`, `ListState`, `More`, `Again`, `Chosen` (la ligne qu'un clic a
   choisie, dans l'ordre que montre le tableau), `Confirm` et `Question`, `Replied` (une réponse montrée, ou son

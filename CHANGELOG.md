@@ -31,6 +31,9 @@ HTTP/3 and WebTransport, two settings, both off by default: nothing changes unti
   1 280,50 €). Their endpoints: `GET /admin/data/:kind?Where=&Search=`, `GET /admin/data/:kind/facets`,
   `GET /admin/data/:kind/:id/history`, `POST /admin/data/:kind`, `DELETE /admin/data/:kind/:id`; `app.Kind(title = ...)`
   names the field a link shows.
+- The sheet of a thing titled by the thing (Invoice 3) with its state beside it; a link in one line with Pick, a choice
+  among the things of its kind; a day in a calendar; the kind's state a choice among its values; an amount with its
+  currency (`pages.Kind(currency = "€")`); a phone's cards titled by the thing, with their boxes to check.
 - The dashboard watches the platform: a strip of its state, six graphs of its real numbers that share a crosshair, over
   15 minutes, an hour, a day or a week, the log live by level with a pause, the first steps of a fresh app.
 - Settings, Look: the theme, the density of the rows, the layout on the web (pages, or the dock of a desktop tool) and
