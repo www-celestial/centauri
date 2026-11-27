@@ -5,6 +5,7 @@
 use deps/www-celestial/ceres/src/web
 use src/api
 use std/dict
+use std/fiber
 use std/json
 use std/list
 use std/result
@@ -12,18 +13,19 @@ use std/text
 use std/value
 
 defn Data(p)
-  (** The kinds of the app, or the things of one (/data/:kind). *)
+  (** The kinds of the app, or the things of one (/data/:kind), and the thing opened (/data/:kind/:id). *)
   name = dict.Get("kind", p.Params)
   if value.IsSome(name)
-    return web.Stack([web.Row([web.Link(Say("Data"), "/data"), web.Text("›", color = gray), web.Title(kindTitle(name, p))], gap = 8), web.Grow(Things(p, name))], gap = 8)
+    return Things(p, name)
   end
   kinds = Call(api.AdminKinds, {}, p)
   web.Stack([
-    web.Title(Say("Data")),
-    web.Text(Say("Each kind of the database that app.Kind declares, by the module that declares it."), color = gray),
-    Replied(kinds, ks -> web.Stack([web.Row([web.Link(k.Name, "/data/$(k.Name)"), web.Text(k.Module, color = gray),
-      web.Text(text.Join(", ", [if f.Secret == true Say("{Field} (secret)", {Field: f.Name}) else f.Name end for f in k.Fields]), color = gray)], gap = 10) for k in ks], gap = 4)),
-  ], gap = 8)
+    web.Header(Say("Data"), summary = Say("Each kind of the database that app.Kind declares, by the module that declares it.")),
+    Replied(kinds, ks -> web.Table(ks, [web.Column(Say("Kind"), k -> web.Text(kindTitle(k.Name, p), font = "strong"), sort = "Name", width = 200),
+      web.Column(Say("Module"), k -> web.Text(k.Module, color = gray), sort = "Module", width = 140),
+      web.Column(Say("Fields"), k -> text.Join(", ", [if f.Secret == true Say("{Field} (secret)", {Field: f.Name}) else f.Name end for f in k.Fields]))],
+      height = missing, label = Say("Kinds"), key = k -> k.Name, open = k -> web.Go("/data/$(k.Name)", p))),
+  ], gap = 10)
 end
 
 defn kindTitle(name, p)
@@ -40,44 +42,75 @@ defn parsed(row)
   out
 end
 
-defn Things(p, name, height = 380)
-  (** The things of a kind, 50 a page, and the one chosen, to change. *)
-  kinds = Call(api.AdminKinds, {}, p)
+defn listOf(p, name)
+  (** The list of the things of a kind, made once for the pages of the admin and kept: the thing opened and the list
+      again share it, so that opening a thing reads nothing again. *)
+  site = dict.Get("Site", p)
+  kept = if value.IsDict(site) and "Lists" in site peek(site.Lists) else dict.Dict() end
+  got = dict.Get(name, kept)
+  if value.IsSome(got)
+    return got
+  end
   l = Lister(api.AdminData, {kind: name}, p, each = parsed)
-  rows = ListRows(l)
-  web.Stack([
-    web.Grow(Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, l, rows, height))),
-  ], gap = 8)
+  made = {L: l, Rows: ListRows(l)}
+  if value.IsDict(site) and "Lists" in site
+    stash(dict.Put(name, made, kept), site.Lists)
+  end
+  made
+end
+
+defn Things(p, name, height = missing)
+  (** The things of a kind, 50 a page, and the one opened, to change: its address is the kind's and its id
+      (/data/invoice/65691). *)
+  kinds = Call(api.AdminKinds, {}, p)
+  got = listOf(p, name)
+  id = idOf(dict.GetOr("id", "", p.Params))
+  Replied(kinds, ks -> thingsOf(list.FindFirst(k -> k.Name == name, ks), p, got.L, got.Rows, height, id))
 end
 
 defn columnsOf(kind, p)
   (** The columns of a kind's table: the app's (pages.Kind), else its id and its first six fields. *)
   own = dict.Get(kind.Name, p.Site.Kinds)
+  first = web.Column(Say("Id"), t -> web.Text(t.Id, size = "small", color = gray), sort = "Id", width = 80)
   if value.IsSome(own) and value.Len(own.Columns) > 0
-    return list.Concat([web.Column(Say("Id"), t -> t.Id, sort = "Id", width = 80)],
+    return list.Concat([first],
       [web.Column(Say(c.Title), if value.IsMissing(c.Show) (t -> Cell(dict.Get(c.Field, t))) else (t -> c.Show(dict.Get(c.Field, t))) end, sort = c.Field, width = c.Width) for c in own.Columns])
   end
   fields = list.Take(6, [f for f in kind.Fields])
-  list.Concat([web.Column(Say("Id"), t -> t.Id, sort = "Id", width = 80)],
+  list.Concat([first],
     [web.Column(f.Name, if f.Type == "date" (t -> Local(dict.Get(f.Name, t))) else (t -> Cell(dict.Get(f.Name, t))) end, sort = f.Name) for f in fields])
 end
 
-defn thingsOf(kind, p, l, rows, height)
-  (** The table of a kind's things and the editor of the one chosen. *)
+defn thingsOf(kind, p, l, rows, height, id)
+  (** The table of a kind's things and the editor of the one opened: in the sheet of the web's layout, in the details
+      of the dock. *)
   if value.IsMissing(kind)
     return web.Text(Say("There is no such kind."), color = red)
   end
-  table = web.Table(rows, columnsOf(kind, p), height = height, label = kind.Name)
+  site = dict.Get("Site", p)
+  dock = value.IsDict(site) and dict.Get("Layout", site) == "dock"
+  table = web.Table(rows, columnsOf(kind, p), height = height, label = kind.Name, key = t -> t.Id, open = t -> web.Go("/data/$(kind.Name)/$(t.Id)", p),
+    picked = web.Signal(id))
+  if dock
+    table = web.Grow(table)
+  end
   said = web.Signal(missing)
   asking = web.Signal(missing)
-  view = () -> editor(Chosen(table, rows), kind, p, l, said, asking)
-  site = dict.Get("Site", p)
+  thing = () -> (if value.IsMissing(id) missing else list.FindFirst(t -> t.Id == id, web.Get(rows)) end)
+  back = () -> web.Go("/data/$(kind.Name)", p)
   if value.IsDict(site) and "Detail" in site
-    (* in the dock: the thing chosen in the details at the right, the table the height of the page *)
-    web.Set(site.Detail, view)
-    return web.Stack([web.Grow(table), ListState(l, rows)], gap = 4)
+    if dock
+      web.Set(site.Detail, () -> editor(thing(), kind, p, l, said, asking).View)
+    else if value.IsSome(id)
+      web.Set(site.Sheet, {Title: value.Text(id), Kicker: "$(kindTitle(kind.Name, p)) · $(Say("id {Id}", {Id: id}))", Body: () -> editor(thing(), kind, p, l, said, asking).Form, Close: back,
+        Sub: kind.Module, Foot: [web.Text(Say("Ctrl S save · Esc close"), size = "small", color = gray), web.Spacer(), web.Button(Say("Cancel"), back, style = "ghost"),
+          web.Button(Say("Save"), () -> saveOf(thing(), kind, p, l, said), key = "C-s", style = "primary")]})
+    end
   end
-  web.Stack([table, ListState(l, rows), view, Question(asking), () -> said1(web.Get(said))], gap = 8)
+  web.Stack([
+    web.Header(kindTitle(kind.Name, p), summary = () -> Say("{N} things", {N: Num(value.Len(web.Get(rows)))}), actions = [web.Button(Say("Refresh"), () -> Again(l, web.Get(l.Args)), icon = "refresh-cw")]),
+    table, ListState(l, rows), if dock missing else Question(asking) end,
+  ], gap = 10)
 end
 
 defn shownValue(v, f)
@@ -119,38 +152,77 @@ defn typed(s, f)
   if f.Many [one(text.Trim(x)) for x in text.Split(",", t) if text.Trim(x) != ""] else one(t) end
 end
 
+defn inputsOf(thing, kind)
+  (** The inputs of a thing's fields, each its field, its value as shown, and the signal of what is typed. *)
+  [{Field: f, Was: shownValue(dict.Get(f.Name, thing), f), Value: web.Signal(shownValue(dict.Get(f.Name, thing), f))} for f in kind.Fields]
+end
+
+defn saving(thing, kind, p, l, said, inputs)
+  (** Saves the fields of a thing that changed, only those, and reads the list again. *)
+  changes = {}
+  seen = {}
+  for x in inputs
+    if x.Field.Secret != true and web.Get(x.Value) != x.Was
+      changes[x.Field.Name] = typed(web.Get(x.Value), x.Field)
+      seen[x.Field.Name] = dict.Get(x.Field.Name, thing)
+    end
+  end
+  if value.Len(changes) == 0
+    web.Set(said, web.Signal(result.Err({Message: Say("Nothing changed.")})))
+    return missing
+  end
+  web.Set(said, Call(api.AdminEdit, {kind: kind.Name, id: thing.Id, Fields: json.Text(changes)}, p, base = seen, mine = changes))
+  Again(l, web.Get(l.Args))
+end
+
+(* The inputs of the thing opened, kept so that the sheet's Save reaches those the sheet shows. *)
+opened = cell(missing)
+
+defn saveOf(thing, kind, p, l, said)
+  (** The sheet's Save: the fields of the thing opened. *)
+  got = peek(opened)
+  if value.IsSome(thing) and value.IsSome(got) and got.Id == thing.Id
+    saving(thing, kind, p, l, said, got.Inputs)
+  end
+end
+
 defn editor(thing, kind, p, l, said, asking)
-  (** The fields of the thing chosen, each in an input, saved together: only those changed are sent. *)
+  (** The fields of the thing chosen, each in an input, saved together: only those changed are sent. {View, Form}:
+      View for the details of the dock, as an inspector; Form for the sheet of the web's layout, a label over each
+      field. While nothing is chosen, the kind's summary. *)
   if value.IsMissing(thing)
-    return kindSummary(kind, p)
+    s = kindSummary(kind, p)
+    return {View: s, Form: web.Text(Say("This thing isn't among the rows read: More reads the next ones."), color = gray)}
   end
-  inputs = [{Field: f, Was: shownValue(dict.Get(f.Name, thing), f), Value: web.Signal(shownValue(dict.Get(f.Name, thing), f))} for f in kind.Fields]
-  save = defn ()
-    changes = {}
-    seen = {}
-    for x in inputs
-      if x.Field.Secret != true and web.Get(x.Value) != x.Was
-        changes[x.Field.Name] = typed(web.Get(x.Value), x.Field)
-        seen[x.Field.Name] = dict.Get(x.Field.Name, thing)
-      end
-    end
-    if value.Len(changes) == 0
-      web.Set(said, web.Signal(result.Err({Message: Say("Nothing changed.")})))
-      return missing
-    end
-    web.Set(said, Call(api.AdminEdit, {kind: kind.Name, id: thing.Id, Fields: json.Text(changes)}, p, base = seen, mine = changes))
-    Again(l, web.Get(l.Args))
-  end
+  inputs = inputsOf(thing, kind)
+  stash({Id: thing.Id, Inputs: inputs}, opened)
+  save = () -> saving(thing, kind, p, l, said, inputs)
   (* a change not saved holds the way to another page, which asks first *)
   web.Unsaved(p, () -> list.Any([web.Get(x.Value) != x.Was for x in inputs if x.Field.Secret != true]), save = save)
   own = dict.Get(kind.Name, p.Site.Kinds)
   acts = if value.IsMissing(own) [] else own.Actions end
-  web.Inspector([
+  view = web.Inspector([
     web.Row([web.Button(Say("Save"), save, key = "C-s", icon = "save"), web.Row([action(a, thing, p, said, asking, l) for a in acts], gap = 6)], gap = 6),
     Question(asking),
     () -> said1(web.Get(said)),
     web.Section("$(kindTitle(kind.Name, p)) $(thing.Id)", [fieldRow(x, save, said) for x in inputs]),
   ])
+  form = web.Stack([
+    if value.IsEmpty(acts) missing else web.Row([action(a, thing, p, said, asking, l) for a in acts], gap = 6) end,
+    Question(asking),
+    () -> said1(web.Get(said)),
+    web.Stack([fieldForm(x, save, said) for x in inputs], gap = 10),
+  ], gap = 10)
+  {View: view, Form: form}
+end
+
+defn fieldForm(x, save, said)
+  (** A field of the sheet: its name and its type over it, its input (or "(secret)"), and what the server found wrong
+      with it at the last save under it. *)
+  f = x.Field
+  box = if f.Secret == true web.Text(Say("(secret)"), color = gray) else web.Input(x.Value, label = f.Name, width = 100000, onEnter = save, invalid = () -> fieldWrong(said, f.Name) != "") end
+  web.Stack([web.Row([web.Text(f.Name, size = "small", font = "strong", color = gray), web.Text(typeOf(f), size = "small", color = gray)], gap = 6), box,
+    () -> (if fieldWrong(said, f.Name) == "" missing else web.Text(fieldWrong(said, f.Name), size = "small", color = red) end)], gap = 4)
 end
 
 defn kindSummary(kind, p)

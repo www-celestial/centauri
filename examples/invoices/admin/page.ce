@@ -33,7 +33,7 @@ defn unpaid(p)
     web.Column(pages.Say("Bill to"), i -> i.BillTo, sort = "BillTo"), web.Column(pages.Say("Due"), i -> pages.Local(i.Due), sort = "Due", width = 120),
     web.Column(pages.Say("Total"), i -> web.Money(i.Total), sort = "Total", width = 140)], height = 340, label = pages.Say("Unpaid invoices"))
   web.Stack([
-    web.Title(pages.Say("Unpaid invoices")),
+    web.Header(pages.Say("Unpaid invoices")),
     web.Plot(() -> byOffice(web.Get(rows)), height = 200, width = 640, label = pages.Say("Unpaid by office")),
     table,
     pages.ListState(l, rows),

@@ -21,6 +21,7 @@ window.adminPlay = (() => {
     'Keys of programs': 'Clés de programmes', 'Unpaid invoices': 'Factures impayées', 'Requests a second': 'Requêtes par seconde',
     'Invoices': 'Factures', 'User ': 'Utilisateur ', 'Tenant ': 'Tenant ', 'Roles of the invitation': 'Rôles de l’invitation',
     "The changes of this page aren't saved.": 'Les changements de cette page ne sont pas enregistrés.',
+    'Changes not saved. Leave without saving?': 'Changements non enregistrés. Partir sans enregistrer ?', 'All kinds': 'Toutes les sortes',
   }
   const say = s => (document.documentElement.lang.startsWith('fr') && FR[s]) || s
   const wait = ms => new Promise(r => setTimeout(r, ms))
@@ -35,15 +36,25 @@ window.adminPlay = (() => {
   const click = n => { const c = document.querySelector('canvas'), r = c.getBoundingClientRect()
     for (const type of ['pointerdown', 'pointerup'])
       c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + Math.min(10, n.W / 2), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
-  // a node out of the sight of its panel (a page taller than the center of the dock) brought into it as a person does,
-  // by the wheel over a part of the panel that no table takes (the wheel over a table scrolls the table)
+  // a node out of the sight of its panel (a page taller than the center of the dock, or than the window in the layout of
+  // pages) brought into it as a person does, by the wheel over a part of the panel that no table takes (the wheel over
+  // a table that scrolls scrolls the table)
   const pathTo = (n, f, up = []) => { if (!n) return null; const p = [...up, n]; if (f(n)) return p; for (const k of n.Kids || []) { const got = pathTo(k, f, p); if (got) return got } return null }
   const inSight = async n => {
     for (let k = 0; k < 40; k++) {
       const t = await tree(), path = pathTo(t, x => x.Id === n.Id)
       if (!path) return n
       const m = path[path.length - 1], panel = [...path].reverse().find(x => x.Role === 'tabpanel')
-      if (!panel || (m.Y >= panel.Y && m.Y + m.H <= panel.Y + panel.H)) return m
+      if (!panel) {
+        // the layout of pages: the page scrolls under the top bar, a wheel over it (fit tables let it through)
+        if (m.Y >= 50 && m.Y + m.H <= innerHeight - 4) return m
+        const c = document.querySelector('canvas'), r = c.getBoundingClientRect(), side = find(t, x => x.Role === 'navigation')
+        const x = side ? side.X + side.W + 40 : 300
+        c.dispatchEvent(new WheelEvent('wheel', { clientX: r.left + x, clientY: r.top + innerHeight / 2, deltaY: m.Y < 50 ? -100 : 100, bubbles: true, cancelable: true }))
+        await wait(80)
+        continue
+      }
+      if (m.Y >= panel.Y && m.Y + m.H <= panel.Y + panel.H) return m
       const tables = all(panel, x => x.Role === 'table'), x = panel.X + 12
       let y = null
       for (let at = panel.Y + 4; at < panel.Y + panel.H - 4 && y === null; at += 8)
@@ -106,8 +117,10 @@ window.adminPlay = (() => {
     const x1 = Math.min(innerWidth, Math.max(...inside.map(n => n.X + n.W)) + 12)
     return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
   }
-  // a page of the admin, by its row in the outliner of the dock (or a link of the page, as the kinds of the data)
+  // a page of the admin, by its link in the side bar of the pages, or its row in the outliner of the dock (or a link
+  // of the page, as the kinds of the data)
   const go = async name => {
+    if (find(await tree(), x => x.Role === 'navigation')) return press('link', name)
     let n = await node('treeitem', name, 3000)
     if (!n) return press('link', name)
     // the outliner scrolled by the wheel until the row is in sight, then a click on its label, past its triangle
@@ -184,7 +197,7 @@ window.adminPlay = (() => {
     },
     async lang (want) {
       const l = await until(async () => document.documentElement.lang || null, 20000) || ''
-      return line(l === want && (want !== 'fr' || await node('button', 'Sign in', 20000) || await node('treeitem', 'Users', 1000)), `the pages speak ${l}`)
+      return line(l === want && (want !== 'fr' || await node('button', 'Sign in', 20000) || await node('link', 'Users', 1000) || await node('treeitem', 'Users', 1000)), `the pages speak ${l}`)
     },
     async signIn () {
       if (!await node('textbox', 'E-mail', 20000)) return line(false, 'the sign-in shows')
@@ -195,7 +208,7 @@ window.adminPlay = (() => {
       setTimeout(() => press('button', 'Sign in'), 50)
       return line(masked, 'the password only dots in the tree, and a password input; signing in (the page loads again)')
     },
-    async signedIn () { return line(await node('treeitem', 'Users', 20000), 'signed in: the outliner of the admin') },
+    async signedIn () { return line(await node('link', 'Users', 20000) || await node('treeitem', 'Users', 1000), 'signed in: the pages of the admin') },
     async visit (name) {
       await go(name)
       await wait(1500)
@@ -236,7 +249,7 @@ window.adminPlay = (() => {
       const was = location.hash
       await type('BillTo', 'Not saved')
       await go('Dashboard'); await wait(600)
-      const ask = n => n.Role === 'alert' && n.Name === say("The changes of this page aren't saved.")
+      const ask = n => n.Role === 'alert' && (n.Name === say("The changes of this page aren't saved.") || n.Name === say('Changes not saved. Leave without saving?'))
       const asked = !!find(await tree(), ask) && location.hash === was
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await wait(400)
       const stayed = !find(await tree(), ask) && location.hash === was

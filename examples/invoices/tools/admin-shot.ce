@@ -68,7 +68,7 @@ docSteps = [["lang", "en", missing, missing],
   ["visit", "Jobs", missing, missing], ["askRetry", missing, "jobs-retry", {top: ["heading", "Jobs"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
   ["visit", "Webhooks", "webhooks", {top: ["heading", "Webhooks"], height: 330}], ["visit", "Files", "files", {top: ["heading", "Files"], height: 220}],
   ["visit", "Settings", "settings", {top: ["heading", "Settings"], height: 360}],
-  ["visit", "Data", missing, missing], ["edit", "Martin & Co, accounts", "data-edit", {top: ["heading", "Invoices"], bottom: ["textbox", "Total"]}],
+  ["visit", "All kinds", missing, missing], ["edit", "Martin & Co, accounts", "data-edit", {top: ["heading", "Invoices"], bottom: ["textbox", "Total"]}],
   ["visit", "Unpaid", missing, missing], ["askPay", missing, "unpaid-pay", {top: ["heading", "Unpaid invoices"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
   ["visit", "Audit", "audit", {top: ["heading", "Audit trail"], height: 260}],
   ["visit", "Keys", missing, missing], ["askRevoke", missing, "keys-revoke", {top: ["heading", "Keys of programs"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
@@ -116,7 +116,7 @@ defn main()
   evaluated(conn, n, sys.Read("tools/admin-play.js")?)?
   steps = [["lang", lang, "signin"], ["signIn", missing, "signin"], ["signedIn", missing, "dashboard"], ["lang", lang, "dashboard"], ["visit", "Dashboard", "dashboard"], ["visit", "Users", "users"], ["disable", missing, "users-disabled"],
     ["visit", "Tenants", "tenants"], ["visit", "Events", "events"], ["visit", "Log", "log"], ["visit", "Jobs", "jobs"], ["visit", "Webhooks", "webhooks"],
-    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"], ["markup", missing, "data-invoice"], ["guard", missing, "data-guard"], ["history", missing, "history"],
+    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "All kinds", "data"], ["edit", missing, "data-invoice"], ["markup", missing, "data-invoice"], ["guard", missing, "data-guard"], ["history", missing, "history"],
     ["visit", "Unpaid", "unpaid"], ["pay", missing, "unpaid-paid"], ["visit", "Audit", "audit"], ["audit", missing, "audit-after"],
     ["visit", "Keys", "keys"], ["revoke", missing, "keys-revoked"], ["visit", "Flags", "flags"], ["flag", missing, "flags-on"], ["user", missing, "user-factors"], ["signOut", missing, "signout"], ["signedOut", missing, "signout"]]
   if docs != ""

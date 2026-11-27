@@ -27,11 +27,11 @@ defn Users(p)
     web.Column(Say("Id"), u -> u.Id, sort = "Id", width = 80), web.Column(Say("E-mail"), u -> u.Email, sort = "Email"), web.Column(Say("Name"), u -> u.Name, sort = "Name"),
     web.Column(Say("Super"), u -> Cell(u.Super), sort = "Super", width = 60), web.Column(Say("Disabled"), u -> Cell(u.Disabled), sort = "Disabled", width = 80),
     web.Column(Say("Created"), u -> Local(u.Created), sort = "Created", width = 170),
-  ], height = 420, label = Say("Users"))
+  ], height = missing, label = Say("Users"))
   web.Stack([
-    web.Title(Say("Users")),
+    web.Header(Say("Users")),
     web.Row([Label(Say("E-mail starts"), width = 100), web.Input(search, label = Say("E-mail starts with"), width = 220, onEnter = find), Label(Say("Tenant id"), width = 70),
-      web.Input(tenant, label = Say("Tenant id"), width = 110, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8),
+      web.Input(tenant, label = Say("Tenant id"), width = 110, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8, wrap = true),
     table,
     ListState(l, rows),
     () -> userActions(Chosen(table, rows), p, asking, said, l),
@@ -78,7 +78,7 @@ defn User(p)
   said = web.Signal(missing)
   again = () -> web.Set(got, Call(api.AdminUser, {id: id}, p))
   web.Stack([
-    web.Row([web.Link(Say("Users"), "/users"), web.Text("›", color = gray), web.Title(Say("User {Id}", {Id: id}))], gap = 8),
+    web.Header(Say("User {Id}", {Id: id}), actions = [web.Button(Say("Users"), () -> web.Go("/users", p), icon = "arrow-left")]),
     () -> shownReply(web.Get(web.Get(got)), u -> userView(u, p, asking, said, again), "…"),
     Question(asking),
     () -> said1(web.Get(said)),
@@ -171,10 +171,10 @@ defn Tenants(p)
   rows = ListRows(l)
   find = () -> Again(l, {Search: web.Get(search)})
   table = web.Table(rows, [web.Column(Say("Id"), t -> t.Id, sort = "Id", width = 80), web.Column(Say("Name"), t -> t.Name, sort = "Name"),
-    web.Column(Say("Created"), t -> Local(t.Created), sort = "Created", width = 170)], height = 420, label = Say("Tenants"))
+    web.Column(Say("Created"), t -> Local(t.Created), sort = "Created", width = 170)], height = missing, label = Say("Tenants"))
   web.Stack([
-    web.Title(Say("Tenants")),
-    web.Row([Label(Say("Name starts"), width = 100), web.Input(search, label = Say("Name starts with"), width = 220, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8),
+    web.Header(Say("Tenants")),
+    web.Row([Label(Say("Name starts"), width = 100), web.Input(search, label = Say("Name starts with"), width = 220, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8, wrap = true),
     table,
     ListState(l, rows),
     () -> tenantChosen(Chosen(table, rows), p),
@@ -208,15 +208,15 @@ defn Tenant(p)
     web.Set(email, "")
   end
   web.Stack([
-    web.Row([web.Link(Say("Tenants"), "/tenants"), web.Text("›", color = gray), web.Title(Say("Tenant {Id}", {Id: id}))], gap = 8),
+    web.Header(Say("Tenant {Id}", {Id: id}), actions = [web.Button(Say("Tenants"), () -> web.Go("/tenants", p), icon = "arrow-left")]),
     () -> shownReply(web.Get(web.Get(got)), t -> web.Stack([
       web.Row([web.Text(t.Tenant.Name, font = "strong"), web.Text(Say("since {Time}", {Time: Local(t.Tenant.Created)}), color = gray), web.Text(Say("{N} members", {N: Num(value.Len(t.Members))}), color = gray)], gap = 12),
       web.Stack([web.Row([web.Link(m.Email, "/users/$(m.User)"), web.Text(m.Name, color = gray), roleField(id, m, p, said, again)], gap = 8) for m in t.Members], gap = 4),
     ], gap = 8), "…"),
     web.Row([Label(Say("Add user id"), width = 100), web.Input(user, label = Say("User id to add"), width = 110), Label(Say("roles"), width = 40),
-      web.Input(given, label = Say("Roles to give"), width = 200), web.Button(Say("Add"), add)], gap = 8),
+      web.Input(given, label = Say("Roles to give"), width = 200), web.Button(Say("Add"), add)], gap = 8, wrap = true),
     web.Row([Label(Say("Invite e-mail"), width = 100), web.Input(email, label = Say("E-mail to invite"), width = 220), Label(Say("roles"), width = 40),
-      web.Input(invited, label = Say("Roles of the invitation"), width = 160), web.Button(Say("Invite by mail"), invite)], gap = 8),
+      web.Input(invited, label = Say("Roles of the invitation"), width = 160), web.Button(Say("Invite by mail"), invite)], gap = 8, wrap = true),
     () -> said1(web.Get(said)),
   ], gap = 8)
 end
