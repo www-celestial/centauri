@@ -349,6 +349,8 @@ Words = i18n.Of([i18n.Catalog("fr", [
   ["{Ok} ok · {Failed} failed", "{Ok} réussies · {Failed} échouées"],
   ["{N} failed in this range", "{N} échouées sur cette période"],
   ["Live pages", "Pages en direct"],
+  ["Copy the link", "Copier le lien"],
+  ["Link copied", "Lien copié"],
   ["open now", "ouvertes"],
   ["kept up to date", "tenues à jour"],
   ["{N} ms", "{N} ms"],

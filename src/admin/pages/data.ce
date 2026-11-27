@@ -103,7 +103,7 @@ defn thingsOf(kind, p, l, rows, height, id)
       web.Set(site.Detail, () -> editor(thing(), kind, p, l, said, asking).View)
     else if value.IsSome(id)
       web.Set(site.Sheet, {Title: value.Text(id), Kicker: "$(kindTitle(kind.Name, p)) · $(Say("id {Id}", {Id: id}))", Body: () -> editor(thing(), kind, p, l, said, asking).Form, Close: back,
-        Sub: kind.Module, Foot: [web.Text(Say("Ctrl S save · Esc close"), size = "small", color = gray), web.Spacer(), web.Button(Say("Cancel"), back, style = "ghost"),
+        Sub: kind.Module, Tools: [web.IconButton("link", Say("Copy the link"), () -> web.CopyLink(p, done = Say("Link copied")))], Foot: [web.Text(Say("Ctrl S save · Esc close"), size = "small", color = gray), web.Spacer(), web.Button(Say("Cancel"), back, style = "ghost"),
           web.Button(Say("Save"), () -> saveOf(thing(), kind, p, l, said), key = "C-s", style = "primary")]})
     end
   end
