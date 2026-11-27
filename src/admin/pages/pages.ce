@@ -234,7 +234,7 @@ end
 defn liveLine(p, points)
   (** The connection at the foot of the side bar, and the time of the requests of the last second. *)
   last = if value.IsEmpty(points) missing else list.Reverse(list.SortBy(x -> x.At, points))[1] end
-  web.Row([web.Connection(p, say = t -> Say(t)), if value.IsMissing(last) missing else web.Text(Say("· p50 {N} ms", {N: Num(math.Round(last.P50 * 10) / 10)}), size = "small", color = gray) end], gap = 6)
+  web.Row([web.Connection(p, say = t -> Say(t)), if value.IsMissing(last) missing else web.Text(Say("· p50 {N} ms", {N: Num(tenth(last.P50))}), size = "small", color = gray) end], gap = 6)
 end
 
 defn meLine(site)

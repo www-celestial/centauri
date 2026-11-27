@@ -25,13 +25,15 @@ defn Dashboard(p)
   cross = web.Signal(missing)
   level = web.Signal("all")
   paused = web.Signal(missing)
-  shown = web.Memo(() -> inRange(web.Get(points), web.Get(range)))
+  (* the points sorted once a change, then the columns of the range: the graphs stay mounted and only redraw *)
+  all = web.Memo(() -> sorted(web.Get(points)))
+  cols = web.Memo(() -> seriesOf(inRange(web.Get(all), web.Get(range))))
   web.Stack([
     web.Header(Say("Dashboard"), summary = Say("Platform health, live"),
       actions = [web.Chips(range, [web.Chip(r[1], Say(r[2])) for r in ranges], label = Say("Range"))]),
     () -> firstSteps(OkOf(web.Get(stats)), p),
-    () -> strip(web.Get(points), OkOf(web.Get(stats)), p),
-    () -> board(web.Get(shown), cross),
+    () -> strip(web.Get(all), OkOf(web.Get(stats)), p, web.Get(cols).N < 2),
+    board(cols, cross),
     logCard(logs, level, paused),
   ], gap = 10)
 end
@@ -43,12 +45,20 @@ end
 
 stepOf(x) = dict.GetOr("Step", 1, x)   (* A point's step: 1 for a second's, 60 for a minute's. *)
 
+defn seriesOf(ps)
+  (** The points of a range as columns, one list a field, with their count, their step and their times. *)
+  col = f -> [dict.GetOr(f, 0, x) for x in ps]
+  {N: value.Len(ps), Step: if value.IsEmpty(ps) 1 else stepOf(ps[1]) end, At: [x.At for x in ps], Requests: col("Requests"), Errors: col("Errors"),
+    P50: [tenth(v) for v in col("P50")], P99: [tenth(v) for v in col("P99")], Refused: [x.Origin + x.Limit + x.Signin + x.Role for x in ps], Origin: col("Origin"),
+    Limit: col("Limit"), Signin: col("Signin"), Role: col("Role"), SignedIn: col("SignedIn"), FailedSignIns: col("FailedSignIns"), Screens: col("Screens")}
+end
+
 defn inRange(points, key)
   (** The points of a range, by their time: the seconds for 15 minutes, the minutes for an hour, the ten minutes for a
       day and a week, as the server keeps them (else the finest it has), in at most 400 points, each a sum (or the
       last) of those it holds. *)
   r = list.FindFirst(x -> x[1] == key, ranges)
-  all = sorted(points)
+  all = points
   if value.IsEmpty(all)
     return []
   end
@@ -93,10 +103,10 @@ defn clock(at, step)
   if step >= 600 "$day $(text.Slice(1, list.Min(5, value.Len(hm)), hm))" else if step >= 60 text.Slice(1, list.Min(5, value.Len(hm)), hm) else hm end
 end
 
-defn strip(points, s, p)
+defn strip(points, s, p, waiting = false)
   (** The state of the platform in a line: live or not, the requests of the last minute, the times of the last second,
       the errors now, the jobs that failed, the sessions, how long the app has run. *)
-  ps = [x for x in sorted(points) if stepOf(x) == 1]
+  ps = [x for x in points if stepOf(x) == 1]
   last = if value.IsEmpty(ps) missing else ps[value.Len(ps)] end
   minute = list.Skip(list.Max([0, value.Len(ps) - 60]), ps)
   live = web.Row([web.Connection(p, say = t -> Say(t))], gap = 6)
@@ -111,10 +121,17 @@ defn strip(points, s, p)
     web.Link(Say("{N} jobs failed", {N: Num(last.Dead)}), "/jobs"),
     if value.IsDict(s) stat(Num(s.Sessions), Say("sessions"), missing) else missing end,
     () -> upCell(web.Get(dict.Get("App", p.Site)))]
+  if waiting
+    return web.Stack([web.Strip(cells), web.Text(Say("Waiting for the first seconds…"), color = gray)], gap = 10)
+  end
   web.Strip(cells)
 end
 
-tenth(x) = math.Round(x * 10) / 10   (* A time to a tenth of a millisecond. *)
+defn tenth(x)
+  (** A time to a tenth of a millisecond, a whole number when it is one. *)
+  r = math.Div(math.Round(x * 10), 1)
+  if math.Mod(r, 10) == 0 math.Div(r, 10) else r / 10 end
+end
 
 defn upCell(r)
   (** How long the app has run, for the strip. *)
@@ -122,34 +139,24 @@ defn upCell(r)
   if value.IsMissing(v) web.Text("…", color = gray) else web.Row([web.Text(Say("up"), color = gray), web.Text(Span(v.Uptime), font = "strong")], gap = 5) end
 end
 
-defn board(ps, cross)
-  (** The six graphs, three a row (two on a narrower page), sharing the crosshair. *)
-  if value.Len(ps) < 2
-    return web.Text(Say("Waiting for the first seconds…"), color = gray)
-  end
-  step = stepOf(ps[1])
-  per = if step == 1 "/s" else if step == 60 "/min" else if step == 600 Say("/10 min") else "/$(Span(step))" end
-  col = f -> [dict.GetOr(f, 0, x) for x in ps]
-  at = i -> clock(ps[i].At, step)
-  pick = (xs, i) -> if value.IsMissing(i) xs[value.Len(xs)] else xs[i] end
-  req = col("Requests")
-  err = col("Errors")
-  p50 = [tenth(v) for v in col("P50")]
-  p99 = [tenth(v) for v in col("P99")]
-  refused = [x.Origin + x.Limit + x.Signin + x.Role for x in ps]
-  ok = col("SignedIn")
-  failed = col("FailedSignIns")
-  screens = col("Screens")
-  m = (title, figure, series, unit, note, style) -> web.Grow(web.Metric(title, figure, () -> series, unit = unit, note = note, at = at, cross = cross, style = style))
+defn board(cols, cross)
+  (** The six graphs, three a row, sharing the crosshair, made once: each reads the columns of the range as they
+      change and only redraws. *)
+  c = () -> web.Get(cols)
+  per = () -> (if c().Step == 1 "/s" else if c().Step == 60 "/min" else if c().Step == 600 Say("/10 min") else "/$(Span(c().Step))" end)
+  at = i -> clock(c().At[i], c().Step)
+  pick = (f, i) -> (if c().N == 0 0 else if value.IsMissing(i) c()[f][c().N] else c()[f][i] end)
+  m = (title, figure, series, unit, note, style) -> web.Grow(web.Metric(title, figure, series, unit = unit, note = note, at = at, cross = cross, style = style))
   web.Stack([
-    web.Row([m(Say("Requests"), i -> Num(pick(req, i)), [{Values: req, Tone: "S1"}], per, Say("peak {N}", {N: Num(list.Max(req))}), "area"),
-      m(Say("Response time"), i -> "$(Num(pick(p50, i))) / $(Num(pick(p99, i)))", [{Values: p50, Tone: "S1"}, {Values: p99, Tone: "S4"}], "ms", "p50 / p99", "line"),
-      m(Say("Errors"), i -> Num(pick(err, i)), [{Values: err, Tone: "Danger"}], per, Say("{N} in this range", {N: Num(list.Sum(err))}), "bars")], gap = 8, align = "start"),
-    web.Row([m(Say("Sign-ins"), i -> Say("{Ok} ok · {Failed} failed", {Ok: Num(pick(ok, i)), Failed: Num(pick(failed, i))}), [{Values: ok, Tone: "Ok"}, {Values: failed, Tone: "Danger"}],
-        per, Say("{N} failed in this range", {N: Num(list.Sum(failed))}), "bars"),
-      m(Say("Live pages"), i -> Num(pick(screens, i)), [{Values: screens, Tone: "S1"}], Say("open now"), Say("kept up to date"), "area"),
-      m(Say("Refused at the door"), i -> Num(pick(refused, i)), [{Values: col("Origin"), Tone: "S2"}, {Values: col("Limit"), Tone: "S4"}, {Values: col("Signin"), Tone: "S5"},
-        {Values: col("Role"), Tone: "S3"}], per, Say("site, limit, sign-in, role"), "bars")], gap = 8, align = "start"),
+    web.Row([m(Say("Requests"), i -> Num(pick("Requests", i)), () -> [{Values: c().Requests, Tone: "S1"}], per, () -> Say("peak {N}", {N: Num(list.Max(list.Append(0, c().Requests)))}), "area"),
+      m(Say("Response time"), i -> "$(Num(pick("P50", i))) / $(Num(pick("P99", i)))", () -> [{Values: c().P50, Tone: "S1"}, {Values: c().P99, Tone: "S4"}], "ms", "p50 / p99", "line"),
+      m(Say("Errors"), i -> Num(pick("Errors", i)), () -> [{Values: c().Errors, Tone: "Danger"}], per, () -> Say("{N} in this range", {N: Num(list.Sum(c().Errors))}), "bars")],
+      gap = 8, align = "start"),
+    web.Row([m(Say("Sign-ins"), i -> Say("{Ok} ok · {Failed} failed", {Ok: Num(pick("SignedIn", i)), Failed: Num(pick("FailedSignIns", i))}),
+        () -> [{Values: c().SignedIn, Tone: "Ok"}, {Values: c().FailedSignIns, Tone: "Danger"}], per, () -> Say("{N} failed in this range", {N: Num(list.Sum(c().FailedSignIns))}), "bars"),
+      m(Say("Live pages"), i -> Num(pick("Screens", i)), () -> [{Values: c().Screens, Tone: "S1"}], Say("open now"), Say("kept up to date"), "area"),
+      m(Say("Refused at the door"), i -> Num(pick("Refused", i)), () -> [{Values: c().Origin, Tone: "S2"}, {Values: c().Limit, Tone: "S4"}, {Values: c().Signin, Tone: "S5"},
+        {Values: c().Role, Tone: "S3"}], per, Say("site, limit, sign-in, role"), "bars")], gap = 8, align = "start"),
   ], gap = 8)
 end
 
