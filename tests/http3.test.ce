@@ -48,6 +48,13 @@ defn isRefusedWithoutTls()
   said(plain, "APP_HTTP3:") and said(alone, "APP_WEBTRANSPORT:") and said(apart, "APP_WEBTRANSPORT:")
 end
 
+defn isCongestionASetting()
+  (** BBR by default, CUBIC or Reno when asked, nothing else. *)
+  given(v) = app.Read(App.Fields, {Profile: "test", Http3: "on", Http3Congestion: v, Cert: "c.pem", Key: "k.pem"}, defaults = App.Defaults)
+  plain = app.Read(App.Fields, {Profile: "test", Http3: "on", Cert: "c.pem", Key: "k.pem"}, defaults = App.Defaults)
+  plain.Value.Http3Congestion == "bbr" and given("cubic").Value.Http3Congestion == "cubic" and result.IsErr(given("vegas"))
+end
+
 defn isServedBothWays()
   one = served({Http3: "on"})
   secure = tls.Client(tls.Open()!, ca = one.Ca)

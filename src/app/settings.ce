@@ -27,6 +27,7 @@ Core = {
   Key: check.Text(1, 1000, optional = true),
   Http3: check.OneOf(["off", "on"], optional = true, default = "off"),
   Http3Port: check.Int(0, 65535, optional = true, default = 0),
+  Http3Congestion: check.OneOf(["bbr", "cubic", "reno"], optional = true, default = "bbr"),
   WebTransport: check.OneOf(["off", "on"], optional = true, default = "off"),
   Cors: check.Text(0, 4000, optional = true, default = ""),
   TrustProxy: check.Bool(optional = true, default = false),
