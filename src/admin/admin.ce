@@ -2,8 +2,9 @@
     setting AdminPath (/admin by default, off for none), that talk to the app by the endpoints of the administration
     (api.AdminOfApp, api.AdminOfAccounts, the jobs') through the same door as any client, over the live screen of the
     page: the session of its cookie, the role super checked at each call, the limits, the shapes, the log. The module
-    adds the live shows of the pages (api.AdminShows): the dashboard's points each second, the events as they are
-    written, the log as it goes. No endpoint of its own, no other way in. An app lists Module() among its modules, after
+    adds the live shows of the pages (api.AdminShows): the dashboard's points, a second's for 15 minutes and a
+    minute's for 7 days, sampled once for the whole process from the start of the app; the events as they are written,
+    the log as it goes. No endpoint of its own, no other way in. An app lists Module() among its modules, after
     auth's. The pages are built by the app, from its own entry, so that it adds its pages, columns and actions
     (package src/admin/pages): cesia build --target wasm admin/page.ce writes admin/page.wasm and its loader beside
     it, which Module(folder = "admin") serves. The book's chapter The admin shows both. *)
@@ -34,8 +35,17 @@ backs = {dark: "#151515", light: "#d4d4d4", system: "#151515"}
 
 off(env) = env.Settings.AdminPath == "off"   (* Are the pages turned off? *)
 
-(** The points of the dashboard a screen keeps: five minutes, one a second. *)
+(** The points of a second a screen keeps unless it asks for more: five minutes. *)
 Kept = 300
+
+(** The points of a second the sampler keeps: fifteen minutes. *)
+Seconds = 900
+
+(** The points of a minute the sampler keeps: seven days. *)
+Minutes = 10080
+
+(** The points of a frame at most, while a screen gets those the sampler kept. *)
+Chunk = 500
 
 (** The lines of the log a screen keeps. *)
 KeptLines = 500
@@ -45,7 +55,8 @@ defn Module(folder = "admin", entry = "page", title = missing)
       beside them, from cesia build --target wasm folder/entry.ce), served at AdminPath with its index.html; title
       names the browser's tab, the app's name by default. *)
   app.Module("admin", settings = Settings, serve = [app.Live(api.AdminSeries, series), app.Live(api.AdminTail, tail),
-    app.Live(api.AdminLogTail, logTail)], pages = env -> pagesOf(env, folder, entry, title), verify = env -> built(env, folder, entry))
+    app.Live(api.AdminLogTail, logTail)], pages = env -> pagesOf(env, folder, entry, title), verify = env -> built(env, folder, entry),
+    start = started)
 end
 
 defn built(env, folder, entry)
@@ -73,12 +84,12 @@ defn pagesOf(env, folder, entry, title)
   {Path: path, Folder: folder, Files: {"index.html": index, "admin.css": "html, body { margin: 0; height: 100%; background: $(backs[theme]); }\n$light#page { width: 100%; height: 100%; }\n"}}
 end
 
-(* ---- The dashboard: a point each second. *)
+(* ---- The dashboard: a point each second, and each minute, sampled once for the process. *)
 
 defn totals(raw)
-  (** The counters of std/metrics the dashboard reads, summed over their labels: requests, those of status 5xx, and
-      the refusals by reason. *)
-  out = {Requests: 0, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0}
+  (** The counters of std/metrics the dashboard reads, summed over their labels: requests, those of status 5xx, the
+      refusals by reason, and the sign-ins that opened a session and those refused. *)
+  out = {Requests: 0, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0, SignedIn: 0, FailedSignIns: 0}
   for line in text.Lines(raw)
     if text.StartsWith("centauri_", line)
       cut = text.Split(" ", line)
@@ -95,6 +106,12 @@ defn totals(raw)
             out[reason] += v
           end
         end
+      else if text.StartsWith("centauri_signins_total", line)
+        if text.Contains("result=\"ok\"", line)
+          out.SignedIn += v
+        else if text.Contains("result=\"failed\"", line)
+          out.FailedSignIns += v
+        end
       end
     end
   end
@@ -105,6 +122,54 @@ defn quantile(sorted, q)
   (** The q-quantile of sorted numbers, the nearest rank (Hyndman and Fan's definition 1): 0 for none. *)
   n = value.Len(sorted)
   if n == 0 0 else sorted[list.Max([1, math.Ceil(q * n)])] end
+end
+
+(* The sketch of the times of a minute's requests, DDSketch (Masson, Rim and Lee, PVLDB 12(12), 2019): a time x, in
+   milliseconds, counts in the bucket k = ceil(log x / log gamma), of the times in (gamma^(k-1), gamma^k], whose value
+   2 gamma^k / (gamma + 1) is within alpha of each of them. A quantile of the minute is then within alpha of the exact
+   one, its rank exact, whatever the number of times, in at most 1,383 buckets: the times are clamped to [0.001, 1e9]. *)
+alpha = 0.01
+gamma = (1 + alpha) / (1 - alpha)
+lnGamma = math.Log(gamma)
+
+defn sketched(sk, ms)
+  (** A sketch with the times ms counted in. Sorted, as a second's are, a run of times of one bucket costs one look up. *)
+  k = 0
+  low = 0
+  top = -1
+  n = 0
+  for x in ms
+    if x > top or x <= low
+      if n > 0
+        sk[k] = dict.GetOr(k, 0, sk) + n
+      end
+      k = math.Ceil(math.Log(if x < 0.001 0.001 else if x > 1e9 1e9 else x end) / lnGamma)
+      low = if k <= (-345) (-1e300) else gamma ^ (k - 1) end
+      top = if k >= 1037 1e300 else gamma ^ k end
+      n = 0
+    end
+    n += 1
+  end
+  if n > 0
+    sk[k] = dict.GetOr(k, 0, sk) + n
+  end
+  sk
+end
+
+defn sketchQuantile(sk, n, q)
+  (** The q-quantile of the n times a sketch counts, at the rank quantile takes, to the microsecond: 0 for none. *)
+  if n == 0
+    return 0
+  end
+  rank = list.Max([1, math.Ceil(q * n)])
+  seen = 0
+  for k in list.Sort(dict.Keys(sk))
+    seen += sk[k]
+    if seen >= rank
+      return math.Round(2 * gamma ^ k / (gamma + 1) * 1000) / 1000
+    end
+  end
+  0
 end
 
 defn jobCounts(env)
@@ -123,49 +188,218 @@ defn jobCounts(env)
   out
 end
 
+defn second(at, now, before, ms, failures, jobs, screens)
+  (** The point of a second that ends at at: the counters' growth since before, the times ms of its requests, sorted,
+      the failed sign-ins of the last minute, the jobs, the live screens open. *)
+  {At: at, Requests: now.Requests - before.Requests, Errors: now.Errors - before.Errors, Origin: now.Origin - before.Origin,
+    Limit: now.Limit - before.Limit, Signin: now.Signin - before.Signin, Role: now.Role - before.Role, Failures: failures,
+    P50: quantile(ms, 0.5), P99: quantile(ms, 0.99), Ready: jobs.Ready, Running: jobs.Running, Dead: jobs.Dead, Step: 1, Screens: screens,
+    SignedIn: now.SignedIn - before.SignedIn, FailedSignIns: now.FailedSignIns - before.FailedSignIns}
+end
+
+(* The fields of a minute's point that sum those of its seconds; the others are its last second's. *)
+summed = ["Requests", "Errors", "Origin", "Limit", "Signin", "Role", "SignedIn", "FailedSignIns"]
+
+(** The minute that holds a time: its first second. *)
+minuteOf(at) = math.Floor(at / 60) * 60
+
+(** A minute begun, of the second at: nothing counted yet. *)
+opened(at) = {At: minuteOf(at), Requests: 0, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0, SignedIn: 0, FailedSignIns: 0, Last: missing,
+  Sketch: dict.Dict(), Times: 0}
+
+defn folded(m, p, ms)
+  (** A minute with a point of its seconds counted in, and the times ms of its requests. *)
+  for f in summed
+    m[f] += p[f]
+  end
+  m.Last = p
+  m.Sketch = sketched(m.Sketch, ms)
+  m.Times += value.Len(ms)
+  m
+end
+
+defn closed(m)
+  (** The point of a minute: the sums of its seconds, its last second's Failures, jobs and screens, and the quantiles of
+      the times of all its requests. *)
+  l = m.Last
+  {At: m.At, Requests: m.Requests, Errors: m.Errors, Origin: m.Origin, Limit: m.Limit, Signin: m.Signin, Role: m.Role, Failures: l.Failures,
+    P50: sketchQuantile(m.Sketch, m.Times, 0.5), P99: sketchQuantile(m.Sketch, m.Times, 0.99), Ready: l.Ready, Running: l.Running, Dead: l.Dead,
+    Step: 60, Screens: l.Screens, SignedIn: m.SignedIn, FailedSignIns: m.FailedSignIns}
+end
+
+(** The points of a ring with p after them, the most last ones. *)
+ring(p, xs, most) = list.Append(p, if value.Len(xs) < most xs else list.Skip(value.Len(xs) - most + 1, xs) end)
+
+(** The n last points of a ring. *)
+last(n, xs) = list.Skip(list.Max([0, value.Len(xs) - n]), xs)
+
+(** The board of a process's sampler: its rings, the seconds' and the minutes', the number of points each made since
+    the start, and Next, a channel closed when the next board is written. *)
+board(env) = fiber.Recall("admin.series", 0, env.Own)
+
+defn sampler(env)
+  (** The board of the sampler of this process, the sampler started if it was not: one for the whole process, whatever
+      the screens that watch it. *)
+  b = board(env)
+  if value.IsMissing(b)
+    (* no wait between the Recall and the Remember: no other fiber runs in between, so two screens never start two *)
+    b = {Seconds: [], SecondN: 0, Minutes: [], MinuteN: 0, Next: fiber.Channel()}
+    fiber.Remember("admin.series", b, 1e300, env.Own)
+    fiber.Spawn(() -> supervising(env))
+  end
+  b
+end
+
+defn started(env)
+  (** At the start of the app, its sampler, so that the dashboard has the hours before it was opened; with the pages
+      off, at the first screen that asks for the points. *)
+  if not off(env)
+    _ = sampler(env)
+  end
+end
+
+timedOut(got) = result.IsErr(got) and got.Error.Kind == "timeout"   (* Did a wait end by its time? *)
+
+defn supervising(env)
+  (** Runs the sampler for as long as the process runs (it ends with it: no stop to wait for); a bug that stops it is
+      logged, and it starts again 10 seconds later, from the points it kept. *)
+  while true
+    done = fiber.Wait(fiber.Spawn(() -> sampling(env)))
+    if result.IsOk(done)
+      return missing
+    end
+    why = if value.IsDict(done.Error) dict.GetOr("Message", "", done.Error) else value.Text(done.Error) end
+    log.Error("the sampler of the dashboard stopped: it starts again in 10 seconds", {Error: why})
+    sys.Sleep(10)
+  end
+end
+
+defn sampling(env)
+  (** Each second, a tick of the sampler. *)
+  st = begun(env)
+  next = sys.Now() + 1
+  while true
+    sys.Sleep(list.Max([0, next - sys.Now()]))
+    (* a second each: a process that was stopped (a machine asleep) takes up its seconds from now, in no burst *)
+    next = if next + 1 > sys.Now() next + 1 else sys.Now() + 1 end
+    st = ticked(env, st)
+  end
+end
+
+defn begun(env)
+  (** What the sampler of a process holds from one second to the next, as it starts: the board it wrote last, the
+      counters and the number of the last line of the log read, the jobs, the minute going on, and its ticks. *)
+  {Board: board(env), Before: totals(metrics.Text()), Seq: app.Times(0, env.State).Seq, Jobs: {Ready: 0, Running: 0, Dead: 0}, Minute: missing, Tick: 0}
+end
+
+defn ticked(env, st)
+  (** A second of the sampler: a point of this process, the counters' growth since the last one and the times of the
+      requests the log kept since; at the first second of a minute, the point of the minute before. The new board is
+      written, and the Next of the one before closed, so that the screens that wait for it wake, all at once. *)
+  st.Tick += 1
+  times = app.Times(st.Seq, env.State)
+  (* every request writes a line: while none came, no counter moved, and the metrics are not read *)
+  now = if times.Seq == st.Seq st.Before else totals(metrics.Text()) end
+  st.Seq = times.Seq
+  ms = list.Sort(times.Ms)
+  if math.Mod(st.Tick, 5) == 1
+    (* the jobs counted at the first second, then every 5: the start of the app asks nothing of the database *)
+    st.Jobs = jobCounts(env)
+  end
+  p = second(math.Floor(env.Now()), now, st.Before, ms, app.Failures(env.State), st.Jobs, app.Screens(env.State))
+  st.Before = now
+  t = advanced(st.Board, st.Minute, p, ms, fiber.Channel())
+  fiber.Remember("admin.series", t.Board, 1e300, env.Own)
+  fiber.Close(st.Board.Next)
+  st.Board = t.Board
+  st.Minute = t.Minute
+  st
+end
+
+defn advanced(b, minute, p, ms, next)
+  (** The board b after the point p of a second, ms the times of its requests, and minute the minute it counts in:
+      {Board, Minute}, the new board's Next next. The point of a minute goes in the minutes' ring at the first second
+      of another. *)
+  mins = b.Minutes
+  minN = b.MinuteN
+  if value.IsSome(minute) and minuteOf(p.At) != minute.At
+    mins = ring(closed(minute), mins, Minutes)
+    minN += 1
+    minute = missing
+  end
+  {Board: {Seconds: ring(p, b.Seconds, Seconds), SecondN: b.SecondN + 1, Minutes: mins, MinuteN: minN, Next: next},
+    Minute: folded(if value.IsMissing(minute) opened(p.At) else minute end, p, ms)}
+end
+
+defn moved(a, an, b, bn, w)
+  (** The points of a ring that a screen showing its last w gets, from the state a of it, its an-th point last, to the
+      state b, its bn-th point last: {Added, Removed}, Removed the very rows it had. *)
+  la = value.Len(a)
+  lb = value.Len(b)
+  va = list.Min([w, la])
+  vb = list.Min([w, lb])
+  gone = list.Max([0, list.Min([va, (bn - vb + 1) - (an - va + 1)])])
+  came = list.Max([0, list.Min([vb, bn - an])])
+  (* the rows themselves, by their places: a screen costs what changed, not its window *)
+  {Added: [b[k] for k in (lb - came + 1)..lb], Removed: [a[k] for k in (la - va + 1)..(la - va + gone)]}
+end
+
+defn changes(old, new, want)
+  (** What a screen that shows the last want.Seconds points of a second and want.Minutes of a minute of the board old
+      gets for the board new. *)
+  s = moved(old.Seconds, old.SecondN, new.Seconds, new.SecondN, want.Seconds)
+  m = moved(old.Minutes, old.MinuteN, new.Minutes, new.MinuteN, want.Minutes)
+  {Added: list.Concat(s.Added, m.Added), Removed: list.Concat(s.Removed, m.Removed)}
+end
+
+ended(s) = not timedOut(fiber.Receive(s.Ended, timeout = 0))   (* Has the screen ended? *)
+
 defn series(s, args)
-  (** The show admin.series: a fiber that samples this process each second until the screen ends. *)
-  out = fiber.Channel(size = Kept * 2)
-  fiber.Spawn(() -> sampling(s, out))
+  (** The show admin.series: the points of the sampler of the process (started here if it was not) that the screen
+      asks, then what changes at each new board, until the screen ends. Each screen costs a fiber that sleeps between
+      two boards, and nothing of the sampling. *)
+  b = sampler(s.Env)
+  out = fiber.Channel(size = 64)
+  fiber.Spawn(() -> relaying(s, args, b, out))
+  (* a screen that ended while its page read nothing never leaves its relay waiting on a channel full: emptied *)
+  fiber.Spawn(defn ()
+    _ = fiber.Receive(s.Ended)
+    while result.IsOk(fiber.Receive(out, timeout = 0))
+    end
+  end)
   result.Ok(out)
 end
 
-defn sampling(s, out)
-  (** Each second, a point: the counters' growth since the last one, the times of the requests the log kept since. *)
-  env = s.Env
-  before = totals(metrics.Text())
-  seq = app.Tail(0, env.State).Seq
-  jobs = jobCounts(env)
-  points = []
+defn relaying(s, want, b, out)
+  (** Sends a screen the points it asks of the board b, Chunk a frame at most, the newest first: the seconds, then the
+      minutes; then at each new board the points that came and those that left its window. *)
+  rows = list.Concat(list.Reverse(last(want.Seconds, b.Seconds)), list.Reverse(last(want.Minutes, b.Minutes)))
+  n = value.Len(rows)
   group = 1
-  fiber.Send({Group: group, Rows: []}, out)
-  tick = 0
-  while true
-    got = fiber.Receive(s.Ended, timeout = 1)
-    if not (result.IsErr(got) and got.Error.Kind == "timeout")
+  fiber.Send({Group: group, Rows: list.Take(Chunk, rows)}, out)
+  at = Chunk
+  while at < n
+    if ended(s)
       fiber.Close(out)
       return missing
     end
-    tick += 1
-    now = totals(metrics.Text())
-    lines = app.Tail(seq, env.State)
-    seq = lines.Seq
-    ms = list.Sort([dict.GetOr("Ms", 0, dict.GetOr("Fields", {}, l)) for l in lines.Lines if l.Message == "request"])
-    if math.Mod(tick, 5) == 0
-      jobs = jobCounts(env)
-    end
-    p = {At: math.Floor(env.Now()), Requests: now.Requests - before.Requests, Errors: now.Errors - before.Errors, Origin: now.Origin - before.Origin,
-      Limit: now.Limit - before.Limit, Signin: now.Signin - before.Signin, Role: now.Role - before.Role, Failures: app.Failures(env.State),
-      P50: quantile(ms, 0.5), P99: quantile(ms, 0.99), Ready: jobs.Ready, Running: jobs.Running, Dead: jobs.Dead}
-    before = now
-    points = list.Append(p, points)
-    gone = []
-    if value.Len(points) > Kept
-      gone = [points[1]]
-      points = list.Skip(1, points)
-    end
     group += 1
-    fiber.Send({Group: group, Added: [p], Removed: gone}, out)
+    fiber.Send({Group: group, Added: [rows[k] for k in (at + 1)..list.Min([at + Chunk, n])], Removed: []}, out)
+    at += Chunk
+  end
+  while true
+    _ = fiber.Select([s.Ended, b.Next])
+    if ended(s)
+      fiber.Close(out)
+      return missing
+    end
+    nb = board(s.Env)
+    c = changes(b, nb, want)
+    b = nb
+    if value.Len(c.Added) + value.Len(c.Removed) > 0
+      group += 1
+      fiber.Send({Group: group, Added: c.Added, Removed: c.Removed}, out)
+    end
   end
 end
 

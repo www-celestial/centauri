@@ -27,7 +27,18 @@ event of the history, and nobody disables himself or takes the role from himself
 | `GET /admin/flags`, `PUT /admin/flags/:name` | the feature flags the code declares, with what was set over them; one set for everyone, a share of the users, a tenant or a user, or cleared (served by `flags.Module`: [flags](flags.md)) |
 | `GET /admin/jobs?State=&Kind=`, `POST /admin/jobs/:id/retry`, `POST /admin/jobs/:id/cancel` | the jobs of a state and a kind; a dead one run again; a waiting one made dead (a running one: 409) |
 | `PATCH /admin/data/:kind/:id` | fields of a thing changed (`Fields`, a JSON object), each through the shape of its type; a secret one refused |
-| the live shows `admin.series`, `admin.events`, `admin.logs` | a point of the dashboard each second, the events of the last hour as they come, the log of the process as it goes |
+| the live shows `admin.series`, `admin.events`, `admin.logs` | the points of the dashboard, a second's for 15 minutes and a minute's for 7 days, the events of the last hour as they come, the log of the process as it goes |
+
+`admin.series` is the history of the process, sampled once whatever the pages that watch it: from the start of the app
+(from the first page that asks, when `AdminPath` is `off`), a point each second, the last 900 kept, and a point each
+minute, the last 10,080, in memory (about 6 MB once full, after 7 days). A page asks the last `Seconds` (0 to 900, 300
+unless it says) and the last `Minutes` (0 to 10,080, none unless it says): `{"Show": "admin.series", "Args":
+{"Seconds": 900, "Minutes": 10080}}`. It gets them at once, 500 points a frame at most, then each new point, and the
+points that leave its window as `Removed`. `Step` tells a second's point (1) from a minute's (60); `At` is the end of
+its second or the start of its minute. A minute's point sums its seconds (requests, 5xx, refusals, sign-ins), keeps its
+last second's `Failures`, jobs and `Screens`, and its `P50` and `P99` are those of every request of the minute, within
+1 % (DDSketch: Masson, Rim and Lee, *PVLDB* 12(12), 2019). The other fields: `Screens`, the live screens open on the
+process; `SignedIn` and `FailedSignIns`, the sign-ins that opened a session and those refused.
 
 `GET /admin/events` also takes `Route`, `Since` and `Until` (ISO 8601). `GET /admin/data/:kind` and `GET /admin/kinds`
 never give a field that `app.Kind(..., secret = [...])` names: it comes as `(secret)`, and `Secret` marks it among the

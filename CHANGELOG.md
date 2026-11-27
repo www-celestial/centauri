@@ -83,6 +83,20 @@ live.js, `websocket.Dial`'s `last`) and Ceres's (the page's client, `web.Connect
   (Chrome's offline mode, a proxy that drops TCP connections, a restart on the same database); `bench/drop.ce`,
   `bench/storm.ce`.
 
+### The dashboard's history
+
+- `admin.series` is the history of the process, sampled once for every page that watches it (each screen sampled for
+  itself before): from the start of the app (from the first page that asks when `AdminPath` is `off`), a point a
+  second for 15 minutes and a point a minute for 7 days, bounded in memory (about 6 MB once full). A page asks
+  `{"Seconds": 900, "Minutes": 10080}` at most, and gets them at once, 500 a frame; with no arguments, the last 300
+  seconds as before, the ones already sampled at once. A tick costs 0.012 ms while no request comes (the metrics are
+  read only when a request came; 0.26 ms before, for each page open), 0.9 ms at 1,000 requests a second.
+- `PointRow` gains `Step` (1, a second's point; 60, a minute's), `Screens` (the live screens open on the process),
+  `SignedIn` and `FailedSignIns`. A minute's `P50` and `P99` are those of all its requests, within 1 % (DDSketch).
+- The metric `centauri_signins_total{result}`, `ok` or `failed`; `app.Screens` (the live screens open) and
+  `app.Times` (the times of the requests the log kept since a line) in the state of a process; `env.Own`, a table of
+  what a module keeps for the life of the process.
+
 ## 0.4.0 (not released)
 
 The third batch, L3: signing in with a provider, passkeys and two-factor, keys of programs, languages, feature flags,

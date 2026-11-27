@@ -1,0 +1,188 @@
+(* The dashboard's points as the sampler of a process makes them, without a server: the counters read from the metrics,
+   a second's point, a minute's made of its seconds (sums, the last values, the quantiles of all its requests within
+   1 %), the rings bounded whatever the uptime, and what a screen gets as they move: the rows that came, and the very
+   rows that left its window. *)
+use std/bug
+use std/dict
+use std/fiber
+use std/json
+use std/list
+use std/math
+use std/value
+
+(* The metrics of a process as std/metrics writes them. *)
+raw = "# TYPE centauri_requests_total counter\ncentauri_requests_total{route=\"GET /a\",status=\"200\"} 7\ncentauri_requests_total{route=\"GET /a\",status=\"503\"} 2\n# TYPE centauri_refused_total counter\ncentauri_refused_total{reason=\"limit\"} 3\ncentauri_refused_total{reason=\"signin\"} 1\n# TYPE centauri_signins_total counter\ncentauri_signins_total{result=\"ok\"} 4\ncentauri_signins_total{result=\"failed\"} 5\n# TYPE job_seconds histogram\njob_seconds_count 9\n"
+
+nothing = {Requests: 0, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0, SignedIn: 0, FailedSignIns: 0}
+jobs = {Ready: 1, Running: 2, Dead: 3}
+
+defn point(at, requests, screens = 0, failures = 0)
+  (** A second's point of so many requests and sign-ins, made as the sampler makes it. *)
+  now = dict.Merge(nothing, {Requests: requests, SignedIn: 1, FailedSignIns: 2, Origin: 1})
+  second(at, now, nothing, [], failures, {Ready: at, Running: 0, Dead: 1}, screens)
+end
+
+empty = {Seconds: [], SecondN: 0, Minutes: [], MinuteN: 0, Next: missing}
+
+defn fed(b, minute, ats)
+  (** A board and its minute after a point of each second of ats, each of one request of 2 ms: {Board, Minute}. *)
+  t = {Board: b, Minute: minute}
+  for at in ats
+    t = advanced(t.Board, t.Minute, point(at, 1), [2], missing)
+  end
+  t
+end
+
+defn isTotalsOfTheMetrics()
+  t = totals(raw)
+  t.Requests == 9 and t.Errors == 2 and t.Limit == 3 and t.Signin == 1 and t.Origin == 0 and t.SignedIn == 4 and t.FailedSignIns == 5
+end
+
+defn isSecondsPointTheGrowth()
+  before = totals(raw)
+  now = dict.Merge(before, {Requests: 12, SignedIn: 6})
+  p = second(1000, now, before, [1, 2, 3, 4], 7, jobs, 3)
+  bug.Assert(p.Step == 1 and p.At == 1000 and p.Requests == 3 and p.SignedIn == 2 and p.FailedSignIns == 0 and p.Screens == 3, "a second: $p")
+  p.P50 == 2 and p.P99 == 4 and p.Failures == 7 and p.Dead == 3
+end
+
+defn isMinuteTheSumOfItsSeconds()
+  (** A minute's point: the sums of its 60 seconds, the last second's Failures, jobs and screens, At its first second. *)
+  m = opened(6030)
+  for k in 0..59
+    m = folded(m, point(6000 + k, k, screens = k, failures = 100 + k), [k + 1])
+  end
+  p = closed(m)
+  bug.Assert(p.Step == 60 and p.At == 6000 and p.Requests == 1770 and p.SignedIn == 60 and p.FailedSignIns == 120 and p.Origin == 60, "the sums: $p")
+  bug.Assert(p.Screens == 59 and p.Failures == 159 and p.Ready == 6059 and p.Dead == 1, "the last values: $p")
+  (* the times 1 to 60 ms, one a second: the median the 30th, the 99th percentile the 60th, within 1 % *)
+  math.Abs(p.P50 - 30) <= 0.3 and math.Abs(p.P99 - 60) <= 0.6 and value.Equal(dict.Keys(p), dict.Keys(point(0, 0)))
+end
+
+defn isMinutesQuantilesWithinOnePercent()
+  (** The quantiles of a minute of 60,000 times, from 0.05 ms to 9 s, a long tail: within 1 % of the exact ones. *)
+  m = opened(0)
+  every = []
+  for k in 0..59
+    ms = list.Sort([math.Round((0.05 + 9000 * (math.Mod(k * 1000 + j, 997) / 997) ^ 6) * 1000) / 1000 for j in 1..1000])
+    m = folded(m, point(k, 1000), ms)
+    every = list.Concat(every, ms)
+  end
+  every = list.Sort(every)
+  wrong = []
+  for q in [0.01, 0.5, 0.9, 0.99, 0.999]
+    exact = quantile(every, q)
+    got = sketchQuantile(m.Sketch, m.Times, q)
+    if math.Abs(got - exact) > 0.01 * exact + 0.0005
+      wrong = list.Append({Q: q, Exact: exact, Sketch: got}, wrong)
+    end
+  end
+  bug.Assert(value.Len(wrong) == 0, "within 1 %: $wrong")
+  m.Times == 60000 and sketchQuantile(dict.Dict(), 0, 0.5) == 0
+end
+
+defn isSketchBoundedWhateverTheTimes()
+  (** A sketch of times from a nanosecond to years holds 1,383 buckets at most. *)
+  sk = sketched(dict.Dict(), [10 ^ (k / 1000) for k in -9000..15000])
+  sk = sketched(sk, [0, -5, 1e300])
+  value.Len(sk) <= 1383 and value.Len(sk) >= 1380
+end
+
+defn isRingBounded()
+  r = []
+  for k in 1..25
+    r = ring(k, r, 10)
+  end
+  full = [k for k in 1..Minutes]
+  bug.Assert(value.Equal(r, [k for k in 16..25]), "the last ten, oldest first: $r")
+  value.Len(ring(0, full, Minutes)) == Minutes and ring(0, full, Minutes)[1] == 2 and value.Equal(last(3, r), [23, 24, 25]) and value.Len(last(99, r)) == 10
+end
+
+defn isMinuteRolledAtTheFirstSecondOfTheNext()
+  t = fed(empty, missing, [k for k in 6030..6059])
+  bug.Assert(t.Board.MinuteN == 0 and t.Board.SecondN == 30 and t.Minute.At == 6000, "no minute ends before the next: $(t.Board.MinuteN)")
+  t = fed(t.Board, t.Minute, [6060, 6061])
+  first = t.Board.Minutes[1]
+  bug.Assert(t.Board.MinuteN == 1 and first.At == 6000 and first.Step == 60 and first.Requests == 30 and math.Abs(first.P50 - 2) <= 0.02, "the minute of 30 seconds: $first")
+  (* a clock that jumps (a machine asleep) ends the minute it was in; none is made for the minutes without a second *)
+  t = fed(t.Board, t.Minute, [9000])
+  t.Board.MinuteN == 2 and t.Board.Minutes[2].At == 6060 and t.Board.Minutes[2].Requests == 2 and t.Minute.At == 9000
+end
+
+defn isBoardBoundedWhateverTheUptime()
+  (** An hour of seconds: the seconds' ring holds its 900, the minutes' every minute but the one going on. *)
+  t = fed(empty, missing, [k for k in 0..3599])
+  b = t.Board
+  value.Len(b.Seconds) == Seconds and b.SecondN == 3600 and b.Seconds[1].At == 2700 and value.Len(b.Minutes) == 59 and b.MinuteN == 59
+end
+
+defn isWindowMovedByOneEachSecond()
+  (** A screen that shows the last 3 of a full ring: one row comes, the oldest it showed leaves, the very same row. *)
+  a = [point(k, k) for k in 1..5]
+  b = list.Append(point(6, 6), list.Skip(1, a))
+  m = moved(a, 105, b, 106, 3)
+  bug.Assert(value.Len(m.Added) == 1 and m.Added[1].At == 6, "came: $(m.Added)")
+  value.Len(m.Removed) == 1 and json.Text(m.Removed[1]) == json.Text(a[3])
+end
+
+defn isWindowFilledThenMovedBehind()
+  (** From nothing, the rows that came; a screen far behind (its window gone by) gets all its rows taken back. *)
+  b = [point(k, k) for k in 1..4]
+  first = moved([], 0, b, 4, 10)
+  bug.Assert(value.Len(first.Added) == 4 and value.Len(first.Removed) == 0, "from nothing: $first")
+  c = [point(k, k) for k in 50..53]
+  behind = moved(b, 4, c, 53, 3)
+  bug.Assert(value.Equal([p.At for p in behind.Added], [51, 52, 53]) and value.Equal([p.At for p in behind.Removed], [2, 3, 4]), "behind: $behind")
+  none = moved(b, 4, c, 53, 0)
+  value.Len(none.Added) + value.Len(none.Removed) == 0
+end
+
+defn isChangesOfBothRings()
+  (** A board that made a second and a minute: a screen of 2 seconds and 5 minutes gets both. *)
+  t = fed(empty, missing, [k for k in 0..60])
+  old = fed(empty, missing, [k for k in 0..59]).Board
+  c = changes(old, t.Board, {Seconds: 2, Minutes: 5})
+  bug.Assert(value.Equal([p.Step for p in c.Added], [1, 60]) and value.Equal([p.At for p in c.Removed], [58]), "both: $c")
+  quiet = changes(old, t.Board, {Seconds: 0, Minutes: 0})
+  value.Len(quiet.Added) + value.Len(quiet.Removed) == 0
+end
+
+defn isSketchOfRunsTheSameAsOfEachTime()
+  (** The runs of one bucket counted at once give the buckets that each time alone gives, in any order. (A time that
+      is a bound itself, as gamma ^ 50, may count in either of its two buckets: the rounding of the logarithm or of
+      the power decides, and both are within alpha of it.) *)
+  xs = [math.Mod(k * 7919, 100003) / 1000 for k in 1..3000]
+  xs = list.Concat(xs, [0, 0.0001, 0.001, 0.00101, 1e9, 2e9, 1e300, gamma ^ 50 * 1.0000001])
+  each = dict.Dict()
+  for x in xs
+    k = math.Ceil(math.Log(list.Min([list.Max([x, 0.001]), 1e9])) / lnGamma)
+    each[k] = dict.GetOr(k, 0, each) + 1
+  end
+  sameAs(sk) = value.Equal([[k, sk[k]] for k in list.Sort(dict.Keys(sk))], [[k, each[k]] for k in list.Sort(dict.Keys(each))])
+  sameAs(sketched(dict.Dict(), list.Sort(xs))) and sameAs(sketched(dict.Dict(), xs)) and sameAs(sketched(dict.Dict(), list.Reverse(list.Sort(xs))))
+end
+
+defn isScreenSentFramesOfChunkThenWhatChanged()
+  (** A screen that asks every point of a board of 2,000 gets them in frames of 500, the newest first, then at the next
+      board the point that came and the very one that left; its relay ends with the screen. *)
+  own = fiber.Table(4)
+  mins = [closed(folded(opened(k * 60), point(k * 60, 2), [1])) for k in 1..1100]
+  b = {Seconds: [point(k, 1) for k in 1..900], SecondN: 900, Minutes: mins, MinuteN: 1100, Next: fiber.Channel()}
+  fiber.Remember("admin.series", b, 1e300, own)
+  s = {Ended: fiber.Channel(), Env: {Own: own}}
+  out = fiber.Channel(size = 64)
+  fiber.Spawn(() -> relaying(s, {Seconds: 900, Minutes: 10080}, b, out))
+  got = [fiber.Receive(out, timeout = 1).Value for k in 1..4]
+  sizes = [value.Len(dict.GetOr("Rows", dict.GetOr("Added", [], m), m)) for m in got]
+  rows = list.Flatten([dict.GetOr("Rows", dict.GetOr("Added", [], m), m) for m in got])
+  bug.Assert(value.Equal(sizes, [500, 500, 500, 500]) and dict.Has("Rows", got[1]) and got[1].Rows[1].At == 900, "frames of 500, the newest first: $sizes")
+  bug.Assert(value.Len(list.Unique([json.Text(r) for r in rows])) == 2000 and rows[901].Step == 60 and rows[901].At == 66000, "every point once: $(rows[901])")
+  t = advanced(b, missing, point(901, 1), [1], fiber.Channel())
+  fiber.Remember("admin.series", t.Board, 1e300, own)
+  fiber.Close(b.Next)
+  next = fiber.Receive(out, timeout = 1).Value
+  bug.Assert(value.Len(next.Added) == 1 and next.Added[1].At == 901 and value.Len(next.Removed) == 1 and json.Text(next.Removed[1]) == json.Text(rows[900]), "came and left: $next")
+  fiber.Close(s.Ended)
+  fiber.Close(t.Board.Next)
+  fiber.Receive(out, timeout = 1).Error.Kind == "closed"
+end

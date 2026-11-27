@@ -31,7 +31,21 @@ plateforme en garde donc toujours un.
 | `GET /admin/flags`, `PUT /admin/flags/:name` | les feature flags (un feature flag : un interrupteur qui ouvre une fonction à tous, à une part des utilisateurs, à un tenant ou à un utilisateur) que le code déclare, avec ce qui a été réglé par-dessus ; un flag réglé pour tout le monde, une part des utilisateurs, un tenant ou un utilisateur, ou effacé (servis par `flags.Module` : [flags](flags.md)) |
 | `GET /admin/jobs?State=&Kind=`, `POST /admin/jobs/:id/retry`, `POST /admin/jobs/:id/cancel` | les jobs d'un état et d'un type ; un job mort relancé ; un job en attente rendu mort (un job qui tourne : 409) |
 | `PATCH /admin/data/:kind/:id` | des champs d'une chose changés (`Fields`, un objet JSON), chacun à travers la forme de son type (ce qu'une valeur doit être : un texte de 1 à 120 octets, un nombre entier...) ; un champ secret refusé |
-| les shows en direct `admin.series`, `admin.events`, `admin.logs` (un show : une liste en direct qu'une page demande par son nom) | un point du tableau de bord chaque seconde, les événements de la dernière heure à mesure qu'ils arrivent, le log du processus à mesure qu'il s'écrit |
+| les shows en direct `admin.series`, `admin.events`, `admin.logs` (un show : une liste en direct qu'une page demande par son nom) | les points du tableau de bord, un par seconde sur 15 minutes et un par minute sur 7 jours, les événements de la dernière heure à mesure qu'ils arrivent, le log du processus à mesure qu'il s'écrit |
+
+`admin.series` est l'historique du processus, échantillonné une seule fois quel que soit le nombre de pages qui le
+regardent : depuis le démarrage de l'app (depuis la première page qui le demande quand `AdminPath` vaut `off`), un point
+chaque seconde, les 900 derniers gardés, et un point chaque minute, les 10 080 derniers, en mémoire (environ 6 Mo une
+fois plein, après 7 jours). Une page demande les `Seconds` derniers (de 0 à 900, 300 si elle ne dit rien) et les
+`Minutes` derniers (de 0 à 10 080, aucun si elle ne dit rien) : `{"Show": "admin.series", "Args": {"Seconds": 900,
+"Minutes": 10080}}`. Elle les reçoit tout de suite, 500 points par frame au plus (un message envoyé d'un coup), puis
+chaque nouveau point, et les points qui sortent de sa fenêtre comme `Removed`. `Step` distingue un point d'une seconde
+(1) d'un point d'une minute (60) ; `At` est la fin de sa seconde ou le début de sa minute. Le point d'une minute fait la
+somme de ses secondes (requêtes, 5xx, refus, connexions), garde de sa dernière seconde `Failures`, les jobs et
+`Screens`, et ses `P50` et `P99` sont ceux de toutes les requêtes de la minute, à 1 % près (DDSketch, un sketch,
+c'est-à-dire un résumé de taille bornée qui donne les quantiles : Masson, Rim et Lee, *PVLDB* 12(12), 2019). Les autres
+champs : `Screens`, les écrans live ouverts sur le processus ; `SignedIn` et `FailedSignIns`, les connexions qui ont
+ouvert une session et celles refusées.
 
 `GET /admin/events` prend aussi `Route`, `Since` et `Until` (ISO 8601). `GET /admin/data/:kind` et `GET /admin/kinds`
 ne donnent jamais un champ que nomme `app.Kind(..., secret = [...])` : il arrive comme `(secret)`, et `Secret` le marque
