@@ -29,9 +29,36 @@ defn Data(p)
 end
 
 defn kindTitle(name, p)
-  (** The title of a kind: the app's, said in the pages' language, or its name. *)
+  (** The title of a kind: the app's (pages.Kind), else its name as a title, in capitals and plural ("line" is Lines,
+      "centauri_user" Centauri users), said in the pages' language. *)
   k = dict.Get(name, p.Site.Kinds)
-  if value.IsMissing(k) name else Say(k.Title) end
+  if value.IsSome(k) and k.Title != name
+    return Say(k.Title)
+  end
+  Say(Plural(name))
+end
+
+defn Plural(name)
+  (** A kind's name as the title of its list: its words apart, the first in capitals, the last plural.
+
+        Plural("line") --> "Lines"
+        Plural("centauri_user") --> "Centauri users"
+        Plural("batch") --> "Batches" *)
+  words = [w for w in text.Split(" ", text.Replace("_", " ", text.Replace("-", " ", name))) if w != ""]
+  if value.IsEmpty(words)
+    return name
+  end
+  last = words[value.Len(words)]
+  n = value.Len(last)
+  end2 = if n >= 2 text.Slice(n - 1, n, last) else last end
+  end1 = text.Slice(n, n, last)
+  plural = if end1 == "s" or end1 == "x" or end2 == "ch" or end2 == "sh" "$(last)es"
+    else if end1 == "y" and n >= 2 and not (text.Slice(n - 1, n - 1, last) in ["a", "e", "i", "o", "u"]) "$(text.Slice(1, n - 1, last))ies"
+    else "$(last)s" end
+  words[value.Len(words)] = plural
+  first = words[1]
+  words[1] = "$(text.Upper(text.Slice(1, 1, first)))$(if value.Len(first) > 1 text.Slice(2, value.Len(first), first) else "" end)"
+  text.Join(" ", words)
 end
 
 defn parsed(row)
@@ -80,7 +107,7 @@ defn columnsOf(kind, p)
   end
   fields = list.Take(6, [f for f in kind.Fields])
   list.Concat([first],
-    [web.Column(f.Name, if f.Type == "date" (t -> Local(dict.Get(f.Name, t))) else (t -> Cell(dict.Get(f.Name, t))) end, sort = f.Name) for f in fields])
+    [web.Column(f.Name, if f.Type == "date" (t -> Local(dict.Get(f.Name, t))) else if f.Type == "money" (t -> Money(dict.Get(f.Name, t))) else (t -> Cell(dict.Get(f.Name, t))) end, sort = f.Name) for f in fields])
 end
 
 defn thingsOf(kind, p, l, rows, height, id)
@@ -119,6 +146,8 @@ defn shownValue(v, f)
   (** A field's value as its input shows it: a date on the viewer's clock, a list with commas. *)
   if value.IsMissing(v)
     ""
+  else if f.Type == "money" and value.IsNumber(v)
+    Amount(v)
   else if f.Type == "date" and value.IsNumber(v)
     Local(v)
   else if value.IsArray(v)
@@ -134,7 +163,7 @@ defn typed(s, f)
   t = text.Trim(s)
   one = defn (x)
     if f.Type == "int" or f.Type == "float" or f.Type == "money" or f.Type == "link"
-      n = text.Number(x)
+      n = text.Number(if f.Type == "money" Plain(x) else x end)
       return if value.IsNumber(n) n else x end
     end
     if f.Type == "bool"
@@ -214,7 +243,7 @@ defn editor(thing, kind, p, l, said, asking)
     Question(asking),
     () -> said1(web.Get(said)),
     () -> toasted(web.Get(said), p),
-    web.Stack([fieldForm(x, save, said) for x in inputs], gap = 10),
+    web.Stack([fieldForm(x, save, said) for x in [list.FindFirst(i -> i.Field.Name == f.Name, inputs) for f in shownFields(kind, p)] if value.IsSome(x)], gap = 10),
   ], gap = 10)
   {View: view, Form: form}
 end
@@ -236,12 +265,22 @@ defn toasted(r, p)
 end
 
 defn fieldForm(x, save, said)
-  (** A field of the sheet: its name and its type over it, its input (or "(secret)"), and what the server found wrong
-      with it at the last save under it. *)
+  (** A field of the sheet: its name over it, its input (or "(secret)"), and what the server found wrong with it at
+      the last save under it. *)
   f = x.Field
   box = if f.Secret == true web.Text(Say("(secret)"), color = gray) else web.Input(x.Value, label = f.Name, width = 100000, onEnter = save, invalid = () -> fieldWrong(said, f.Name) != "") end
-  web.Stack([web.Row([web.Text(f.Name, size = "small", font = "strong", color = gray), web.Text(typeOf(f), size = "small", color = gray)], gap = 6), box,
+  web.Stack([web.Text(f.Name, size = "small", font = "strong", color = gray), box,
     () -> (if fieldWrong(said, f.Name) == "" missing else web.Text(fieldWrong(said, f.Name), size = "small", color = red) end)], gap = 4)
+end
+
+defn shownFields(kind, p)
+  (** The fields a sheet shows: the kind's own list (pages.Kind's fields), else all but the internal ones, a field
+      named Search and those a rule gives (Derived). *)
+  own = dict.Get(kind.Name, p.Site.Kinds)
+  if value.IsSome(own) and value.Len(dict.GetOr("Fields", [], own)) > 0
+    return [f for f in [list.FindFirst(g -> g.Name == name, kind.Fields) for name in own.Fields] if value.IsSome(f)]
+  end
+  [f for f in kind.Fields if f.Name != "Search" and dict.Get("Derived", f) != true]
 end
 
 defn kindSummary(kind, p)
@@ -285,5 +324,5 @@ defn action(a, thing, p, said, asking, l)
     web.Set(said, Call(a.Endpoint, args, p))
     Again(l, web.Get(l.Args))
   end
-  if a.Confirm Confirm(asking, "$(Say(a.Label)) ($(thing.Id))", run) else web.Button(Say(a.Label), run) end
+  if a.Confirm Confirm(asking, Say(a.Label), run, question = "$(Say(a.Label)) ($(thing.Id))") else web.Button(Say(a.Label), run) end
 end

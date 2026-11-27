@@ -8,8 +8,10 @@
 use deps/www-celestial/ceres/src/web
 use src/api
 use std/dict
+use std/json
 use std/list
 use std/math
+use std/result
 use std/text
 use std/value
 
@@ -34,7 +36,7 @@ defn Dashboard(p)
     () -> firstSteps(OkOf(web.Get(stats)), p),
     () -> strip(web.Get(all), OkOf(web.Get(stats)), p, web.Get(cols).N < 2),
     board(cols, cross),
-    logCard(logs, level, paused),
+    logCard(logs, level, paused, p),
   ], gap = 10)
 end
 
@@ -160,14 +162,16 @@ defn board(cols, cross)
   ], gap = 8)
 end
 
-defn logCard(logs, level, paused)
-  (** The log as it is written, the newest first: All, Warnings (and errors) or Errors; Pause keeps the lines in
-      sight while one reads them. *)
+defn logCard(logs, level, paused, p)
+  (** The log as it is written, the newest first, a line each as one reads it: its time, its level, where it comes
+      from, what happened (a request as GET /admin/ 200) and at its right its time or its address; All, Warnings (and
+      errors) or Errors; Pause keeps the lines in sight while one reads them; a line clicked shows all its fields in
+      the sheet. *)
   rows = web.Memo(defn ()
     frozen = web.Get(paused)
     all = if value.IsSome(frozen) frozen else web.Get(logs) end
     lv = web.Get(level)
-    list.Take(200, list.Reverse(list.SortBy(x -> x.Seq, [x for x in all if lv == "all" or lv == "warn" and x.Level != "info" or lv == "error" and x.Level == "error"])))
+    [lineOf(x) for x in list.Take(200, list.Reverse(list.SortBy(x -> x.Seq, [x for x in all if lv == "all" or lv == "warn" and x.Level != "info" or lv == "error" and x.Level == "error"])))]
   end)
   tone = x -> (if x.Level == "error" red else if x.Level == "warn" amber else missing end)
   web.Stack([
@@ -175,11 +179,40 @@ defn logCard(logs, level, paused)
       web.Row([web.Chips(level, [web.Chip("all", Say("All")), web.Chip("warn", Say("Warnings")), web.Chip("error", Say("Errors"))], label = Say("Level")),
         () -> web.Button(if value.IsSome(web.Get(paused)) Say("Resume") else Say("Pause") end, () -> web.Set(paused, if value.IsSome(web.Get(paused)) missing else web.Get(logs) end),
           icon = if value.IsSome(web.Get(paused)) "play" else "pause" end, key = "M-p")], gap = 8)),
-    web.Table(rows, [web.Column(Say("At"), x -> web.Text(clock(x.At, 1), size = "small", color = gray), width = 90),
-      web.Column(Say("Level"), x -> web.Text(text.Upper(x.Level), font = "strong", size = "small", color = if value.IsMissing(tone(x)) gray else tone(x) end), width = 70),
-      web.Column(Say("Message"), x -> web.Text(x.Message, color = tone(x))), web.Column(Say("Fields"), x -> web.Text(x.Fields, size = "small", color = gray), width = 360)],
-      height = 320, label = Say("Live log")),
+    web.Table(rows, [web.Column(Say("At"), x -> web.Text(clock(x.At, 1), size = "small", color = gray), width = 84),
+      web.Column(Say("Level"), x -> web.Text(text.Upper(x.Level), font = "strong", size = "small", color = if value.IsMissing(tone(x)) gray else tone(x) end), width = 64),
+      web.Column(Say("Source"), x -> web.Text(x.Source, size = "small", color = if value.IsMissing(tone(x)) gray else tone(x) end), width = 110),
+      web.Column(Say("Message"), x -> web.Text(x.What, color = tone(x))), web.Column("", x -> web.Text(x.Side, size = "small", color = gray), align = "right", width = 150)],
+      height = 320, label = Say("Live log"), key = x -> x.Seq, open = x -> web.Set(p.Site.Sheet, lineSheet(x, p))),
   ], gap = 8)
+end
+
+defn lineOf(x)
+  (** A line of the log as the board shows it: its source, what happened, what goes at its right, its fields read. *)
+  got = json.Parse(x.Fields)
+  f = if result.IsOk(got) and value.IsDict(got.Value) got.Value else {} end
+  if x.Message == "request"
+    m = dict.GetOr("Method", "", f)
+    route = value.Text(dict.GetOr("Route", "", f))
+    what = "$(if text.StartsWith("$m ", route) route else "$m $route" end) $(value.Text(dict.GetOr("Status", "", f)))"
+    ms = dict.Get("Ms", f)
+    return {Seq: x.Seq, At: x.At, Level: x.Level, Source: "http", What: what, Side: if value.IsNumber(ms) Say("{N} ms", {N: Num(ms)}) else value.Text(dict.GetOr("Ip", "", f)) end, Fields: f, Message: x.Message}
+  end
+  parts = text.Split(":", x.Message)
+  source = if value.Len(parts) > 1 text.Trim(parts[1]) else dict.GetOr("Module", "app", f) end
+  what = if value.Len(parts) > 1 text.Trim(text.Join(":", list.Skip(1, parts))) else x.Message end
+  {Seq: x.Seq, At: x.At, Level: x.Level, Source: value.Text(source), What: what, Side: value.Text(dict.GetOr("Ip", "", f)), Fields: f, Message: x.Message}
+end
+
+defn fieldLine(pair)
+  (** A field of a line of the log: its name over its value. *)
+  web.Stack([web.Text(pair.Key, size = "small", font = "strong", color = gray), web.Text(if value.IsText(pair.Value) pair.Value else json.Text(pair.Value) end)], gap = 2)
+end
+
+defn lineSheet(x, p)
+  (** A line of the log in the sheet: its message, its time and level, each of its fields. *)
+  body = () -> web.Stack([fieldLine(pair) for pair in dict.Pairs(x.Fields)], gap = 10)
+  {Title: x.What, Kicker: "$(Say("Log")) · $(Local(x.At)) · $(text.Upper(x.Level))", Sub: x.Source, Body: body, Close: () -> web.Set(p.Site.Sheet, missing)}
 end
 
 defn firstSteps(s, p)

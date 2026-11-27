@@ -30,11 +30,16 @@ use std/value
       Page("Unpaid", "/unpaid", p -> web.Text("…")).Path --> "/unpaid" *)
 Page(title, path, view) = {Title: title, Path: path, View: view}
 
-(** How the data browser shows a kind: its name (as app.Kind has it), its title (said in the pages' language), its
-    columns (pages.Column; its first fields when none) and its actions on the thing chosen (pages.Action).
+(** How the data browser shows a kind: its name (as app.Kind has it), its title (said in the pages' language; its
+    name in capitals and plural by default), its columns (pages.Column; its first fields when none), its actions on a
+    thing (pages.Action), also on the things checked; fields, the fields its sheet shows, in this order (by default
+    all but the internal ones: a field named Search, the folded copy an app keeps for its search, and those a rule
+    gives); create = false hides New (a kind of the app makes its things in the admin by default).
 
-      Kind("invoice", columns = [Column("Number")]).Columns[1].Field --> "Number" *)
-Kind(name, title = missing, columns = [], actions = []) = {Name: name, Title: if value.IsMissing(title) name else title end, Columns: columns, Actions: actions}
+      Kind("invoice", columns = [Column("Number")]).Columns[1].Field --> "Number"
+      Kind("invoice", fields = ["Number", "Total"]).Fields[2] --> "Total" *)
+Kind(name, title = missing, columns = [], actions = [], fields = [], create = true) = {Name: name, Title: if value.IsMissing(title) name else title end, Columns: columns,
+  Actions: actions, Fields: fields, Create: create}
 
 (** A column of a kind's table: a field of its things, its title (the field by default, said in the pages' language:
     a field the catalogue lacks shows as it is), show(v), what a cell shows of a value (pages.Cell by default), and

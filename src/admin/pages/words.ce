@@ -403,6 +403,7 @@ Words = i18n.Of([i18n.Catalog("fr", [
   ["Menu", "Menu"],
   ["Views", "Vues"],
   ["now", "maintenant"],
+  ["Source", "Source"],
   ["Close", "Fermer"],
   ["dense", "dense"],
   ["compact", "compacte"],

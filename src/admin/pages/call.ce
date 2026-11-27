@@ -101,6 +101,51 @@ end
 
 narrow = text.Char(0x202F)   (* The narrow no-break space that French puts between thousands. *)
 
+defn Amount(v)
+  (** An amount as the pages' language writes it: two decimals always, the thousands apart (1,280.50 in English,
+      1 280,50 in French); "" for missing, and anything but a number as it is.
+
+        Amount(1280.5) --> "1,280.50" *)
+  if not value.IsNumber(v)
+    return if value.IsMissing(v) "" else value.Text(v) end
+  end
+  cents = math.Div(math.Round(math.Abs(v) * 100), 1)
+  whole = value.Text(math.Div(cents, 100))
+  frac = value.Text(math.Mod(cents, 100))
+  frac = if value.Len(frac) < 2 "0$frac" else frac end
+  sep = if french() narrow else "," end
+  out = ""
+  size = text.ByteLength(whole)
+  for k in 1..size
+    out = "$out$(text.ByteSlice(k, k, whole))"
+    if k < size and math.Mod(size - k, 3) == 0
+      out = "$out$sep"
+    end
+  end
+  "$(if v < 0 and cents > 0 "-" else "" end)$out$(if french() "," else "." end)$frac"
+end
+
+defn Money(v, currency = missing)
+  (** An amount for a table, a card or a sheet: Amount's text, the currency after it ("1,280.50 €"), at the right of its
+      column, in the face of the look.
+
+        Money(1280.5, currency = "€").Text --> "1,280.50 €" *)
+  s = Amount(v)
+  web.Text(if value.IsMissing(currency) or s == "" s else "$s $currency" end, font = "code")
+end
+
+defn Plain(s)
+  (** The number a person typed in an amount's field, as the pages' language writes it, as the server reads it: the
+      thousands' separators out, a French decimal comma a point.
+
+        Plain("1,280.50") --> "1280.50" *)
+  t = text.Trim(s)
+  if french()
+    return text.Replace(",", ".", text.Replace(" ", "", text.Replace(text.Char(0x00A0), "", text.Replace(narrow, "", t))))
+  end
+  text.Replace(",", "", t)
+end
+
 (* The colors of the pages, roles of the theme: what is wrong, what waits, what is fine, and the gray of what explains. *)
 red = "Danger"
 amber = "Warn"
@@ -339,10 +384,10 @@ defn Chosen(table, rows)
   shown[k]
 end
 
-defn Confirm(asking, label, run)
-  (** A button that asks first: a click shows label again with Yes and No beside it; Yes runs run(). asking is the
-      signal of the question shown, one for a page. *)
-  web.Button(label, () -> web.Set(asking, {Label: label, Run: run}))
+defn Confirm(asking, label, run, question = missing)
+  (** A button that asks first: a click shows label again (or question) with Yes and No beside it; Yes runs run().
+      asking is the signal of the question shown, one for a page. *)
+  web.Button(label, () -> web.Set(asking, {Label: if value.IsMissing(question) label else question end, Run: run}))
 end
 
 defn Question(asking)
