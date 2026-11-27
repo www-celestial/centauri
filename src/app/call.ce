@@ -8,6 +8,7 @@ use std/fiber
 use std/http
 use std/list
 use std/math
+use std/otel
 use std/random
 use std/result
 use std/sys
@@ -175,8 +176,20 @@ defn checkedUrl(url, env)
 end
 
 defn once(url, method, body, headers, timeout, most, env)
-  (** One request of a call, within timeout seconds, its connection included: an Ok of {Status, Headers, Body}, or an Err. *)
+  (** One request of a call, a span of std/otel when the request that makes it is traced: its traceparent goes with it,
+      and the span names the method, the host and the port, never the path or the query, which may hold a secret (a
+      webhook's address, a signed link). *)
   t = checkedUrl(url, env)?
+  span = otel.Begin(method, kind = "client", attributes = {"http.request.method": method, "server.address": t.Host, "server.port": t.Port,
+    "url.full": "$(if t.Secure "https" else "http" end)://$(t.Host):$(t.Port)"})
+  got = sent(t, url, method, body, otel.Headers(headers), timeout, most, env)
+  otel.End(span, failed = result.IsErr(got) or got.Value.Status >= 400,
+    attributes = if result.IsOk(got) {"http.response.status_code": got.Value.Status} else {"error.type": dict.GetOr("Code", "failed", got.Error)} end)
+  got
+end
+
+defn sent(t, url, method, body, headers, timeout, most, env)
+  (** One request of a call, within timeout seconds, its connection included: an Ok of {Status, Headers, Body}, or an Err. *)
   secure = missing
   if t.Secure
     api = tls.Open()?

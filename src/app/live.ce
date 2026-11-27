@@ -203,6 +203,9 @@ defn act(e, handle, s, args, translating)
   if value.IsDict(dict.Get("Base", s))
     headers = list.Append({Name: "centauri-base", Value: json.Text(s.Base)}, headers)
   end
+  if value.IsText(dict.Get("Trace", s))
+    headers = list.Append({Name: "traceparent", Value: s.Trace}, headers)   (* the page's click: its trace, as APP_OTEL_TRUST takes it *)
+  end
   (* the language of the page's browser, so that an app of several languages answers the action in it *)
   lang = if translating http.HeaderValue("accept-language", r.Headers) else missing end
   if value.IsText(lang)
@@ -211,8 +214,10 @@ defn act(e, handle, s, args, translating)
   out = handle({Method: q.Method, Path: parts[1], Query: if value.Len(parts) > 1 parts[2] else "" end, Headers: headers, Body: q.Body,
     Peer: dict.GetOr("Peer", "", r)})
   data = if out.Body == "" result.Ok(missing) else json.Parse(out.Body) end
+  trace = dict.Get("Trace", out)
   if out.Status < 400
-    return if result.IsOk(data) data else result.Ok(out.Body) end
+    v = if result.IsOk(data) data else result.Ok(out.Body) end
+    return if value.IsText(trace) live.Traced(v, trace) else v end
   end
   p = if result.IsOk(data) and value.IsDict(data.Value) data.Value else {} end
   e = {Kind: "api", Status: out.Status, Message: dict.GetOr("detail", http.Reason(out.Status), p), Fields: dict.GetOr("errors", {}, p)}
@@ -226,7 +231,7 @@ defn act(e, handle, s, args, translating)
     e.Kind = "conflict"
     e.Conflict = p.conflict
   end
-  result.Err(e)
+  if value.IsText(trace) live.Traced(result.Err(e), trace) else result.Err(e) end
 end
 
 defn actions(env, handle)

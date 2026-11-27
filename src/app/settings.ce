@@ -61,6 +61,22 @@ Core = {
   ResumeBytes: check.Int(1024, 1073741824, optional = true, default = 1048576),
   Langs: check.Text(2, 400, optional = true, default = "en"),
   Csp: check.Text(1, 2000, optional = true, default = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"),
+  Otel: check.OneOf(["off", "on"], optional = true, default = "off"),
+  OtelEndpoint: check.Text(8, 1000, optional = true, default = "http://127.0.0.1:4318"),
+  OtelProtocol: check.OneOf(["protobuf", "json"], optional = true, default = "protobuf"),
+  OtelCompression: check.OneOf(["none", "gzip"], optional = true, default = "none"),
+  OtelHeaders: check.Secret(optional = true),
+  OtelSample: check.Float(0, 1, optional = true, default = 1),
+  OtelAlways: check.Text(0, 100, optional = true, default = "errors,slow"),
+  OtelSlow: check.Int(1, 3600000, optional = true, default = 1000),
+  OtelTrust: check.OneOf(["restart", "trust"], optional = true, default = "restart"),
+  OtelSignals: check.Text(0, 100, optional = true, default = "traces,metrics,logs"),
+  OtelService: check.Text(1, 200, optional = true),
+  OtelQueue: check.Int(16, 1000000, optional = true, default = 2048),
+  OtelEvery: check.Int(1, 3600, optional = true, default = 5),
+  OtelMetricsEvery: check.Int(1, 86400, optional = true, default = 60),
+  TelemetryIp: check.OneOf(["none", "truncated", "full"], optional = true, default = "none"),
+  TelemetryUser: check.OneOf(["off", "on"], optional = true, default = "off"),
 }
 
 (** What each profile changes, and nothing else does. Mail and the database of a test come with L2 and apptest. *)
@@ -143,6 +159,19 @@ defn Read(fields, given, defaults = {})
   end
   if s.WebTransport == "on" and (s.Http3 != "on" or s.Http3Port != 0 and s.Http3Port != s.Port)
     wrong = list.Append("APP_WEBTRANSPORT: needs APP_HTTP3=on on APP_PORT itself (APP_HTTP3_PORT 0 or the same): a page asks for its session on its own origin.", wrong)
+  end
+  for word in [text.Trim(w) for w in text.Split(",", s.OtelAlways) if text.Trim(w) != ""]
+    if not (word in ["errors", "slow"])
+      wrong = list.Append("APP_OTEL_ALWAYS: errors, slow, both with a comma, or nothing, not $word.", wrong)
+    end
+  end
+  for word in [text.Trim(w) for w in text.Split(",", s.OtelSignals) if text.Trim(w) != ""]
+    if not (word in ["traces", "metrics", "logs"])
+      wrong = list.Append("APP_OTEL_SIGNALS: traces, metrics and logs, with commas, not $word.", wrong)
+    end
+  end
+  if not (text.StartsWith("http://", s.OtelEndpoint) or text.StartsWith("https://", s.OtelEndpoint))
+    wrong = list.Append("APP_OTEL_ENDPOINT: the http:// or https:// address of a collector of OTLP, as http://127.0.0.1:4318.", wrong)
   end
   if s.GetDb == "read" and value.IsMissing(dict.Get("CepheusReadToken", s))
     wrong = list.Append("APP_GET_DB: read needs APP_CEPHEUS_READ_TOKEN, a token of Cepheus that reads only.", wrong)

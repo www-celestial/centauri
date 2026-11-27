@@ -22,6 +22,7 @@ use std/json
 use std/list
 use std/log
 use std/metrics
+use std/otel
 use std/quic
 use std/result
 use std/sys
@@ -182,7 +183,9 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
   guards = Guards(s.Csp, text.StartsWith("https://", s.Origin))
   words = wordsOf(a, s)
-  env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
+  tracer = if s.Otel == "on" tracerOf(a, s)? else missing end
+  origin = http.ParseUrl(s.Origin)
+  env = {App: a, Settings: s, Otel: tracer, SpanBase: if result.IsOk(origin) {"url.scheme": if origin.Value.Secure "https" else "http" end, "server.address": origin.Value.Host} else {} end, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
     Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
     Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: guards,
     Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
@@ -193,6 +196,26 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards),
     KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]), Words: words}
   result.Ok(env)
+end
+
+defn tracerOf(a, s)
+  (** The tracer of std/otel that the settings ask for (Otel on): its resource the app's name (or OtelService), its
+      version, the profile as its environment; an Ok, or an Err that stops the start. OtelHeaders holds name=value
+      pairs with commas, each value percent-encoded, as OTEL_EXPORTER_OTLP_HEADERS writes them. *)
+  headers = []
+  given = dict.Get("OtelHeaders", s)
+  for pair in text.Split(",", if value.IsText(given) given else "" end)
+    at = text.ByteFind("=", 1, pair)
+    if value.IsSome(at)
+      headers = list.Append({Name: text.Lower(text.Trim(text.ByteSlice(1, at - 1, pair))), Value: encode.UrlDecode(text.Trim(text.ByteSlice(at + 1, text.ByteLength(pair), pair)))}, headers)
+    end
+  end
+  words = t -> [text.Trim(w) for w in text.Split(",", t) if text.Trim(w) != ""]
+  made = otel.Start(service = if value.IsText(dict.Get("OtelService", s)) s.OtelService else a.Name end, version = a.Version, environment = s.Profile, endpoint = s.OtelEndpoint,
+    protocol = s.OtelProtocol, compression = s.OtelCompression, headers = headers, sample = s.OtelSample, always = words(s.OtelAlways),
+    slow = s.OtelSlow / 1000, trust = s.OtelTrust, signals = words(s.OtelSignals), queue = s.OtelQueue, every = s.OtelEvery,
+    metricsEvery = s.OtelMetricsEvery)
+  if result.IsErr(made) result.Err({Kind: "api", Message: "APP_OTEL: $(made.Error.Message)"}) else made end
 end
 
 defn rated(b, whoModule)
@@ -332,7 +355,11 @@ defn Run(a)
     fiber.Spawn(() -> http.Serve(http.App() then http.Get("/metrics", r -> http.Plain(metrics.Text())), port = s.AdminPort, host = "127.0.0.1"))
   end
   log.Info("ready", {App: a.Name, Profile: s.Profile, Port: s.Port, Ms: (sys.Now() - started) * 1000})
-  ready("serve", Listen(env))
+  served = Listen(env)
+  if not value.IsMissing(env.Otel)
+    otel.Flush(env.Otel, timeout = 5)   (* what waits leaves before the process does *)
+  end
+  ready("serve", served)
 end
 
 defn Listen(env, listener = missing)

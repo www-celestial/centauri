@@ -1,0 +1,223 @@
+(** OpenTelemetry, APP_OTEL on: the span of each request named by its route, with its reads of Cepheus, its calls to
+    another service and the job it asks for as its children or links; and what an attacker or a mistake tries: a
+    traceparent from the internet, the address and the account of a client, a request not sampled, wrong settings. A
+    collector of the test, on a free port, takes OTLP in JSON. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/jobs
+use std/bug
+use std/check
+use std/dict
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/net
+use std/otel
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Note = app.Kind("note", {Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+GetNote = api.Get("/notes/:id", out = NoteOut, role = api.Public)
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100)}), out = NoteOut, role = api.Public)
+Boom = api.Get("/boom", role = api.Public)
+Told = jobs.Kind("told", check.Record({Note: check.Int()}), (x, env) -> result.Ok(cepheus.Get(Note, x.Note, env.Db)?))
+
+defn read(r)
+  id = text.Number(r.Params.id)
+  n = if value.IsInt(id) cepheus.Get(Note, id, r.Db)? else missing end
+  if value.IsMissing(n) app.Fail(404, "No such note.") else {Id: id, Text: n.Text} end
+end
+
+defn add(r, x)
+  got = cepheus.Write(list.Concat(app.Facts(Note, cepheus.New(1), {Text: x.Text}), jobs.Later(Told, {Note: cepheus.New(1)})), r.Db, why = r.Why)?
+  {Id: got.Things[1], Text: x.Text}
+end
+
+ask(r, q) = {Status: app.Call("http://localhost:$(q.Port)/", r.Env, timeout = 2)?.Status}
+
+Notes = app.Module("notes", kinds = [Note], jobs = [Told], serve = [app.Serve(GetNote, read), app.Serve(AddNote, add),
+  app.Serve(api.Get("/ask", query = check.Record({Port: check.Int()}), out = check.Record({Status: check.Int()}), role = api.Public), ask),
+  app.Serve(Boom, r -> app.Fail(500, "The disk is full."))])
+App = app.Of([Notes, jobs.Module()], name = "notes", version = "2.1.0")
+
+defn collector()
+  (** A collector of OTLP/JSON on a free port: {Url, Box}, each body it takes on Box with its path. *)
+  l = net.Listen(0)!
+  box = fiber.Channel()
+  took = r -> keep(r, box)
+  fiber.Spawn(() -> http.Serve(http.App() then http.Post("/v1/traces", took) then http.Post("/v1/logs", took) then http.Post("/v1/metrics", took), listener = l, timeout = 5))
+  {Url: "http://127.0.0.1:$(net.Port(l))", Box: box}
+end
+
+defn keep(r, box)
+  fiber.Send({Path: r.Path, Body: json.Parse(r.Body)!}, box)
+  http.Json({})
+end
+
+defn started(given = {})
+  (** The app with Otel on, sending to a collector of its own every second: {T, Box}. *)
+  c = collector()
+  t = apptest.Start(App, settings = dict.Merge({Otel: "on", OtelEndpoint: c.Url, OtelProtocol: "json", OtelEvery: 1, CallPlain: "allow", CallAllow: "localhost"}, given))!
+  {T: t, Box: c.Box}
+end
+
+defn sent(x)
+  (** What the app sent once it flushed: {Spans, Logs}, the spans and the records of logs of every body. *)
+  otel.Flush(x.T.Env.Otel)
+  spans = []
+  logs = []
+  while true
+    got = fiber.Receive(x.Box, timeout = 0.3)
+    if result.IsErr(got)
+      return {Spans: spans, Logs: logs}
+    end
+    b = got.Value
+    for r in dict.GetOr("resourceSpans", [], b.Body)
+      for sc in r.scopeSpans
+        spans = list.Concat(spans, [dict.Put("Resource", r.resource, s) for s in sc.spans])
+      end
+    end
+    for r in dict.GetOr("resourceLogs", [], b.Body)
+      for sc in r.scopeLogs
+        logs = list.Concat(logs, sc.logRecords)
+      end
+    end
+  end
+end
+
+defn attrOf(s, key)
+  (** The value of an attribute of a span of OTLP/JSON, a text, a number or a bool, or missing. *)
+  for a in dict.GetOr("attributes", [], s)
+    if a.key == key
+      v = a.value
+      return if dict.Has("stringValue", v) v.stringValue else if dict.Has("intValue", v) text.Number(v.intValue) else dict.GetOr("boolValue", dict.Get("doubleValue", v), v) end
+    end
+  end
+  missing
+end
+
+server(out) = list.First([s for s in out.Spans if s.kind == 2])   (* The first server span of what was sent. *)
+
+defn isRequestTracedWithItsReads()
+  (** A GET is one trace: the server span named by its route, never its path, and the reads of Cepheus it made as its
+      children; the page is told its trace in Server-Timing; the resource names the app, its version, its profile. *)
+  x = started()
+  made = x.T.Raw("POST", "/notes", body = json.Text({Text: "milk"}))
+  id = json.Parse(made.Body)!.Id
+  got = x.T.Raw("GET", "/notes/$id")
+  timing = http.HeaderValue("server-timing", got.Headers)
+  out = sent(x)
+  server = list.First([s for s in out.Spans if s.name == "GET /notes/:id"])
+  reads = [s for s in out.Spans if s.traceId == server.traceId and dict.GetOr("parentSpanId", "", s) == server.spanId]
+  bug.Assert(got.Status == 200 and text.Contains(server.traceId, timing) and text.StartsWith("traceparent;desc=", timing), "Server-Timing: $timing")
+  bug.Assert(server.kind == 2 and attrOf(server, "http.route") == "/notes/:id" and attrOf(server, "http.response.status_code") == 200, "server: $server")
+  bug.Assert(value.Len([s for s in out.Spans if text.Contains("$id", s.name)]) == 0, "no name holds the path")
+  bug.Assert("cepheus get" in [s.name for s in reads] and attrOf(list.First([s for s in reads if s.name == "cepheus get"]), "db.system.name") == "cepheus", "reads: $([s.name for s in reads])")
+  res = server.Resource
+  names = dict.Dict([{Key: a.key, Value: a.value.stringValue} for a in res.attributes])
+  names["service.name"] == "notes" and names["service.version"] == "2.1.0" and names["deployment.environment.name"] == "test"
+end
+
+defn isCallAndJobInTheTrace()
+  (** A call to another service is a child span, and carries the trace to it; a job a request asked for runs in a
+      trace of its own, linked to the request's. *)
+  heard = fiber.Channel()
+  l = net.Listen(0)!
+  fiber.Spawn(() -> http.Serve(http.App() then http.Get("/", r -> told(r, heard)), listener = l, timeout = 5))
+  x = started()
+  asked = x.T.Raw("GET", "/ask?Port=$(net.Port(l))")
+  header = fiber.Receive(heard, timeout = 2)!
+  made = x.T.Raw("POST", "/notes", body = json.Text({Text: "eggs"}))
+  ran = x.T.RunJobs()!
+  out = sent(x)
+  server = list.First([s for s in out.Spans if s.name == "GET /ask"])
+  call = list.First([s for s in out.Spans if s.kind == 3 and s.name == "GET"])
+  bug.Assert(asked.Status == 200 and call.parentSpanId == server.spanId and attrOf(call, "server.address") == "localhost", "call: $call")
+  bug.Assert(otel.Parse(header).TraceId == server.traceId and otel.Parse(header).SpanId == call.spanId, "the service got the trace: $header")
+  bug.Assert(not text.Contains("/", text.Split("://", attrOf(call, "url.full"))[2]), "no path in url.full: $(attrOf(call, "url.full"))")
+  post = list.First([s for s in out.Spans if s.name == "POST /notes"])
+  job = list.First([s for s in out.Spans if s.name == "process told"])
+  bug.Assert(made.Status == 201 or made.Status == 200, "made $(made.Status)")
+  bug.Assert(ran == 1 and job.kind == 5 and job.traceId != post.traceId and job.links[1].traceId == post.traceId, "job: $job")
+  value.Len([s for s in out.Spans if dict.GetOr("parentSpanId", "", s) == job.spanId and s.name == "cepheus get"]) == 1
+end
+
+defn told(r, heard)
+  fiber.Send(http.HeaderValue("traceparent", r.Headers), heard)
+  http.Plain("ok")
+end
+
+defn isTraceparentFromOutsideRestarted()
+  (** By default a traceparent from the internet starts a new trace, which links to it: nobody outside chooses the
+      trace, nor its sampling; APP_OTEL_TRUST=trust goes on with it, for a service behind another of its own. *)
+  given = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+  x = started(given = {OtelSample: 1})
+  _ = x.T.Raw("GET", "/notes/1", headers = [{Name: "traceparent", Value: given}])
+  s = server(sent(x))
+  bug.Assert(s.traceId != "4bf92f3577b34da6a3ce929d0e0e4736" and s.links[1].spanId == "00f067aa0ba902b7" and not dict.Has("parentSpanId", s), "restarted: $s")
+  y = started(given = {OtelTrust: "trust"})
+  _ = y.T.Raw("GET", "/notes/1", headers = [{Name: "traceparent", Value: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}])
+  u = server(sent(y))
+  z = started(given = {OtelTrust: "trust"})
+  _ = z.T.Raw("GET", "/notes/1", headers = [{Name: "traceparent", Value: given}])
+  u.traceId == "4bf92f3577b34da6a3ce929d0e0e4736" and u.parentSpanId == "00f067aa0ba902b7" and value.Len(sent(z).Spans) == 0
+end
+
+defn isClientNamedOnlyAsTheSettingsSay()
+  (** The client's address and account leave only as APP_TELEMETRY_IP and APP_TELEMETRY_USER say: none by default, the
+      network alone with truncated. *)
+  x = started()
+  _ = x.T.Raw("GET", "/notes/1")
+  quiet = server(sent(x))
+  y = started(given = {TelemetryIp: "truncated"})
+  _ = y.T.Raw("GET", "/notes/1")
+  cut = server(sent(y))
+  value.IsMissing(attrOf(quiet, "client.address")) and value.IsMissing(attrOf(quiet, "enduser.id")) and attrOf(cut, "client.address") == "198.51.100.0"
+end
+
+defn isNotSampledLeavingNothing()
+  (** A request not sampled leaves no span and no line of its own, unless it failed: then its server span alone, with
+      its status; its log lines carry its trace all the same. *)
+  x = started(given = {OtelSample: 0})
+  _ = x.T.Raw("GET", "/notes/1")
+  boom = x.T.Raw("GET", "/boom")
+  out = sent(x)
+  names = [s.name for s in out.Spans]
+  bug.Assert(boom.Status == 500 and value.Equal(names, ["GET /boom"]), "names: $names")
+  failed = out.Spans[1]
+  bug.Assert(failed.status.code == 2 and attrOf(failed, "error.type") == "500" and value.IsMissing(http.HeaderValue("server-timing", boom.Headers)), "failed: $failed")
+  lines = [l for l in out.Logs if dict.Has("traceId", l)]
+  value.Len([l for l in lines if l.traceId != failed.traceId]) == 0
+end
+
+defn isLogLineInItsTrace()
+  (** A line of the log written in a request carries its trace and span, in the line and in OTLP. *)
+  x = started(given = {LogRequests: true})
+  _ = x.T.Raw("GET", "/notes/1")
+  out = sent(x)
+  server = list.First([s for s in out.Spans if s.kind == 2])
+  line = list.First([l for l in out.Logs if l.body.stringValue == "request"])
+  line.traceId == server.traceId and line.spanId == server.spanId and line.severityText == "info"
+end
+
+defn isOtelSettingChecked()
+  (** A wrong setting of OpenTelemetry stops the start, named. *)
+  wrong = [apptest.Start(App, settings = {Otel: "on", OtelAlways: "errors,never"}), apptest.Start(App, settings = {Otel: "on", OtelSignals: "traces,profiles"}),
+    apptest.Start(App, settings = {Otel: "on", OtelEndpoint: "ftp://collector"}), apptest.Start(App, settings = {Otel: "on", OtelCompression: "gzip"})]
+  messages = [w.Error.Message for w in wrong if result.IsErr(w)]
+  bug.Assert(value.Len(messages) == 4, "refused: $messages")
+  text.Contains("APP_OTEL_ALWAYS", messages[1]) and text.Contains("APP_OTEL_SIGNALS", messages[2]) and text.Contains("APP_OTEL_ENDPOINT", messages[3]) and text.Contains("ffi=z", messages[4])
+end
+
+defn isOffByDefaultAndCostsNothing()
+  (** Without APP_OTEL, no tracer, no header of a trace, no span: the request is the one of before. *)
+  t = apptest.Start(App)!
+  got = t.Raw("GET", "/notes/1")
+  value.IsMissing(t.Env.Otel) and value.IsMissing(http.HeaderValue("server-timing", got.Headers)) and value.IsMissing(otel.Header())
+end

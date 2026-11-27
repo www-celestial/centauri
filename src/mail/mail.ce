@@ -22,6 +22,7 @@ use std/log
 use std/math
 use std/metrics
 use std/net
+use std/otel
 use std/result
 use std/sys
 use std/text
@@ -272,11 +273,14 @@ defn Send(env, m)
   t = Target(urlOf(env))?
   id = encode.Hex(crypto.Random(12, env.Keys))
   msg = Message(m, fromOf(env), env.Now(), id)
+  (* a span when the job that sends it is traced: the transport and the server, never an address *)
+  span = otel.Begin("mail send", kind = "client", attributes = {"centauri.mail.transport": t.Scheme, "server.address": dict.Get("Host", t)})
   sent = if t.Scheme == "test" kept(msg, env)
     else if t.Scheme == "log" logged(msg)
     else if t.Scheme == "file" filed(msg, t)
     else if t.Scheme == "postmark" postmark(msg, t, env)
     else smtp(msg, t, env) end
+  otel.End(span, failed = result.IsErr(sent), attributes = if result.IsErr(sent) {"error.type": dict.GetOr("Code", "failed", sent.Error)} else {} end)
   if result.IsOk(sent)
     metrics.Add("mails_total", labels = {transport: t.Scheme, state: "sent"})
     return result.Ok({Id: msg.Id})

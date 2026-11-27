@@ -26,6 +26,7 @@ use std/list
 use std/log
 use std/math
 use std/metrics
+use std/otel
 use std/random
 use std/result
 use std/sys
@@ -37,7 +38,7 @@ use std/value
     written), when it ended. *)
 Job = app.Kind("centauri_job", {Kind: cepheus.Text(), Args: cepheus.Text(), State: cepheus.Text(), RunAt: cepheus.Date(),
   Tries: cepheus.Int(), Lease: cepheus.Date(), Error: cepheus.Text(), Key: cepheus.Text(unique = true), Done: cepheus.Date(),
-  Refs: cepheus.Text(), Ref1: cepheus.Link(), Ref2: cepheus.Link(), Ref3: cepheus.Link(), Ref4: cepheus.Link()})
+  Refs: cepheus.Text(), Ref1: cepheus.Link(), Ref2: cepheus.Link(), Ref3: cepheus.Link(), Ref4: cepheus.Link(), Trace: cepheus.Text()})
 
 (* The links of a job to things new in its group: a field of its arguments whose value is cepheus.New(k) is kept as a
    link, which Cepheus writes with the thing's id; Refs names those fields, in the order of Ref1 to Ref4. *)
@@ -97,7 +98,7 @@ defn Later(kind, args, at = missing, key = missing, thing = 1000000)
   bug.Assert(text.ByteLength(data) <= 65536, "The arguments of the job $(kind.Name) take more than 64 KiB: keep the data in things of its own.")
   job = cepheus.New(thing)
   ops = app.Facts(Job, job, {Kind: kind.Name, Args: data, State: "ready", RunAt: if value.IsMissing(at) 0 else at end, Tries: 0, Key: key,
-    Refs: if value.Len(refs) == 0 missing else text.Join(",", refs) end})
+    Refs: if value.Len(refs) == 0 missing else text.Join(",", refs) end, Trace: otel.Header()})
   list.Concat(ops, [cepheus.Add(job, refProps[k], given[refs[k]]) for k in 1..value.Len(refs)])
 end
 
@@ -331,6 +332,10 @@ defn RunOne(id, kinds, env, beat = true)
     return finish(id, kind.Name, tries, kind.Tries, Stop("Its arguments don't fit the shape of $(kind.Name)."), until, env)
   end
   jobEnv = dict.Put("Why", "job $(kind.Name) #$id", dict.Put("Job", {Id: id, Kind: kind.Name, Try: tries, Key: dict.Get("Key", j)}, env))
+  (* with Otel on, a run is a span of a trace of its own, linked to the trace of the request that asked for it *)
+  span = if value.IsMissing(dict.Get("Otel", env)) missing else otel.Begin("process $(kind.Name)", kind = "consumer", tracer = env.Otel,
+    links = if value.IsText(dict.Get("Trace", j)) [j.Trace] else [] end, attributes = {"messaging.system": "centauri", "messaging.operation.type": "process",
+    "messaging.destination.name": kind.Name, "messaging.message.id": "$id", "centauri.job.try": tries}) end
   started = sys.Now()
   task = fiber.Spawn(() -> kind.Run(args.Value, jobEnv))
   outcome = missing
@@ -354,7 +359,9 @@ defn RunOne(id, kinds, env, beat = true)
     end
   end
   metrics.Observe("job_seconds", sys.Now() - started)
-  finish(id, kind.Name, tries, kind.Tries, outcome, until, env)
+  done = finish(id, kind.Name, tries, kind.Tries, outcome, until, env)
+  otel.End(span, failed = result.IsErr(outcome), message = if result.IsErr(outcome) messageOf(outcome.Error) else "" end)
+  done
 end
 
 defn finish(id, name, tries, most, outcome, until, env)
