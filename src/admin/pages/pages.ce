@@ -17,6 +17,7 @@ use std/http
 use std/js
 use std/json
 use std/list
+use std/math
 use std/result
 use std/text
 use std/value
@@ -182,7 +183,7 @@ defn shell(p, page, site)
     top = [() -> crumbs(web.Get(p.Nav), site, p)],
     sheet = () -> sheetOf(web.Get(site.Sheet)),
     find = () -> commands(p, site, OkOf(web.Get(kinds))),
-    view = () -> viewOfPath(web.Get(p.Nav)), label = site.Title, say = t -> Say(t))
+    view = () -> viewOfPath(web.Get(p.Nav)), label = site.Title, say = t -> Say(t), tabs = site.Tabs == true, title = () -> pageTitle(site))
 end
 
 defn viewOfPath(path)
@@ -233,7 +234,7 @@ end
 defn liveLine(p, points)
   (** The connection at the foot of the side bar, and the time of the requests of the last second. *)
   last = if value.IsEmpty(points) missing else list.Reverse(list.SortBy(x -> x.At, points))[1] end
-  web.Row([web.Connection(p, say = t -> Say(t)), if value.IsMissing(last) missing else web.Text(Say("· p50 {N} ms", {N: Num(last.P50)}), size = "small", color = gray) end], gap = 6)
+  web.Row([web.Connection(p, say = t -> Say(t)), if value.IsMissing(last) missing else web.Text(Say("· p50 {N} ms", {N: Num(math.Round(last.P50 * 10) / 10)}), size = "small", color = gray) end], gap = 6)
 end
 
 defn meLine(site)

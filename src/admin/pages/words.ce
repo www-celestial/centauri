@@ -391,6 +391,7 @@ Words = i18n.Of([i18n.Catalog("fr", [
   ["Waiting for the first seconds…", "En attente des premières secondes…"],
   ["Warnings", "Avertissements"],
   ["Menu", "Menu"],
+  ["Views", "Vues"],
   ["Close", "Fermer"],
   ["dense", "dense"],
   ["compact", "compacte"],

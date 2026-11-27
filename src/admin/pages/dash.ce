@@ -98,13 +98,15 @@ defn strip(points, s, p)
   stat = (n, what, tone) -> web.Row([web.Text(n, font = "strong", color = tone), web.Text(what, color = if value.IsMissing(tone) gray else tone end)], gap = 5)
   errors = list.Sum([x.Errors for x in minute])
   cells = [live, stat(Num(list.Sum([x.Requests for x in minute])), Say("requests/min"), missing),
-    web.Row([web.Text(Say("p50"), color = gray), web.Text(Say("{N} ms", {N: Num(last.P50)}), font = "strong"), web.Text(Say("· p99"), color = gray), web.Text(Say("{N} ms", {N: Num(last.P99)}), font = "strong")], gap = 5),
+    web.Row([web.Text(Say("p50"), color = gray), web.Text(Say("{N} ms", {N: Num(tenth(last.P50))}), font = "strong"), web.Text(Say("· p99"), color = gray), web.Text(Say("{N} ms", {N: Num(tenth(last.P99))}), font = "strong")], gap = 5),
     stat(Num(errors), Say("errors in the last minute"), if errors > 0 red else missing end),
     web.Link(Say("{N} jobs failed", {N: Num(last.Dead)}), "/jobs"),
     if value.IsDict(s) stat(Num(s.Sessions), Say("sessions"), missing) else missing end,
     () -> upCell(web.Get(dict.Get("App", p.Site)))]
   web.Strip(cells)
 end
+
+tenth(x) = math.Round(x * 10) / 10   (* A time to a tenth of a millisecond. *)
 
 defn upCell(r)
   (** How long the app has run, for the strip. *)
@@ -124,8 +126,8 @@ defn board(ps, cross)
   pick = (xs, i) -> if value.IsMissing(i) xs[value.Len(xs)] else xs[i] end
   req = col("Requests")
   err = col("Errors")
-  p50 = col("P50")
-  p99 = col("P99")
+  p50 = [tenth(v) for v in col("P50")]
+  p99 = [tenth(v) for v in col("P99")]
   refused = [x.Origin + x.Limit + x.Signin + x.Role for x in ps]
   fails = col("Failures")
   ready = col("Ready")
