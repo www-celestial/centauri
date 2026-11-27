@@ -27,6 +27,7 @@ event of the history, and nobody disables himself or takes the role from himself
 | `GET /admin/flags`, `PUT /admin/flags/:name` | the feature flags the code declares, with what was set over them; one set for everyone, a share of the users, a tenant or a user, or cleared (served by `flags.Module`: [flags](flags.md)) |
 | `GET /admin/jobs?State=&Kind=`, `POST /admin/jobs/:id/retry`, `POST /admin/jobs/:id/cancel` | the jobs of a state and a kind; a dead one run again; a waiting one made dead (a running one: 409) |
 | `PATCH /admin/data/:kind/:id` | fields of a thing changed (`Fields`, a JSON object), each through the shape of its type; a secret one refused |
+| `GET /admin/series?Step=&Count=` | the history of the dashboard as columns: the last `Count` points of a `Step` (1, 60 or 600), the oldest first |
 | the live shows `admin.series`, `admin.events`, `admin.logs` | the points of the dashboard, a second's for 15 minutes, a minute's and ten minutes' for 7 days, the events of the last hour as they come, the log of the process as it goes |
 
 `admin.series` is the history of the process, sampled once whatever the pages that watch it: from the start of the app
@@ -42,7 +43,20 @@ minutes. A minute's point sums its seconds (requests, 5xx, refusals, sign-ins), 
 keeps its last second's `Failures`, jobs and `Screens`, and its `P50` and `P99` are those of every request of its span,
 within 1 % (DDSketch: Masson, Rim and Lee, *PVLDB* 12(12), 2019; the sketches of the minutes merge into ten minutes'
 with no loss). The other fields: `Screens`, the live screens open on the
-process; `SignedIn` and `FailedSignIns`, the sign-ins that opened a session and those refused.
+process; `SignedIn` and `FailedSignIns`, the sign-ins that opened a session and those refused; what the process uses,
+in a second's point (a minute's and ten minutes' keep their last second's): `Cpu`, its share of one core over the
+second in percent (200 for two cores busy), `Memory`, its bytes in RAM (from `sys.Usage()`), and `DiskUsed` and
+`DiskTotal`, the bytes of the file system that holds the folder of the setting `AdminDisk` (from `sys.Disk`), as the
+data folder of a Cepheus on the same machine, when it is given: the app needs `--allow read` on it. A field the system
+doesn't tell is absent, never 0. A database's writes have no source yet: the package of Cepheus counts none.
+
+`GET /admin/series` gives the same history in columns, what a page reads once when it opens and when its range
+changes, before `admin.series` with `{"Seconds": 60}` for the points that come: `{"Step": 1, "Ats": [...], "Cols":
+{"Requests": [...], "P99": [...], "Memory": [...]...}}`, a list a field (`Requests`, `Errors`, `Origin`, `Limit`,
+`Signin`, `Role`, `Failures`, `SignedIn`, `FailedSignIns`, `P50`, `P99`, `Ready`, `Running`, `Dead`, `Screens`, and
+`Cpu`, `Memory`, `DiskUsed`, `DiskTotal` when every point has them), the times of the requests to the tenth of a
+millisecond. `Count` is all the points kept unless given. Measured on a full history: `Step=1&Count=900` is about
+83 KB of JSON, `Step=60&Count=60` 6 KB, `Step=600&Count=1008` 96 KB, where the rows of `admin.series` were 412 KB.
 
 `GET /admin/events` also takes `Route`, `Since` and `Until` (ISO 8601). `GET /admin/data/:kind` and `GET /admin/kinds`
 never give a field that `app.Kind(..., secret = [...])` names: it comes as `(secret)`, and `Secret` marks it among the

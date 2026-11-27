@@ -31,6 +31,7 @@ plateforme en garde donc toujours un.
 | `GET /admin/flags`, `PUT /admin/flags/:name` | les feature flags (un feature flag : un interrupteur qui ouvre une fonction à tous, à une part des utilisateurs, à un tenant ou à un utilisateur) que le code déclare, avec ce qui a été réglé par-dessus ; un flag réglé pour tout le monde, une part des utilisateurs, un tenant ou un utilisateur, ou effacé (servis par `flags.Module` : [flags](flags.md)) |
 | `GET /admin/jobs?State=&Kind=`, `POST /admin/jobs/:id/retry`, `POST /admin/jobs/:id/cancel` | les jobs d'un état et d'un type ; un job mort relancé ; un job en attente rendu mort (un job qui tourne : 409) |
 | `PATCH /admin/data/:kind/:id` | des champs d'une chose changés (`Fields`, un objet JSON), chacun à travers la forme de son type (ce qu'une valeur doit être : un texte de 1 à 120 octets, un nombre entier...) ; un champ secret refusé |
+| `GET /admin/series?Step=&Count=` | l'historique du tableau de bord en colonnes : les `Count` derniers points d'un `Step` (1, 60 ou 600), les plus anciens d'abord |
 | les shows en direct `admin.series`, `admin.events`, `admin.logs` (un show : une liste en direct qu'une page demande par son nom) | les points du tableau de bord, un par seconde sur 15 minutes, un par minute et un toutes les dix minutes sur 7 jours, les événements de la dernière heure à mesure qu'ils arrivent, le log du processus à mesure qu'il s'écrit |
 
 `admin.series` est l'historique du processus, échantillonné une seule fois quel que soit le nombre de pages qui le
@@ -49,7 +50,22 @@ dernière seconde `Failures`, les jobs et `Screens`, et ses `P50` et `P99` sont 
 à 1 % près (DDSketch, un sketch, c'est-à-dire un résumé de taille bornée qui donne les quantiles : Masson, Rim et Lee,
 *PVLDB* 12(12), 2019 ; les sketches des minutes s'additionnent en celui des dix minutes sans rien perdre). Les autres
 champs : `Screens`, les écrans live ouverts sur le processus ; `SignedIn` et `FailedSignIns`, les connexions qui ont
-ouvert une session et celles refusées.
+ouvert une session et celles refusées ; ce que le processus utilise, dans le point d'une seconde (ceux d'une minute et
+de dix minutes gardent celui de leur dernière seconde) : `Cpu`, sa part d'un cœur sur la seconde en pourcentage (200
+pour deux cœurs occupés), `Memory`, ses octets en RAM (de `sys.Usage()`), et `DiskUsed` et `DiskTotal`, les octets du
+système de fichiers qui tient le dossier du réglage `AdminDisk` (de `sys.Disk`), comme le dossier des données d'un
+Cepheus sur la même machine, quand il est donné : l'app a besoin de `--allow read` sur lui. Un champ que le système ne
+dit pas est absent, jamais 0. Les écritures de la base n'ont pas encore de source : le paquet de Cepheus n'en compte
+aucune.
+
+`GET /admin/series` donne le même historique en colonnes, ce qu'une page lit une fois à son ouverture et quand sa
+période change, avant `admin.series` avec `{"Seconds": 60}` pour les points qui arrivent : `{"Step": 1, "Ats": [...],
+"Cols": {"Requests": [...], "P99": [...], "Memory": [...]...}}`, une liste par champ (`Requests`, `Errors`, `Origin`,
+`Limit`, `Signin`, `Role`, `Failures`, `SignedIn`, `FailedSignIns`, `P50`, `P99`, `Ready`, `Running`, `Dead`,
+`Screens`, et `Cpu`, `Memory`, `DiskUsed`, `DiskTotal` quand chaque point les a), les temps des requêtes au dixième de
+milliseconde. `Count` vaut tous les points gardés s'il n'est pas donné. Mesuré sur un historique plein :
+`Step=1&Count=900` fait environ 83 Ko de JSON, `Step=60&Count=60` 6 Ko, `Step=600&Count=1008` 96 Ko, là où les lignes
+d'`admin.series` faisaient 412 Ko.
 
 `GET /admin/events` prend aussi `Route`, `Since` et `Until` (ISO 8601). `GET /admin/data/:kind` et `GET /admin/kinds`
 ne donnent jamais un champ que nomme `app.Kind(..., secret = [...])` : il arrive comme `(secret)`, et `Secret` le marque

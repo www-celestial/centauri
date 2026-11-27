@@ -284,6 +284,8 @@ defn isSeriesOneSamplerForEveryScreen()
   bug.Assert(json.Text(pa[1]) == json.Text(pb[1]) and json.Text(pa[2]) == json.Text(pb[2]), "the same rows for each screen: $(pa[1]) $(pb[1])")
   bug.Assert(list.All([p.Step == 1 for p in pa]) and list.Any([p.Screens >= 3 for p in pa]), "seconds, and the screens open: $pa")
   bug.Assert(list.Any([p.SignedIn >= 1 for p in pa]) and list.Any([p.FailedSignIns >= 1 for p in pa]), "the sign-ins, done and failed: $pa")
+  bug.Assert(list.All([p.Cpu >= 0 and p.Cpu < 10000 and (not dict.Has("Memory", p) or p.Memory > 1000000) and not dict.Has("DiskUsed", p) for p in pa]),
+    "what the process uses, no disk without AdminDisk: $(pa[1])")
   came = [json.Text(p) for p in pointsOf(gc)]
   gone = list.Flatten([dict.GetOr("Removed", [], m) for m in gc if dict.Get("Show", m) == "admin.series"])
   bug.Assert(value.Len(gone) >= 1 and list.All([json.Text(p) in came for p in gone]), "the very rows that left: $gone")
@@ -310,4 +312,25 @@ defn isSamplerStartedWithTheAppUnlessPagesOff()
   m.Start(on.Env)
   m.Start(off.Env)
   value.IsSome(fiber.Recall("admin.series", 0, on.Env.Own)) and value.IsMissing(fiber.Recall("admin.series", 0, off.Env.Own))
+end
+
+defn isSeriesHistoryAsColumns()
+  (** GET /admin/series: the history as columns, for the role super alone, the sampler started by the first ask; a
+      Step that is no ring refused; with AdminDisk, the bytes of its file system in each second. *)
+  _ = sys.Mkdir(".cesia")
+  t = apptest.Start(App, settings = {AdminDisk: ".cesia"})?
+  boss = super(t)?
+  ana = t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"})?
+  first = boss.Call(api.AdminSeriesData, {Step: 1})?
+  bug.Assert(first.Step == 1 and value.Len(first.Ats) == 0 and value.Len(first.Cols.Requests) == 0, "none before the first second: $first")
+  bug.Assert(t.Anyone().Call(api.AdminSeriesData, {Step: 1}).Error.Status == 401 and ana.Call(api.AdminSeriesData, {Step: 1}).Error.Status == 403, "the role super alone")
+  bug.Assert(boss.Call(api.AdminSeriesData, {Step: 7}).Error.Status == 422 and boss.Call(api.AdminSeriesData, {Step: 60, Count: 0}).Error.Status == 400, "a wrong ask")
+  sys.Sleep(2.3)
+  got = boss.Call(api.AdminSeriesData, {Step: 1})?
+  one = boss.Call(api.AdminSeriesData, {Step: 1, Count: 1})?
+  n = value.Len(got.Ats)
+  bug.Assert(n >= 2 and value.Len(got.Cols.Requests) == n and value.Len(got.Cols.P99) == n and value.Len(one.Ats) == 1 and one.Ats[1] == got.Ats[n], "the seconds: $got")
+  bug.Assert(list.All([x > 0 for x in got.Cols.DiskTotal]) and list.All([got.Cols.DiskUsed[k] <= got.Cols.DiskTotal[k] for k in 1..n]), "the disk: $(got.Cols.DiskTotal)")
+  minutes = boss.Call(api.AdminSeriesData, {Step: 60})?
+  list.All([x >= 0 for x in got.Cols.Cpu]) and value.Len(minutes.Ats) == 0
 end

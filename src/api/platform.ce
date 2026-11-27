@@ -187,11 +187,16 @@ AdminJobCancel = Post("/admin/jobs/:id/cancel", role = Super, about = "Cancels a
     ResumeTime seconds); SignedIn and FailedSignIns, the sign-ins that opened a session (every way in: a password, a
     passkey, a provider, a second factor) and those refused. A minute's point sums its seconds, and ten minutes' their
     minutes, but for Failures, Ready, Running, Dead and Screens, their last second's; their P50 and P99 are those of
-    every request of their span, within 1 % (a sketch of their times, DDSketch, the ten minutes' the minutes' merged). *)
+    every request of their span, within 1 % (a sketch of their times, DDSketch, the ten minutes' the minutes' merged).
+    And what the process uses (a minute's and ten minutes', the last second's): Cpu, its share of one core over the
+    second, in percent (200 for two cores busy); Memory, its bytes in RAM; DiskUsed and DiskTotal, the bytes of the
+    file system of the folder of the setting AdminDisk, when it is given. Each of these four is absent where the system
+    doesn't tell it. *)
 PointRow = check.Record({At: check.Float(), Requests: check.Float(0), Errors: check.Float(0), Origin: check.Float(0), Limit: check.Float(0),
   Signin: check.Float(0), Role: check.Float(0), Failures: check.Float(0), P50: check.Float(0), P99: check.Float(0), Ready: check.Float(0),
   Running: check.Float(0), Dead: check.Float(0), Step: check.Int(1, 600), Screens: check.Float(0), SignedIn: check.Float(0),
-  FailedSignIns: check.Float(0)})
+  FailedSignIns: check.Float(0), Cpu: check.Float(0, optional = true), Memory: check.Float(0, optional = true), DiskUsed: check.Float(0, optional = true),
+  DiskTotal: check.Float(0, optional = true)})
 
 (** The dashboard live: the points of this process that its sampler keeps, a point a second for the last 15 minutes, a
     point a minute and a point every ten minutes for the last 7 days, sampled from the start of the app whoever
@@ -201,6 +206,21 @@ PointRow = check.Record({At: check.Float(), Requests: check.Float(0), Errors: ch
 AdminSeries = Live("admin.series", args = check.Record({Seconds: check.Int(0, 900, optional = true, default = 300),
   Minutes: check.Int(0, 10080, optional = true, default = 0), Tens: check.Int(0, 1008, optional = true, default = 0)}), out = PointRow,
   role = Super, about = "The dashboard's points: a second's for 15 minutes, a minute's and ten minutes' for 7 days.")
+
+(* A column of the history: a number a point, at most a week of minutes. *)
+column = check.List(check.Float(), 0, 10080)
+
+(** The history of the dashboard, compact: the last Count points of a Step (1, a second's; 60, a minute's; 600, ten
+    minutes'; all those kept unless Count says), the oldest first, as columns: Ats, their times, and Cols, a list of
+    numbers for each field of PointRow, the times of the requests to the tenth of a millisecond; a field that a point
+    of them lacks (Cpu, Memory, DiskUsed, DiskTotal, where the system doesn't tell it) has no column. What a page asks
+    when it opens or when its range changes, then admin.series for the points that come. *)
+AdminSeriesData = Get("/admin/series", query = check.Record({Step: check.Int(1, 600), Count: check.Int(1, 10080, optional = true)}),
+  out = check.Record({Step: check.Int(1, 600), Ats: column, Cols: check.Record({Requests: column, Errors: column, Origin: column, Limit: column,
+    Signin: column, Role: column, Failures: column, SignedIn: column, FailedSignIns: column, P50: column, P99: column, Ready: column,
+    Running: column, Dead: column, Screens: column, Cpu: check.List(check.Float(), 0, 10080, optional = true),
+    Memory: check.List(check.Float(), 0, 10080, optional = true), DiskUsed: check.List(check.Float(), 0, 10080, optional = true),
+    DiskTotal: check.List(check.Float(), 0, 10080, optional = true)})}), role = Super, about = "The dashboard's history, as columns.")
 
 (** The events of the last hour, live, their times in seconds since 1970: each new one as it is written, by any server
     of the app. *)
