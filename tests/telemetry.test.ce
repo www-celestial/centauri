@@ -100,15 +100,15 @@ defn isMarkupKeptAsText()
 end
 
 defn isFloodBounded()
-  (** A flood of batches: 60 a minute from an address, then 429; APP_TELEMETRY_MOST a minute for the whole process,
+  (** A flood of batches: 300 a minute from an address, then 429; APP_TELEMETRY_MOST a minute for the whole process,
       past which a batch is dropped (204, nothing written, counted); a body past 64 KiB is refused unread past it. *)
   t = apptest.Start(App, settings = {TelemetryMost: 5})!
   outs = [post(t, batch(view = "f0f0f0f0f0f0f0$(text.PadLeft(2, "0", "$k"))"), ip = "198.51.100.$k").Status for k in 1..10]
   bug.Assert(value.Equal(list.Unique(outs), [204]) and value.Len(views(t)) == 5, "outs $outs, views $(value.Len(views(t)))")
   u = apptest.Start(App, settings = {LimitIp: 1000000})!
-  statuses = [post(u, batch(view = "e0e0e0e0e0e0e0$(text.PadLeft(2, "0", "$k"))"), ip = "203.0.113.9").Status for k in 1..62]
+  statuses = [post(u, batch(view = "e0e0e0e0e0e0e0$(text.PadLeft(2, "0", "$k"))"), ip = "203.0.113.9").Status for k in 1..302]
   big = post(u, missing, raw = json.Text(batch(items = [{K: "error", Message: text.Repeat(590, "x")} for k in 1..120])))
-  bug.Assert(statuses[60] == 204 and statuses[61] == 429, "limited: $(list.Unique(statuses))")
+  bug.Assert(statuses[300] == 204 and statuses[301] == 429, "limited: $(list.Unique(statuses))")
   big.Status == 413
 end
 
