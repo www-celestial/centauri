@@ -1,0 +1,100 @@
+(** What OpenTelemetry costs a request of Centauri, in this program, without the network to the app: the same three
+    requests (public, a thing by its id, a page of 20 things) through an app with APP_OTEL off, on with no request
+    sampled, and on with every one sampled and sent, its spans of Cepheus with it, in protobuf or JSON, to a collector
+    at SINK (bench/otel-sink.ce, another process). A measure is n calls, then the flush of what they made, so that its
+    time holds the encoding and the sending of their spans; rounds alternate the order; one JSON line a measure, with
+    the bytes sent a request:
+    SINK=http://127.0.0.1:4319 cesia run --allow native=cepheus,ffi=sodium,env,net bench/otel.ce [ROUNDS] [N] *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/check
+use std/dict
+use std/io
+use std/json
+use std/list
+use std/math
+use std/otel
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Note = app.Kind("note", {Tenant: cepheus.Link(), Text: cepheus.Text()})
+NoteOut = check.Record({Id: check.Id(), Text: check.Text()})
+Hello = api.Get("/hello", out = check.Record({Text: check.Text()}), role = api.Public)
+One = api.Get("/notes/:id", out = NoteOut, role = "member")
+Many = api.Get("/notes", out = api.Page(NoteOut, 20), role = "member")
+Add = api.Post("/notes", body = check.Record({Text: check.Text(1, 200)}), out = NoteOut, role = "member")
+
+defn add(r, x)
+  made = cepheus.Insert(Note, {Tenant: r.User.Tenant, Text: x.Text}, r.Db, by = r.User.Id, why = r.Why)?
+  app.Own(Note, made, r)
+end
+
+many(r) = cepheus.Find(2, (n, t) -> {Where: [[n, Note.Tenant, r.User.Tenant], [n, Note.Text, t]], Give: {Id: n, Text: t}, Sort: [n], Limit: r.Limit, After: r.After}, r.Db)
+
+App = app.Of([auth.Module(), app.Module("notes", kinds = [Note], serve = [app.Serve(Hello, r -> {Text: "Hello"}), app.Serve(One, r -> app.Own(Note, r.Params.id, r)),
+  app.Serve(Many, many), app.Serve(Add, add)])])
+
+args = sys.Args
+rounds = if value.Len(args) >= 1 text.Number(args[1]) else 21 end
+n = if value.Len(args) >= 2 text.Number(args[2]) else 2000 end
+sink = if value.IsText(sys.Env("SINK")) sys.Env("SINK") else "http://127.0.0.1:4319" end
+
+defn started(more)
+  (** The app as micro.ce has it, with 50 notes, and these settings more: {T, Cookie, First}. *)
+  t = result.Unwrap(apptest.Start(App, settings = dict.Merge({Profile: "prod", Origin: "https://notes.example", Secret: text.Repeat(40, "s"), CepheusUrl: "cepheus://none",
+    LogRequests: false, LimitIp: 1000000, LimitUser: 1000000, LimitTenant: 10000000, OtelEndpoint: sink, OtelQueue: 1000000, OtelEvery: 3600}, more)))
+  ana = result.Unwrap(t.SignUp({Email: "ana@example.com", Password: "correct horse 12", Name: "Ana"}))
+  for k in 1..50
+    result.Unwrap(ana.Call(Add, {Text: "note $k"}))
+  end
+  {T: t, Cookie: ana.Cookie, First: result.Unwrap(ana.Call(Many)).Rows[1].Id}
+end
+
+apps = [{Name: "off", A: started({})}, {Name: "on, none sampled", A: started({Otel: "on", OtelSample: 0, OtelAlways: ""})},
+  {Name: "on, sent in protobuf", A: started({Otel: "on"})}, {Name: "on, sent in JSON", A: started({Otel: "on", OtelProtocol: "json"})}]
+ask(path, c) = {Method: "GET", Path: path, Query: "", Headers: [{Name: "host", Value: "notes.example"}, {Name: "cookie", Value: c}], Body: "", Peer: "203.0.113.7"}
+cases = list.Flatten([[{Name: "public, a JSON of one field, $(x.Name)", Env: x.A.T.Env, Handle: x.A.T.Handle, Request: ask("/hello", "")},
+  {Name: "signed in, a thing by its id, $(x.Name)", Env: x.A.T.Env, Handle: x.A.T.Handle, Request: ask("/notes/$(x.A.First)", x.A.Cookie)},
+  {Name: "signed in, a page of 20 things, $(x.Name)", Env: x.A.T.Env, Handle: x.A.T.Handle, Request: ask("/notes", x.A.Cookie)}] for x in apps])
+
+for c in cases
+  bad = c.Handle(c.Request)
+  if bad.Status != 200
+    io.PrintError("$(c.Name): $(bad.Status) $(bad.Body)")
+    sys.Exit(1)
+  end
+end
+for x in apps
+  if value.IsSome(x.A.T.Env.Otel)
+    otel.Flush(x.A.T.Env.Otel)
+  end
+end
+
+for round in 1..rounds
+  order = if math.Mod(round, 2) == 0 list.Reverse(cases) else cases end
+  for c in order
+    tracer = c.Env.Otel
+    before = if value.IsSome(tracer) otel.Counts(tracer) else missing end
+    start = sys.Now()
+    for k in 1..n
+      c.Handle(c.Request)
+    end
+    if value.IsSome(tracer)
+      otel.Flush(tracer)
+    end
+    us = (sys.Now() - start) / n * 1000000
+    after = if value.IsSome(tracer) otel.Counts(tracer) else missing end
+    line = {Name: c.Name, Round: round, Us: us}
+    if value.IsSome(after)
+      line.Bytes = (after.Bytes - before.Bytes) / n
+      line.Spans = (after.Spans - before.Spans) / n
+      line.Dropped = after.Dropped - before.Dropped
+    end
+    io.Print(json.Text(line))
+  end
+end

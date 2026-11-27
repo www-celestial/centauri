@@ -1,0 +1,9 @@
+(** A collector of OTLP for the measures of bench/otel.ce: it takes each export at once (200) and counts nothing, on
+    127.0.0.1:PORT (4319). *)
+use std/http
+use std/sys
+use std/text
+use std/value
+port = if value.IsText(sys.Env("PORT")) text.Number(sys.Env("PORT")) else 4319 end
+took(r) = http.Json({})
+http.Serve(http.App() then http.Post("/v1/traces", took) then http.Post("/v1/logs", took) then http.Post("/v1/metrics", took), port = port, host = "127.0.0.1", maxBody = 67108864)

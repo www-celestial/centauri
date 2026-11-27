@@ -133,7 +133,19 @@ defn traced(span, out, req, ip, user, env)
       one tells the page its trace in Server-Timing, as OpenTelemetry's browser code reads it, and a live action in the
       answer's Trace. *)
   route = dict.Get("Route", out)
-  attrs = {"http.response.status_code": out.Status}
+  status = out.Status
+  if span.Rec
+    trace = "00-$(span.TraceId)-$(span.SpanId)-01"
+    out = http.WithHeader("server-timing", "traceparent;desc=\"$trace\"", out)
+    out.Trace = trace
+  end
+  otel.End(span, failed = status >= 500, attributes = () -> attributesOf(route, status, ip, user, env), name = if value.IsText(route) route else req.Method end)
+  out
+end
+
+defn attributesOf(route, status, ip, user, env)
+  (** The attributes of a request's span that only its answer tells, made only when the span is kept. *)
+  attrs = {"http.response.status_code": status}
   if value.IsText(route)
     attrs["http.route"] = text.Split(" ", route)[2]
   end
@@ -144,16 +156,10 @@ defn traced(span, out, req, ip, user, env)
   if env.Settings.TelemetryUser == "on" and not value.IsMissing(user)
     attrs["enduser.id"] = value.Text(user)
   end
-  if out.Status >= 500
-    attrs["error.type"] = "$(out.Status)"
+  if status >= 500
+    attrs["error.type"] = "$status"
   end
-  if span.Rec
-    trace = "00-$(span.TraceId)-$(span.SpanId)-01"
-    out = http.WithHeader("server-timing", "traceparent;desc=\"$trace\"", out)
-    out.Trace = trace
-  end
-  otel.End(span, failed = out.Status >= 500, attributes = attrs, name = if value.IsText(route) route else req.Method end)
-  out
+  attrs
 end
 
 defn Truncated(ip, keep)
