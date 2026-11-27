@@ -329,6 +329,10 @@ demande d'attendre, les séries d'une métrique bornées.
 
 Ce qu'il ne fait pas encore : un replay de session ; les source maps du JavaScript minifié d'une app (le code de Ceres
 lui-même est du Cesia, dont les erreurs nomment déjà leur ligne du `.ce`) ; les spans des propres appels `fetch` d'une
-page (une page de Ceres parle à son app par son écran en direct, dont les actions sont tracées). Les lectures de
+page (une page de Ceres parle à son app par son écran en direct, dont les actions sont tracées) ; leurs graphiques
+dans le tableau de bord de l'admin, qui liste pour l'instant les vues, les actions et les erreurs comme des données :
+le 75e percentile du LCP, de l'INP et du CLS par route et par jour, face aux seuils de Google ; les erreurs par sorte et
+par route ; les actions les plus lentes par nom, chacune avec ses deux traces ; les navigateurs, les systèmes et les
+pays des visites ; le temps jusqu'à l'écran en direct et ses coupures ; les spans envoyés et perdus. Les lectures de
 Cepheus de ce chapitre prennent des microsecondes, sur une base de données en mémoire ; sur un serveur Cepheus, elles
 montrent aussi le réseau.

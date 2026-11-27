@@ -299,5 +299,9 @@ collector: the queue, a dead collector, a collector that asks to wait, the serie
 
 What it doesn't do yet: a session replay; the source maps of the minified JavaScript of an app (Ceres's own code is
 Cesia, whose errors name their `.ce` line already); the spans of a page's own `fetch` calls (a page of Ceres talks to
-its app by its live screen, whose actions are traced). The reads of Cepheus in this chapter take microseconds, a
-database in memory; on a Cepheus server they show the network too.
+its app by its live screen, whose actions are traced); charts of it in the admin's dashboard, which lists the views,
+actions and errors as data for now: the 75th percentile of LCP, INP and CLS by route and by day, against Google's
+thresholds; the errors by kind and by route; the slowest actions by name, each with its two traces; the browsers, the
+systems and the countries of the visits; the time to the live screen and its breaks; the spans sent and dropped. The
+reads of Cepheus in this chapter take microseconds, a database in memory; on a Cepheus server they show the network
+too.
