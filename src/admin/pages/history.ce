@@ -9,7 +9,7 @@ use std/text
 use std/value
 
 (* The kinds of the events that the super-admins' changes write. *)
-audited = ["disabled", "enabled", "signout-all", "super", "roles", "data-edited", "job-retried", "job-cancelled"]
+audited = ["disabled", "enabled", "signout-all", "super", "roles", "data-created", "data-edited", "data-deleted", "job-retried", "job-cancelled"]
 
 defn given(s)
   (** A field's text, or missing when it is empty. *)

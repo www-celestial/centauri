@@ -46,19 +46,47 @@ AdminEvents = Get("/admin/events", query = check.Record({Kind: check.Text(1, 60,
   User: check.Id(optional = true), Route: check.Text(1, 300, optional = true), Since: check.Time(optional = true), Until: check.Time(optional = true)}),
   out = Page(EventRow, 50), role = Super, about = "The history of sign-ins, failures, refusals and changes.")
 
-(** A kind of the database, with its fields, and the module that declares it. *)
+(** A kind of the database, with its fields, and the module that declares it; Count, how many things it holds (those
+    the data browser lists); Title, the field that names a thing where a link shows it. A field's To is the kind its
+    link names; Derived, a field that a rule of the database gives, which no write changes. *)
 KindRow = check.Record({Name: check.Text(1, 100), Module: check.Text(0, 100), Fields: check.List(check.Record({Name: check.Text(1, 100),
-  Type: check.Text(1, 20), Unique: check.Bool(), Many: check.Bool(), Secret: check.Bool(optional = true)}), 0, 1000)})
+  Type: check.Text(1, 20), Unique: check.Bool(), Many: check.Bool(), Secret: check.Bool(optional = true), To: check.Text(1, 100, optional = true),
+  Derived: check.Bool(optional = true)}), 0, 1000), Count: check.Int(0, optional = true), Title: check.Text(1, 100, optional = true)})
 
 (** The kinds of the app. *)
 AdminKinds = Get("/admin/kinds", out = check.List(KindRow, 0, 10000), role = Super, about = "The kinds of the database.")
 
-(** A thing of a kind: its id and its fields, as JSON, its secret fields written "(secret)". *)
-ThingRow = check.Record({Id: check.Id(), Fields: check.Text(0, 1000000)})
+(** A thing of a kind: its id and its fields, as JSON, its secret fields written "(secret)"; Links, as JSON, the
+    things its links name, by field: {Id, Kind, Title}. *)
+ThingRow = check.Record({Id: check.Id(), Fields: check.Text(0, 1000000), Links: check.Text(0, 100000, optional = true)})
 
-(** The things of a kind, by their ids, of one tenant when Tenant is given and the kind has a Tenant. *)
-AdminData = Get("/admin/data/:kind", query = check.Record({Tenant: check.Id(optional = true)}), out = Page(ThingRow, 50), role = Super,
-  about = "The things of a kind.")
+(** The things of a kind, by their ids, of one tenant when Tenant is given and the kind has a Tenant; Where, a JSON
+    object of fields and the value each must have ({"Status": "paid"}); Search, a text their texts hold, any case. *)
+AdminData = Get("/admin/data/:kind", query = check.Record({Tenant: check.Id(optional = true), Where: check.Text(2, 2000, optional = true),
+  Search: check.Text(1, 200, optional = true)}), out = Page(ThingRow, 50), role = Super, about = "The things of a kind.")
+
+(** A field of few values and how many things have each: {Field, Values: [{Value, Count}]}, the most common first. *)
+FacetRow = check.Record({Field: check.Text(1, 100), Values: check.List(check.Record({Value: check.Text(0, 200), Count: check.Int(0)}), 0, 12)})
+
+(** The fields of a kind that hold at most 12 values (a state, a flag), each with its values and their counts. *)
+AdminFacets = Get("/admin/data/:kind/facets", out = check.List(FacetRow, 0, 100), role = Super, about = "The values of the fields of a kind that has few.")
+
+(** A change of a thing in the history: when, which (data-created, data-edited, data-deleted), the fields it named,
+    and who made it. *)
+ChangeRow = check.Record({At: check.Time(), Kind: check.Text(1, 60), Fields: check.Text(0, 2000), User: check.Id(optional = true),
+  Who: check.Text(0, 300)})
+
+(** The changes of a thing that the administration made, the newest first, from the history of the platform. *)
+AdminThingHistory = Get("/admin/data/:kind/:id/history", out = check.List(ChangeRow, 0, 50), role = Super, about = "The changes of a thing.")
+
+(** A thing of a kind of the app made by a super-admin: Fields, a JSON object of its fields, each read through the
+    shape of its type, as AdminEdit; a secret field is refused, a kind of the platform's own too. *)
+AdminCreate = Post("/admin/data/:kind", body = check.Record({Fields: check.Text(2, 1000000, lines = true)}), out = ThingRow, role = Super,
+  about = "Makes a thing.")
+
+(** A thing of a kind of the app deleted by a super-admin, as cepheus.Delete: its links and the rules of the database
+    may refuse it (409, saying why). *)
+AdminDelete = Delete("/admin/data/:kind/:id", out = check.Record({Id: check.Id()}), role = Super, about = "Deletes a thing.")
 
 (** The fields of a thing changed by a super-admin: Fields, a JSON object of the fields to change, each read through the
     shape of its type (a date in seconds since 1970); a secret field is refused. The thing as it is now comes back. *)
@@ -190,7 +218,8 @@ AdminLogTail = Live("admin.logs", out = TailRow, role = Super, about = "The log 
 AdminShows = [AdminSeries, AdminTail, AdminLogTail]
 
 (** The endpoints of the app's part of the administration, served by package app. *)
-AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData, AdminEdit]
+AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData, AdminEdit, AdminFacets,
+  AdminThingHistory, AdminCreate, AdminDelete]
 
 (** The endpoints of the accounts' part, served by package auth. *)
 AdminOfAccounts = [AdminStats, AdminUsers, AdminUser, AdminDisable, AdminEnable, AdminSignOut, AdminSuper, AdminTenants, AdminTenant, AdminRoles,

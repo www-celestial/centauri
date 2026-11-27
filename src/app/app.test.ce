@@ -40,7 +40,8 @@ defn who(req, t7, t8)
     return result.Ok(missing)
   end
   if as == "super"
-    return result.Ok({Id: 1, Tenant: missing, Roles: [], Super: true})
+    (* a thing of the fork, so that the events of what he does may link to him *)
+    return result.Ok({Id: t8, Tenant: missing, Roles: [], Super: true})
   end
   result.Ok({Id: text.Number(as), Tenant: if as == "8" t8 else t7 end, Roles: Expand(["member"], DefaultRoles), Super: false})
 end
@@ -251,6 +252,32 @@ defn isOpenApiInTestOnly()
   doc = ask(a, "GET", "/openapi.json")
   prod = ask(app(given = {Profile: "prod", Origin: "https://shop.test", Secret: text.Repeat(32, "s"), CepheusUrl: "cepheus://x"})?, "GET", "/openapi.json")
   doc.Status == 200 and data(doc).paths["/notes"].post.operationId == "POST /notes" and prod.Status == 404
+end
+
+defn isDataBrowsedMadeAndDeleted()
+  a = app()?
+  for t in ["milk", "Eggs and MILK", "bread"]
+    ask(a, "POST", "/notes", body = {Text: t})
+  end
+  kinds = data(ask(a, "GET", "/admin/kinds", as = "super"))
+  note = [k for k in kinds if k.Name == "note"][1]
+  found = data(ask(a, "GET", "/admin/data/note?Search=milk", as = "super"))
+  bread = data(ask(a, "GET", "/admin/data/note?Where=%7B%22Text%22%3A%22bread%22%7D", as = "super"))
+  wrong = ask(a, "GET", "/admin/data/note?Where=%7B%22Nope%22%3A1%7D", as = "super")
+  facets = data(ask(a, "GET", "/admin/data/note/facets", as = "super"))
+  made = ask(a, "POST", "/admin/data/note", body = {Fields: json.Text({Text: "jam"})}, as = "super")
+  id = data(made).Id
+  ask(a, "PATCH", "/admin/data/note/$id", body = {Fields: json.Text({Text: "jam!"})}, as = "super")
+  history = data(ask(a, "GET", "/admin/data/note/$id/history", as = "super"))
+  member = ask(a, "DELETE", "/admin/data/note/$id")
+  gone = ask(a, "DELETE", "/admin/data/note/$id", as = "super")
+  again = ask(a, "DELETE", "/admin/data/note/$id", as = "super")
+  own = ask(a, "POST", "/admin/data/centauri_event", body = {Fields: json.Text({Kind: "x"})}, as = "super")
+  bug.Assert(note.Count == 3 and note.Title == "Text", "kind: $note")
+  bug.Assert(value.Len(found.Rows) == 2 and value.Len(bread.Rows) == 1 and wrong.Status == 422, "found $(value.Len(found.Rows)), bread $(value.Len(bread.Rows)), $(wrong.Status)")
+  bug.Assert(list.Any([f.Field == "Text" and list.Any([v.Value == "bread" and v.Count == 1 for v in f.Values]) for f in facets]), "facets: $facets")
+  bug.Assert(made.Status < 300 and value.Equal([h.Kind for h in history], ["data-edited", "data-created"]) and history[1].Fields == "Text", "history: $history")
+  member.Status == 403 and gone.Status < 300 and again.Status == 404 and own.Status == 404
 end
 
 defn isAdminOfTheApp()

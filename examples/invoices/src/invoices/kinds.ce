@@ -13,7 +13,7 @@ Client = app.Kind("client", {Tenant: cepheus.Link(), Name: cepheus.Text(), Searc
     payment. *)
 Invoice = app.Kind("invoice", {Tenant: cepheus.Link(), Number: cepheus.Int(), Client: cepheus.Link(), BillTo: cepheus.Text(),
   Search: cepheus.Text(), Date: cepheus.Date(), Due: cepheus.Date(), Status: cepheus.Text(), Total: cepheus.Money(2), PaidAt: cepheus.Date(),
-  Scan: cepheus.Link(), Acknowledged: cepheus.Date()})
+  Scan: cepheus.Link(), Acknowledged: cepheus.Date()}, title = "Number")
 
 (** The scans of the invoices, files in the vault of Cepheus, sealed under the key of their office. *)
 Scans = app.Files("scan")
