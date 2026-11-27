@@ -104,6 +104,8 @@ milliseconds (1,000): its own span alone, since none of its children was made, w
 they are dropped and counted in `otel_dropped_total`. A fiber sends them by batches of 512, every `APP_OTEL_EVERY`
 seconds (5); a collector busy or gone (429, 502, 503, 504, or no answer) is tried again after a pause drawn at random
 under a bound that doubles from a second, or the `Retry-After` it asks, five tries, then the batch is dropped, counted.
+Each waits encoded as it will leave: a queue full of 2,048 spans takes 1.2 MB of memory with protobuf, 2.3 with JSON
+(beside a queue of 16, with a collector that answers nothing).
 
 ## 3. Protobuf or JSON
 

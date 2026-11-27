@@ -118,7 +118,8 @@ une requête : au-delà, ils sont jetés et comptés dans `otel_dropped_total`. 
 l'intérieur du processus) les envoie par *batches* (des lots) de 512, toutes les `APP_OTEL_EVERY` secondes (5) ; un
 collector occupé ou parti (429, 502, 503, 504, ou aucune réponse) est réessayé après une pause tirée au hasard sous une
 borne qui double à partir d'une seconde, ou après le `Retry-After` qu'il demande, cinq essais, puis le batch est jeté,
-et compté.
+et compté. Chacun attend déjà encodé, tel qu'il partira : une file pleine de 2 048 spans prend 1,2 Mo de mémoire en
+protobuf, 2,3 en JSON (à côté d'une file de 16, face à un collector qui ne répond rien).
 
 ## 3. Protobuf ou JSON
 
