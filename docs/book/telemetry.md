@@ -158,9 +158,13 @@ A page of Ceres learns what only the browser can tell, and its app keeps it as t
 pages of the admin list and filter like any other: **`centauri_client_view`**, one a load of a page, its speed, its
 device, its journey; **`centauri_client_action`**, each action from the click to its answer, with the trace of the
 click and the server's; **`centauri_client_error`**, each error. Everything is the page's word: marked `Untrusted`,
-never used for a decision of the app.
+never used for a decision of the app. Each kind holds as fields what the data pages sort and count by (a view: its
+route, its Web Vitals and first paint, its browser, system and place, its errors), and the rest in `Detail`, a JSON
+object that the search of the data pages reads too (its journey, the page it came from, its navigation, resources,
+frames, WebAssembly, live screen, the rest of the device): 41 fields in all, since Cepheus declares each field at every
+start of the app.
 
-![The admin's data pages, the kind centauri_client_view: two loads of the admin pages, their journeys "/ /unpaid" and "/ /data /data/:kind", and the first one open: At 2026-11-27 10:32:48, Seconds 7.3, Lcp and Inp empty, Cls 0.001, Fcp 184.0, Ttfb 2.4, NavType reload, its Trace, WasmFetch 7.8, WasmStart 195.7, FirstPaint 111.6, 11 frames, FrameP50 9.0, FrameP95 16.4, 2 long tasks of 137 ms in all, 9 requests of 2,804 bytes.](images/telemetry-views.png)
+![The admin's data pages, the kind centauri_client_view: eight loads of the admin pages, the first one open in its sheet: View, Session, Route /, At 2026-11-27 13:51:52, Lcp and Inp empty (a canvas is no candidate of LCP, and no one typed), Cls 0.039, Fcp 1120.0, Ttfb 25.8, FirstPaint 571.8, Browser HeadlessChrome, Os Linux, Mobile false, no country, city, address nor user (the defaults), Errors 0, Untrusted true, and Detail, its JSON: ActionCount 8, Ref same, the browser's version, its language, its network...](images/telemetry-views.png)
 
 | what | when | why | the law |
 |---|---|---|---|

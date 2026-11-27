@@ -177,9 +177,13 @@ kind : une sorte de chose dans la base de données, comme les factures), que les
 filtrent comme toutes les autres : **`centauri_client_view`**, une par chargement d'une page, avec sa vitesse, son
 appareil, son parcours ; **`centauri_client_action`**, chaque action, du clic à sa réponse, avec la trace du clic et
 celle du serveur ; **`centauri_client_error`**, chaque erreur. Tout cela est la parole de la page : marqué `Untrusted`
-(pas digne de confiance), jamais utilisé pour une décision de l'app.
+(pas digne de confiance), jamais utilisé pour une décision de l'app. Chaque kind garde comme champs ce par quoi les
+pages de données trient et comptent (une vue : sa route, ses Web Vitals et sa première image, son navigateur, son
+système et son lieu, ses erreurs), et le reste dans `Detail`, un objet JSON que la recherche des pages de données lit
+aussi (son parcours, la page d'où elle vient, sa navigation, ses ressources, ses frames, son WebAssembly, son écran
+live, le reste de l'appareil) : 41 champs en tout, puisque Cepheus déclare chaque champ à chaque démarrage de l'app.
 
-![Les pages de données de l'admin, le kind centauri_client_view : deux chargements des pages d'admin, leurs parcours « / /unpaid » et « / /data /data/:kind », et le premier ouvert : At 2026-11-27 10:32:48, Seconds 7,3, Lcp et Inp vides, Cls 0,001, Fcp 184,0, Ttfb 2,4, NavType reload, sa Trace, WasmFetch 7,8, WasmStart 195,7, FirstPaint 111,6, 11 frames, FrameP50 9,0, FrameP95 16,4, 2 long tasks de 137 ms en tout, 9 requêtes de 2 804 octets.](images/telemetry-views.png)
+![Les pages de données de l'admin, le kind centauri_client_view : huit chargements des pages d'admin, le premier ouvert dans sa fiche : View, Session, Route /, At 2026-11-27 13:51:52, Lcp et Inp vides (un canvas n'est pas candidat au LCP, et personne n'a tapé), Cls 0,039, Fcp 1120,0, Ttfb 25,8, FirstPaint 571,8, Browser HeadlessChrome, Os Linux, Mobile false, ni pays, ni ville, ni adresse, ni utilisateur (les défauts), Errors 0, Untrusted true, et Detail, son JSON : ActionCount 8, Ref same, la version du navigateur, sa langue, son réseau...](images/telemetry-views.png)
 
 | quoi | quand | pourquoi | la loi |
 |---|---|---|---|
