@@ -105,7 +105,7 @@ defn Run(title = "Admin", more = [], kinds = [], shows = [], words = missing)
   live = "/live?shows=$(encode.UrlEncode(json.Text(asked)))"
   mine = [{Title: x.Title, Path: x.Path, View: x.View} for x in more]
   menu = list.Concat(own, mine)
-  site = {Title: shown, Me: me.Data, Menu: menu, More: mine, Kinds: dict.Dict([{Key: k.Name, Value: k} for k in kinds]), App: web.Signal(missing),
+  site = {Title: shown, Me: me.Data, Menu: menu, More: mine, Kinds: dict.Dict([{Key: k.Name, Value: k} for k in kinds]), App: web.Signal(missing), AppAsked: cell(false),
     Page: web.Signal(missing), Detail: web.Signal(missing), Sheet: web.Signal(missing), Desk: cell(missing), Tree: cell(missing), Lists: cell(dict.Dict()),
     Layout: js.Call("./admin.js", "Layout", []), Tabs: js.Call("./admin.js", "Tabs", [])}
   routes = [web.Route(m.Path, framed(m, site)) for m in list.Concat(menu, inner)]
@@ -133,7 +133,10 @@ defn pageOf(p, m, site)
       actions; the thing it chose and the sheet start empty. *)
   q = p
   q.Site = site
-  if value.IsMissing(web.Get(site.App))
+  (* the app read once, at the first page: a flag of its own, not the signal, so that the page doesn't read what it
+     sets, which would draw it twice *)
+  if not peek(site.AppAsked)
+    stash(true, site.AppAsked)
     web.Set(site.App, Call(api.AdminApp, {}, p))
   end
   web.Set(site.Detail, missing)
