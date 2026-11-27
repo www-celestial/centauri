@@ -43,11 +43,14 @@ Serve(endpoint, handler) = {Endpoint: endpoint, Handler: handler}
 (** A kind of Cepheus that keeps its name and fields for the administration, which lists the kinds and their things:
     cepheus.Kind, and keys more, in small letters so that they meet no field. secret names the fields that hold a
     secret, as the hash of a password or a token: the administration never sends them to a page (it shows "(secret)")
-    and never changes them.
+    and never changes them. title names the field that names a thing where a link shows it (an invoice's Number);
+    missing, its first field of text, not secret.
 
       Kind("note", {Text: cepheus.Text()})["name"] --> "note"
-      Kind("key", {Hash: cepheus.Text()}, secret = ["Hash"])["secret"] --> ["Hash"] *)
-Kind(name, fields, secret = []) = cepheus.Kind(name, fields) then dict.Put("name", name) then dict.Put("fields", fields) then dict.Put("secret", secret)
+      Kind("key", {Hash: cepheus.Text()}, secret = ["Hash"])["secret"] --> ["Hash"]
+      Kind("invoice", {Number: cepheus.Int()}, title = "Number")["title"] --> "Number" *)
+Kind(name, fields, secret = [], title = missing) = cepheus.Kind(name, fields) then dict.Put("name", name) then dict.Put("fields", fields) then dict.Put("secret", secret)
+  then dict.Put("title", title)
 
 (** A module: its name, its kinds and rules of Cepheus, its routes (Serve), and for a module of the framework, who
     (the function that reads the session of a request, as auth gives it), key (a function of the request and env that
@@ -160,8 +163,9 @@ end
 
 defn Start(a, s, db, readDb = missing, clock = missing)
   (** What every request of an app shares, env: its settings s (as Read gives them), its database, the database of a
-      token that reads only (for GetDb = "read"), the state of the process, the keys of libsodium, and the time (the
-      clock of a test, when given). An Ok of env; Handler(env) serves it. *)
+      token that reads only (for GetDb = "read"), the state of the process, the keys of libsodium, the time (the clock
+      of a test, when given), and Own, a fiber.Table of what a module keeps for as long as the process runs, one key of
+      its name each (the admin's sampler of the dashboard: "admin.series"). An Ok of env; Handler(env) serves it. *)
   keys = crypto.Open()?
   hashSlots = dict.GetOr("HashSlots", 2, s)
   rates = {Ip: ipRate(s.LimitIp), User: ipRate(s.LimitUser), Tenant: ipRate(s.LimitTenant)}
@@ -203,7 +207,8 @@ defn Start(a, s, db, readDb = missing, clock = missing)
     SessionKey: if dict.GetOr("SessionCache", 0, s) > 0 sessionKey else missing end, SessionCache: dict.GetOr("SessionCache", 0, s), SessionKeyOf: sessionKey,
     WhoModule: whoModule, Ends: ends, GuardNames: dict.Dict([{Key: g.Name, Value: true} for g in guards]),
     JsonHeaders: list.Concat([{Name: "content-type", Value: "application/json"}], guards),
-    KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]), Words: words}
+    KeyRate: keyRate, Cross: dict.Dict([{Key: b.Endpoint.Path, Value: true} for b in served if dict.Get("Cross", b.Endpoint) == true]), Words: words,
+    Own: fiber.Table(64)}
   result.Ok(env)
 end
 
@@ -396,10 +401,10 @@ defn Listen(env, listener = missing)
 end
 
 defn quicServer(s)
-  (** The listener of HTTP/3, beside TCP, on UDP Http3Port (the TCP port by default, as browsers find it). An OpenSSL
-      without QUIC's server (before 3.6, as the 3.0 of Ubuntu 22.04 and 24.04) or a port taken leaves TCP alone, with a
-      warning: HTTP/3 is a way more, never the only one. *)
-  made = quic.Open() then result.AndThen(q -> http3.Server(s.Cert, dict.Get("Key", s), q, port = if s.Http3Port == 0 s.Port else s.Http3Port end, host = s.Host))
+  (** The listener of HTTP/3, beside TCP, on UDP Http3Port (the TCP port by default, as browsers find it), its
+      congestion control Http3Congestion. A system without QUIC (no ngtcp2 on OpenSSL 3.5 or later) or a port taken
+      leaves TCP alone, with a warning: HTTP/3 is a way more, never the only one. *)
+  made = quic.Open() then result.AndThen(q -> http3.Server(s.Cert, dict.Get("Key", s), q, port = if s.Http3Port == 0 s.Port else s.Http3Port end, host = s.Host, congestion = s.Http3Congestion))
   if result.IsErr(made)
     log.Warn("http3: off, TCP alone", {Error: made.Error.Message})
     return missing

@@ -4,6 +4,7 @@
 use deps/www-celestial/ceres/src/web
 use src/api
 use std/dict
+use std/js
 use std/json
 use std/list
 use std/result
@@ -22,11 +23,11 @@ defn Jobs(p, kind = missing, title = "Jobs")
   table = web.Table(rows, [web.Column(Say("Id"), j -> j.Id, sort = "Id", width = 80), web.Column(Say("Kind"), j -> j.Kind, sort = "Kind", width = 150),
     web.Column(Say("State"), j -> j.State, width = 70), web.Column(Say("Runs at"), j -> Local(j.RunAt), sort = "RunAt", width = 170),
     web.Column(Say("Tries"), j -> j.Tries, sort = "Tries", width = 50), web.Column(Say("Error"), j -> j.Error), web.Column(Say("Arguments"), j -> j.Args, width = 260)],
-    height = 420, label = Say(title))
+    height = missing, label = Say(title))
   web.Stack([
-    if value.IsMissing(kind) web.Title(Say(title)) else missing end,
+    if value.IsMissing(kind) web.Header(Say(title)) else missing end,
     web.Row([Label(Say("State"), width = 40), web.Select(state, ["ready", "running", "done", "dead"], x -> x, x -> x, name = Say("State"), width = 110),
-      Label(Say("Kind"), width = 35), web.Input(named, label = Say("Kind"), width = 180, onEnter = find), web.Button(Say("Show"), find, key = "C-f")], gap = 6),
+      Label(Say("Kind"), width = 35), web.Input(named, label = Say("Kind"), width = 180, onEnter = find), web.Button(Say("Show"), find, key = "C-f")], gap = 6, wrap = true),
     () -> shownReply(web.Get(web.Get(got)), v -> web.Text(Say("{N} jobs (200 at most).", {N: Num(value.Len(v))}), color = gray), "…"),
     table,
     () -> jobActions(Chosen(table, rows), p, asking, said, find),
@@ -53,7 +54,7 @@ end
 defn Hooks(p)
   (** The webhooks: their deliveries (the jobs centauri.hook, run again from here when dead) and their endpoints. *)
   web.Stack([
-    web.Title(Say("Webhooks")),
+    web.Header(Say("Webhooks")),
     web.Text(Say("Deliveries"), font = "strong"),
     Jobs(p, kind = "centauri.hook", title = "Deliveries"),
     web.Text(Say("Endpoints (their secrets stay sealed on the server)"), font = "strong"),
@@ -65,7 +66,7 @@ defn Files(p)
   (** The files of the app: each kind of files (app.Files) and its things, their names, types and sizes. *)
   kinds = Call(api.AdminKinds, {}, p)
   web.Stack([
-    web.Title(Say("Files")),
+    web.Header(Say("Files")),
     Replied(kinds, ks -> fileKinds([k for k in ks if isFiles(k)], p)),
   ], gap = 8)
 end
@@ -85,11 +86,60 @@ defn Settings(p)
       came from: the environment, the app's code, or Centauri's default. *)
   got = Call(api.AdminSettings, {}, p)
   web.Stack([
-    web.Title(Say("Settings")),
-    web.Text(Say("Read once at the start, from the environment: a change takes a restart. The server masks every secret before it answers."), color = gray),
-    Replied(got, rows -> web.Table(rows, [web.Column(Say("Name"), s -> s.Name, sort = "Name", width = 180), web.Column(Say("Variable"), s -> s.Env, sort = "Env", width = 230),
-      web.Column(Say("Value"), s -> s.Value), web.Column(Say("From"), s -> fromOf(s.From), sort = "From", width = 80)], height = 560, label = Say("Settings"))),
-  ], gap = 8)
+    web.Header(Say("Settings"), summary = Say("The look of these pages on this machine, and the settings of the app")),
+    look(p),
+    card(Say("The app"), Say("Read once at the start, from the environment: a change takes a restart. The server masks every secret before it answers."), [
+      Replied(got, rows -> web.Table(rows, [web.Column(Say("Name"), s -> web.Text(s.Name, font = "strong"), sort = "Name", width = 180),
+        web.Column(Say("Variable"), s -> web.Text(s.Env, color = gray), sort = "Env", width = 230), web.Column(Say("Value"), s -> s.Value),
+        web.Column(Say("From"), s -> web.Pill(fromOf(s.From), tone = if s.From == "env" "Info" else "Muted" end, dot = false), sort = "From", width = 90)], height = missing, label = Say("Settings")))]),
+  ], gap = 12)
+end
+
+defn card(title, about, rows)
+  (** A part of the settings on its card: its title and what it is about at the left, its rows at the right (under,
+      on a narrow page). *)
+  web.Stack([web.Spread(web.Stack([web.Text(title, font = "strong"), web.Text(about, size = "small", color = gray)], gap = 2, width = 240), web.Stack(rows, gap = 12), grow = true)],
+    pad = 14, fill = "Panel", border = "Edge", radius = 4)
+end
+
+defn setting(label, about, control)
+  (** A row of the settings: what it sets and how, its control at the right. *)
+  web.Spread(web.Stack([web.Text(label, font = "strong"), web.Text(about, size = "small", color = gray)], gap = 2), control)
+end
+
+defn look(p)
+  (** The look of the pages on this machine: the theme, the density of the rows, the layout on the web, the tabs;
+      each choice applies at once and stays on this machine. *)
+  now = web.LookOf(p)
+  theme = web.Signal(now.Theme)
+  density = web.Signal(now.Density)
+  site = p.Site
+  layout = web.Signal(dict.GetOr("Layout", "pages", site))
+  tabs = web.Signal(if dict.GetOr("Tabs", false, site) == true "on" else "off" end)
+  card(Say("Look"), Say("On the web, each page at its own address; in the desktop app, docked panels with tabs. Kept on this machine."), [
+    setting(Say("Theme"), Say("System follows the device."), web.Chips(theme, [web.Chip("system", Say("System")), web.Chip("light", Say("Light")), web.Chip("dark", Say("Dark"))], label = Say("Theme"))),
+    setting(Say("Density"), Say("Rows of 24, 30 or 44 pixels; the rows button at the top goes round them too."),
+      web.Chips(density, [web.Chip("dense", Say("Dense")), web.Chip("compact", Say("Compact")), web.Chip("comfortable", Say("Comfortable"))], label = Say("Density"))),
+    setting(Say("Layout on the web"), Say("Pages: one view, its own address. Dock: panels like the desktop app."),
+      web.Chips(layout, [web.Chip("pages", Say("Pages")), web.Chip("dock", Say("Dock"))], label = Say("Layout on the web"))),
+    setting(Say("Tabs on the web"), Say("Off: the browser's own tabs do this (Ctrl + click a link). On: the pages opened stay as tabs, as in an editor."),
+      web.Chips(tabs, [web.Chip("off", Say("Off")), web.Chip("on", Say("On"))], label = Say("Tabs on the web"))),
+    () -> applied(web.Get(theme), web.Get(density), web.Get(layout), web.Get(tabs), p),
+  ])
+end
+
+defn applied(theme, density, layout, tabs, p)
+  (** The look chosen, applied as soon as it is chosen: the theme and the density at once, the layout and the tabs by
+      loading the page again in them. *)
+  web.SetLook(p, theme = theme, density = density)
+  site = p.Site
+  if layout != dict.GetOr("Layout", "pages", site)
+    js.Call("./admin.js", "Keep", ["layout", layout])
+  end
+  if (tabs == "on") != (dict.GetOr("Tabs", false, site) == true)
+    js.Call("./admin.js", "Keep", ["tabs", tabs])
+  end
+  missing
 end
 
 (* Where a setting came from, in the pages' language: the environment, the app's code, or Centauri's default. *)

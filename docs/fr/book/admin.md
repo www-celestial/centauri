@@ -114,9 +114,19 @@ urlpatterns = [path("admin/", admin.site.urls)]
 
 ## 2. Les pages
 
+Sur le web, l'administration est disposée comme les pages d'un site (le `web.Shell` de Ceres, le chapitre Pages of a
+web app de son livre) : l'app et ses pages dans une barre latérale (*side bar*) à gauche, rangées par sujet (Données,
+Personnes, Activité, Réglages), avec leurs compteurs et les jobs en échec ; l'endroit où l'on est en haut, avec la
+palette de Ctrl+K qui trouve une page ou un kind par son nom, le bouton de la densité des lignes et celui du thème ; la
+page au milieu, qui défile ; une chose ouverte dans un panneau à droite (la *sheet*), à côté de la page sur une fenêtre
+large, par-dessus sur une plus étroite, toute la fenêtre sur un téléphone, où la barre latérale devient un tiroir
+(*drawer*). Qui est connecté et Se déconnecter (Ctrl+Q) sont au pied de la barre latérale. Les mêmes pages disposées
+comme un outil de bureau, des panneaux ancrés avec des onglets (*dock*), sont à un choix près dans les réglages.
+
 | page | ce qu'elle montre | ce qu'elle fait, par quel endpoint |
 |---|---|---|
-| Tableau de bord | les compteurs (utilisateurs, tenants, sessions, requêtes, refusées, connexions échouées de la dernière minute) ; un point par seconde sur les cinq dernières minutes : les requêtes et les 5xx (les réponses d'erreur du serveur), le p50 et le p99 de la durée d'une requête (la durée sous laquelle passent la moitié, et 99 %, des requêtes), les refus à la porte par raison (un autre site, une limite, pas de session, un rôle) et les connexions échouées, les jobs prêts, en cours et morts ; les derniers événements | le show `admin.series` (chaque seconde, à partir des métriques et du log du processus), `admin.events`, `GET /admin/stats` |
+| Tableau de bord | un tableau de bord qui surveille la plateforme en direct : une bande de son état (la connexion, les requêtes de la dernière minute, le p50 et le p99 de la durée d'une requête — la durée sous laquelle passent la moitié, et 99 %, des requêtes —, les erreurs, les jobs en échec, les sessions, le CPU et la mémoire du processus, le disque du dossier d'`AdminDisk` quand il est
+réglé, depuis quand l'app tourne) ; six graphiques qui partagent un réticule (*crosshair*, la ligne qui suit la souris), sur 15 minutes, une heure, un jour ou une semaine : les requêtes, la durée d'une requête, les erreurs 5xx (les réponses d'erreur du serveur), les refus à la porte par raison (un autre site, une limite, pas de session, un rôle), les connexions échouées, les jobs prêts, en cours et morts ; le log à mesure qu'il s'écrit, par niveau, avec une pause ; les premiers pas d'une app neuve | l'historique `GET /admin/series` (en colonnes, lu une fois par plage), le show `admin.series` (chaque seconde après lui, à partir des métriques et du log du processus), `admin.logs`, `GET /admin/stats`, `GET /admin/app` |
 | Utilisateurs | 50 par page, filtrés par le début de leur e-mail ou par un tenant, triés d'un clic sur un titre | désactiver, activer, déconnecter partout, faire ou défaire un super-admin, chaque action confirmée d'abord (`POST /admin/users/:id/disable`...) |
 | Un utilisateur | son compte, ses tenants avec ses rôles, chacun dans un champ ; ses moyens de connexion et ses seconds facteurs : un mot de passe ou non, TOTP et les codes de secours restants, chaque passkey (une clé d'accès gardée par l'appareil, qui remplace le mot de passe) avec sa date de création, son dernier usage et si son appareil l'a vérifié, les fournisseurs (providers), comme Google ; ses sessions | les rôles enregistrés sur place (`PUT /admin/tenants/:id/members/:user`) ; son TOTP et ses codes de secours, ou ses passkeys, retirés quand il a perdu son appareil (`POST /admin/users/:id/factors/reset`) ; une session choisie dans le tableau terminée seule (`DELETE /admin/sessions/:id`) ; chaque action confirmée d'abord |
 | Tenants, un tenant | filtrés par le début de leur nom ; ses membres et leurs rôles | les rôles sur place, un utilisateur ajouté par son id avec des rôles ; quelqu'un invité par mail avec des rôles (`POST /admin/tenants/:id/invites`) |
@@ -138,10 +148,13 @@ de Ceres : seules les lignes visibles sont dessinées, donc 100 000 lignes défi
 
 Chaque tâche, telle que la page la montre :
 
-**Voir la plateforme.** Le Tableau de bord : les compteurs en haut, puis les requêtes et leur durée, un point par
-seconde, en direct.
+**Voir la plateforme.** Le Tableau de bord : la bande de son état en haut, puis six graphiques de ce processus, un
+point par seconde sur les 15 dernières minutes (une minute par point sur les plus longues périodes, telles que le
+serveur les garde) ; la souris sur l'un montre le même moment dans tous, chacun avec son nombre à ce moment. Le log
+défile dessous, la ligne la plus récente d'abord : Tout, Avertissements ou Erreurs, et Pause garde les lignes en vue
+le temps de les lire.
 
-![Le tableau de bord : six cases de compteurs (Utilisateurs, Tenants, Sessions, Requêtes, Refusées, « Connexions échouées/min »), la ligne « Dernière seconde : … », et les graphiques « Requêtes par seconde » et « Durée d'une requête (ms) ».](images/admin-dashboard.png)
+![L'administration, en sombre : la barre latérale des pages (Tableau de bord choisi ; les kinds sous Données ; Utilisateurs 7 et Tenants 5 sous Personnes ; Jobs avec « 1 en échec » en rouge sous Activité ; les réglages ; la page de l'app, Impayées), la barre du haut avec le chemin et les boutons de recherche, de densité et de thème, et le tableau de bord : la bande Direct, requêtes/min, p50 et p99, erreurs, « 1 tâche en échec », sessions, « en marche depuis » ; six graphiques ; le journal en direct.](images/admin-dashboard.png)
 
 **Désactiver un utilisateur.** Utilisateurs, un clic sur sa ligne, puis Désactiver : la page demande d'abord, Oui le
 fait, et le tableau est relu. Activer, Déconnecter … partout et Faire de … un super-admin marchent de la même façon.
@@ -180,12 +193,30 @@ sa variable, sa valeur (un secret est `(secret)`) et d'où il vient.
 
 ![Les fichiers : le kind des scans des factures et ses choses, leurs noms, types et tailles.](images/admin-files.png)
 
-![Les réglages : leurs noms, variables, valeurs (les secrets masqués) et d'où chacun vient (De) : env, code ou défaut.](images/admin-settings.png)
+**Trouver des choses.** Un kind dans la barre latérale (son nom avec une majuscule et au pluriel, comme Clients, avec
+son nombre) : sa page dit combien il en a, des pastilles (*chips*) des valeurs d'un champ qui en a peu (son Statut ou
+son État d'abord, comme Tout 30, Impayées 20, Payées 10) avec leurs nombres, et une recherche dans ses textes, que la
+touche / atteint de partout. Un lien montre le titre de la chose qu'il nomme (son premier texte), son id seulement à
+côté, en gris ; un montant ses deux décimales, ses milliers séparés comme la langue les écrit (1,280.50 €, 1 280,50 €).
 
-**Changer une chose sur place.** Données, le kind, un clic sur la chose : chaque champ dans sa case ; changez-en un,
-puis Enregistrer. Une valeur du mauvais type est refusée avec son champ, et le changement est dans l'Audit.
+**Changer une chose sur place.** Un clic sur la chose : elle s'ouvre dans le panneau de droite, à sa propre adresse
+(`/admin/#/data/invoice/65616`), titrée par la chose elle-même (Facture 3, Client 1) avec son état en pastille à côté,
+son kind et son id au-dessus, en gris ; chaque champ avec son nom au-dessus, dans la case que prend son type : un lien
+sur une ligne, le titre de la chose qu'il nomme en lien vers sa page, son id en gris, et Choisir, un choix parmi les
+choses de son kind ; un jour dans un calendrier (le `web.DateInput` de Ceres) ; l'état du kind (le champ de ses
+pastilles) un choix parmi ses valeurs ; un montant avec sa devise (`pages.Kind(currency = "€")`) ; les actions de l'app
+sur elle ; dessous, son activité, qui a changé quoi et quand, tirée de l'historique que garde la base. Changez un champ, puis Enregistrer (Ctrl+S). Une valeur du mauvais type est
+refusée avec son champ, et le changement est dans l'Audit. Les champs qu'une app garde pour elle sont laissés de côté :
+un champ nommé Search (la copie repliée de sa recherche) et ceux qu'une règle donne ; `pages.Kind(fields = [...])` nomme
+plutôt ceux que le panneau montre.
 
-![Le navigateur de données sur les factures : le tableau de leurs Numéro, « Facturé à », Statut et Total, la première choisie, et en dessous l'éditeur de ses champs (Tenant, Number, Client, BillTo changé, Search, Date, Due, Status, Total), chacun avec son type, et Enregistrer.](images/admin-data-edit.png)
+**Créer, agir sur plusieurs, supprimer.** Nouveau (Alt+N) ouvre un panneau vide (`/admin/#/data/invoice/new`) pour un
+kind de l'app ; Enregistrer la crée et l'ouvre à son adresse. Une case devant chaque ligne la coche, celle de l'en-tête
+toutes celles montrées ; la bande qui vient dit combien sont cochées et porte les actions du kind (pages.Action) et
+Supprimer, chacune confirmée d'abord. Supprimer est aussi au pied du panneau ; les règles de la base peuvent le
+refuser, et disent pourquoi. `pages.Kind(create = false)` laisse les choses d'un kind créées par l'app seulement.
+
+![Le navigateur de données sur les factures : le tableau de leurs Numéro, « Facturé à », Statut en pastille et Total, la première ouverte, et à droite le panneau de ses champs, l'action de l'app « Marquer payée », son activité, Annuler et Enregistrer.](images/admin-data-edit.png)
 
 ![La piste d'audit : chaque changement d'un super-admin, quand, quel changement, par qui, depuis quelle adresse et quelle route, et quoi.](images/admin-audit.png)
 
@@ -206,6 +237,24 @@ champ que `app.Kind` dit secret, comme le hash d'un mot de passe (une empreinte 
 d'où on ne peut pas revenir au texte) ou le secret d'un webhook, n'est jamais envoyé à une page : il est montré
 `(secret)`, et jamais changé. Chaque changement est un événement, `data-edited`, qui nomme les champs et jamais leurs
 valeurs.
+
+**Chaque page à son adresse.** Les pages sont celles d'un site web : chacune a son adresse, celle de l'administration
+suivie de la page après un `#` (`/admin/#/users`, `/admin/#/data/invoice`), et une chose ouverte aussi
+(`/admin/#/data/invoice/65616`). Précédent et Suivant du navigateur parcourent les pages visitées, une adresse gardée ou
+envoyée ouvre sa page (après la connexion, quand la session n'est plus là), et une ligne de la barre latérale pressée
+avec Ctrl ou le bouton du milieu ouvre sa page dans un nouvel onglet. Une liste retrouvée a son tri et son défilement
+d'avant, même après avoir ouvert puis fermé une chose. Une chose changée dans le panneau et pas enregistrée retient le
+chemin vers une autre page : le panneau demande d'abord, sous son titre, Continuer (Échap), Abandonner les changements
+(Ctrl+D) ou Enregistrer et partir (Ctrl+S), et fermer l'onglet demande aussi.
+
+**L'apparence, sur cette machine.** Réglages, Apparence : le thème (Système suit l'appareil, Clair, Sombre), la densité
+des lignes (24, 30 ou 44 pixels ; le bouton des lignes de la barre du haut en fait le tour aussi), la disposition sur le
+web (Pages, ou Dock : des panneaux comme une app de bureau, l'arborescence à gauche, les détails à droite, les
+événements, le log et les jobs en bas) et les onglets (Oui garde les pages ouvertes en onglets sous la barre du haut,
+comme dans un éditeur ; Non laisse cela aux onglets du navigateur). Chaque choix s'applique tout de suite et reste sur
+cette machine ; le réglage `AdminTheme` du serveur donne le thème d'une machine qui n'en a choisi aucun.
+
+![Les réglages : la carte Apparence avec Thème (Système, Clair, Sombre), Densité (Dense, Compacte, Confortable), Disposition sur le web (Pages, Dock) et Onglets sur le web (Non, Oui), puis la carte des réglages de l'app.](images/admin-settings.png)
 
 ## 3. Votre propre page d'administration : les factures de tous les cabinets
 
@@ -264,8 +313,8 @@ defn unpaid(p)
 end
 
 pages.Run(title = "Invoices — admin", words = words.Words,
-  kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number"), pages.Column("BillTo", title = "Bill to"), pages.Column("Status"),
-    pages.Column("Total", show = v -> "$(pages.Num(v)) €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
+  kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number", width = 80), pages.Column("Client"), pages.Column("Due", width = 110),
+    pages.Column("Status", width = 100), pages.Column("Total", width = 110)], actions = [pages.Action("Mark paid", e.AdminPay)], currency = "€")],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])
 ```
 
@@ -275,10 +324,13 @@ Le fichier entier est `examples/invoices/admin/page.ce` (avec `byOffice` et `pay
 - `pages.Page(title, path, view)` : une page dans le menu, après celles de Centauri. `view(p)` donne ses widgets (les
   éléments de la page : un titre, un tableau, un bouton...) ; il appelle les endpoints de l'app par
   `pages.Call(endpoint, args, p)`, ou en lit un qui rend des pages par `pages.Lister`.
-- `pages.Kind(name, title, columns, actions)` : comment le navigateur de données montre un kind.
-  `pages.Column(field, title, show, width)` : une colonne (ses premiers champs quand il n'y en a aucune).
-  `pages.Action(label, endpoint, args, confirm)` : un bouton sur la chose choisie, avec `{id: its id}` par défaut,
-  confirmé d'abord sauf si `confirm = false`.
+- `pages.Kind(name, title, columns, actions, fields, create, currency)` : comment le navigateur de données montre un kind.
+  `pages.Column(field, title, show, width)` : une colonne (ses premiers champs quand il n'y en a aucune), montrée
+  comme son type le dit sans `show` (une date à l'heure du lecteur, un montant, le titre que nomme un lien).
+  `fields` : les champs que montre le panneau (tous sauf ceux que l'app garde pour elle quand il n'y en a aucun) ;
+  `create = false` retire Nouveau ; `currency` : la devise de ses montants, dans leurs cellules et leurs cases.
+  `pages.Action(label, endpoint, args, confirm)` : un bouton sur la chose choisie et
+  sur les lignes cochées, avec `{id: its id}` par défaut, confirmé d'abord sauf si `confirm = false`.
 - les outils de chaque page : `pages.Lister`, `ListRows`, `ListState`, `More`, `Again`, `Chosen` (la ligne qu'un clic a
   choisie, dans l'ordre que montre le tableau), `Confirm` et `Question`, `Replied` (une réponse montrée, ou son
   problème), `Local` (une heure à l'heure de celui qui regarde), `Cell`.
@@ -357,7 +409,7 @@ texte donné directement à un widget de Ceres (`web.Text("…")`, `label = "…
 langues : il est nommé, avec sa ligne. Les pages de Centauri passent la même vérification
 (`tests/translated.test.ce`).
 
-![Le tableau de bord en français : « Tableau de bord », les cases Utilisateurs, Tenants, Sessions, Requêtes, Refusées et « Connexions échouées/min », la ligne « Dernière seconde : … », les graphiques « Requêtes par seconde » et « Durée d'une requête (ms) ».](images/admin-dashboard.png)
+![Le tableau de bord en français : la barre latérale Données, Personnes, Activité, Réglages ; « Tableau de bord » et « La santé de la plateforme, en direct » ; la bande « requêtes/min », « tâches en échec » ; les graphiques « Requêtes », « Temps de réponse », « Erreurs » ; « Journal en direct ».](images/admin-dashboard.png)
 
 ```python
 # Django: {% translate %} in the templates and gettext in the code, makemessages then compilemessages,

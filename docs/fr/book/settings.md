@@ -64,7 +64,8 @@ Les réglages de Centauri lui-même, à côté de ceux des comptes ([S'inscrire 
 | `APP_CEPHEUS_READ_TOKEN`, `APP_GET_DB` | `fork` en dev et en test, `read` en prod avec le token, sinon `same` | la base de données d'un GET : un fork (une copie de la base, dans la mémoire du programme) dont les écritures sont attrapées, ou un token qui ne fait que lire |
 | `APP_SECRET` | aléatoire à chaque démarrage | la clé des curseurs (la marque d'où reprend la page suivante d'une liste), des challenges (les défis que le navigateur doit résoudre ou signer), et des secrets de TOTP (le code à six chiffres d'une app d'authentification, qui change toutes les 30 secondes) et des codes de secours. 32 octets au moins, la même pour chaque worker (un des processus de l'app) et à chaque démarrage : avec une autre, aucun secret de TOTP ne peut être lu ([passkeys](passkeys.md#4-totp-et-codes-de-secours)) |
 | `APP_CERT`, `APP_KEY` | | un certificat et sa clé, en PEM : https |
-| `APP_HTTP3`, `APP_HTTP3_PORT` | `off`, 0 | `on` : HTTP/3 sur QUIC (un transport sur UDP) à côté de TCP, les mêmes routes, sur le port UDP `APP_HTTP3_PORT` (0 : `APP_PORT`) ; demande `APP_CERT` et `APP_KEY` ; un OpenSSL sans QUIC laisse TCP seul, avec un avertissement ([ce que QUIC ajoute](connection.md#11-ce-que-quic-ajoute-et-quand-on-revient-à-tcp)) |
+| `APP_HTTP3`, `APP_HTTP3_PORT` | `off`, 0 | `on` : HTTP/3 sur QUIC (un transport sur UDP) à côté de TCP, les mêmes routes, sur le port UDP `APP_HTTP3_PORT` (0 : `APP_PORT`) ; demande `APP_CERT` et `APP_KEY` ; un système sans QUIC (pas de ngtcp2 sur un OpenSSL 3.5 ou plus récent) laisse TCP seul, avec un avertissement ([ce que QUIC ajoute](connection.md#11-ce-que-quic-ajoute-et-quand-on-revient-à-tcp)) |
+| `APP_HTTP3_CONGESTION` | `bbr` | la vitesse à laquelle HTTP/3 envoie, réglée sur ce que le chemin laisse passer : `bbr` (le plus rapide sur chaque lien que mesure le livre de Cesia), `cubic` ou `reno` |
 | `APP_WEBTRANSPORT` | `off` | `on` : les écrans en direct prennent des sessions WebTransport (un canal entre la page et l'app, sur HTTP/3), que les pages mettent en course avec WebSocket (le même canal, sur TCP) ; demande `APP_HTTP3=on` sur `APP_PORT` |
 | `APP_CORS` | | les origines des partenaires (une origine : le début d'une adresse, son schéma, son hôte et son port), séparées par des virgules |
 | `APP_TRUST_PROXY` | false | l'adresse du client est la dernière de `X-Forwarded-For`, qu'écrit le proxy (un serveur intermédiaire) placé devant |
@@ -133,13 +134,14 @@ Voici leurs seules différences ; rien d'autre ne change avec eux :
 - Chaque requête écrit une ligne de JSON : son numéro, sa méthode, sa route (le motif, jamais la query, la partie de
   l'adresse après `?`), son statut, son temps en millisecondes, son adresse, son utilisateur. Jamais un corps, un cookie
   (un petit texte que le navigateur garde et renvoie à chaque requête) ou un token.
-- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`), et
-  les `http_*` de std/metrics : sur `127.0.0.1:APP_ADMIN_PORT/metrics` pour Prometheus, et en lignes à
-  `GET /admin/metrics` pour le super-admin. Avec `APP_OTEL=on`, les mêmes nombres vont aussi à un collector
-  d'OpenTelemetry, avec les traces des requêtes et les lignes du log ([la télémétrie](telemetry.md)) : une seule
-  source, deux vues. Une métrique tient au plus 2 000 séries, les autres comptées dans une seule,
-  `otel_metric_overflow="true"`, comme le conseille OpenTelemetry : un label (une étiquette qui découpe une métrique en
-  séries, comme `route`) fait à partir des requêtes ne peut pas remplir la mémoire.
+- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`),
+  `centauri_signins_total{result}` (`ok`, une session ouverte par n'importe quelle entrée ; `failed`), et les `http_*`
+  de std/metrics : sur `127.0.0.1:APP_ADMIN_PORT/metrics` pour Prometheus, et en lignes à `GET /admin/metrics` pour le
+  super-admin. Avec `APP_OTEL=on`, les mêmes nombres vont aussi à un collector d'OpenTelemetry, avec les traces des
+  requêtes et les lignes du log ([la télémétrie](telemetry.md)) : une seule source, deux vues. Une métrique tient au
+  plus 2 000 séries, les autres comptées dans une seule, `otel_metric_overflow="true"`, comme le conseille
+  OpenTelemetry : un label (une étiquette qui découpe une métrique en séries, comme `route`) fait à partir des requêtes
+  ne peut pas remplir la mémoire.
 
 ## 4. En production
 

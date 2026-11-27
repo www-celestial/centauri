@@ -57,7 +57,8 @@ Centauri's own settings, beside those of the accounts ([Sign up and sign in](sig
 | `APP_CEPHEUS_READ_TOKEN`, `APP_GET_DB` | `fork` in dev and test, `read` in prod with the token, else `same` | the database of a GET: a fork whose writes are caught, or a token that only reads |
 | `APP_SECRET` | random at each start | the key of the cursors, of the challenges and of the secrets of TOTP and the recovery codes, 32 bytes at least, the same for every worker and at every start: with another, no secret of TOTP can be read ([passkeys](passkeys.md#4-totp-and-recovery-codes)) |
 | `APP_CERT`, `APP_KEY` | | a certificate and its key in PEM: https |
-| `APP_HTTP3`, `APP_HTTP3_PORT` | `off`, 0 | `on`: HTTP/3 over QUIC beside TCP, the same routes, on UDP `APP_HTTP3_PORT` (0: `APP_PORT`); needs `APP_CERT` and `APP_KEY`; an OpenSSL without QUIC leaves TCP alone, with a warning ([what QUIC adds](connection.md#11-what-quic-adds-and-when-it-falls-back)) |
+| `APP_HTTP3`, `APP_HTTP3_PORT` | `off`, 0 | `on`: HTTP/3 over QUIC beside TCP, the same routes, on UDP `APP_HTTP3_PORT` (0: `APP_PORT`); needs `APP_CERT` and `APP_KEY`; a system without QUIC (no ngtcp2 on OpenSSL 3.5 or later) leaves TCP alone, with a warning ([what QUIC adds](connection.md#11-what-quic-adds-and-when-it-falls-back)) |
+| `APP_HTTP3_CONGESTION` | `bbr` | how fast HTTP/3 sends as the path allows: `bbr` (the fastest on every link that Cesia's book measures), `cubic` or `reno` |
 | `APP_WEBTRANSPORT` | `off` | `on`: the live screens take WebTransport sessions, which the pages race against WebSocket; needs `APP_HTTP3=on` on `APP_PORT` |
 | `APP_CORS` | | the origins of partners, with commas |
 | `APP_TRUST_PROXY` | false | the client's address is the last of `X-Forwarded-For`, which the proxy in front writes |
@@ -124,12 +125,13 @@ Their only differences, and nothing else changes with them:
   probes ask.
 - Each request writes one line of JSON: its number, method, route (the pattern, never the query), status, time in
   milliseconds, address, user; never a body, a cookie or a token.
-- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`), and
-  `http_*` of std/metrics: on `127.0.0.1:APP_ADMIN_PORT/metrics` for Prometheus, and as rows at `GET /admin/metrics`
-  for the super-admin. With `APP_OTEL=on`, the same numbers go to a collector of OpenTelemetry too, with the traces of
-  the requests and the lines of the log ([telemetry](telemetry.md)): one source, two views. A metric holds 2,000
-  series at most, the others counted in one, `otel_metric_overflow="true"`, as OpenTelemetry advises: a label made
-  from requests can't fill the memory.
+- `centauri_requests_total{route,status}`, `centauri_refused_total{reason}` (`origin`, `limit`, `signin`, `role`),
+  `centauri_signins_total{result}` (`ok`, a session opened by any way in; `failed`), and `http_*` of std/metrics: on
+  `127.0.0.1:APP_ADMIN_PORT/metrics` for Prometheus, and as rows at `GET /admin/metrics` for the super-admin. With
+  `APP_OTEL=on`, the same numbers go to a collector of OpenTelemetry too, with the traces of the requests and the lines
+  of the log ([telemetry](telemetry.md)): one source, two views. A metric holds 2,000 series at most, the others
+  counted in one, `otel_metric_overflow="true"`, as OpenTelemetry advises: a label made from requests can't fill the
+  memory.
 
 ## 4. Production
 

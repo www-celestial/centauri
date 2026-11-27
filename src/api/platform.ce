@@ -46,19 +46,47 @@ AdminEvents = Get("/admin/events", query = check.Record({Kind: check.Text(1, 60,
   User: check.Id(optional = true), Route: check.Text(1, 300, optional = true), Since: check.Time(optional = true), Until: check.Time(optional = true)}),
   out = Page(EventRow, 50), role = Super, about = "The history of sign-ins, failures, refusals and changes.")
 
-(** A kind of the database, with its fields, and the module that declares it. *)
+(** A kind of the database, with its fields, and the module that declares it; Count, how many things it holds (those
+    the data browser lists); Title, the field that names a thing where a link shows it. A field's To is the kind its
+    link names; Derived, a field that a rule of the database gives, which no write changes. *)
 KindRow = check.Record({Name: check.Text(1, 100), Module: check.Text(0, 100), Fields: check.List(check.Record({Name: check.Text(1, 100),
-  Type: check.Text(1, 20), Unique: check.Bool(), Many: check.Bool(), Secret: check.Bool(optional = true)}), 0, 1000)})
+  Type: check.Text(1, 20), Unique: check.Bool(), Many: check.Bool(), Secret: check.Bool(optional = true), To: check.Text(1, 100, optional = true),
+  Derived: check.Bool(optional = true)}), 0, 1000), Count: check.Int(0, optional = true), Title: check.Text(1, 100, optional = true)})
 
 (** The kinds of the app. *)
 AdminKinds = Get("/admin/kinds", out = check.List(KindRow, 0, 10000), role = Super, about = "The kinds of the database.")
 
-(** A thing of a kind: its id and its fields, as JSON, its secret fields written "(secret)". *)
-ThingRow = check.Record({Id: check.Id(), Fields: check.Text(0, 1000000)})
+(** A thing of a kind: its id and its fields, as JSON, its secret fields written "(secret)"; Links, as JSON, the
+    things its links name, by field: {Id, Kind, Title}. *)
+ThingRow = check.Record({Id: check.Id(), Fields: check.Text(0, 1000000), Links: check.Text(0, 100000, optional = true)})
 
-(** The things of a kind, by their ids, of one tenant when Tenant is given and the kind has a Tenant. *)
-AdminData = Get("/admin/data/:kind", query = check.Record({Tenant: check.Id(optional = true)}), out = Page(ThingRow, 50), role = Super,
-  about = "The things of a kind.")
+(** The things of a kind, by their ids, of one tenant when Tenant is given and the kind has a Tenant; Where, a JSON
+    object of fields and the value each must have ({"Status": "paid"}); Search, a text their texts hold, any case. *)
+AdminData = Get("/admin/data/:kind", query = check.Record({Tenant: check.Id(optional = true), Where: check.Text(2, 2000, optional = true),
+  Search: check.Text(1, 200, optional = true)}), out = Page(ThingRow, 50), role = Super, about = "The things of a kind.")
+
+(** A field of few values and how many things have each: {Field, Values: [{Value, Count}]}, the most common first. *)
+FacetRow = check.Record({Field: check.Text(1, 100), Values: check.List(check.Record({Value: check.Text(0, 200), Count: check.Int(0)}), 0, 12)})
+
+(** The fields of a kind that hold at most 12 values (a state, a flag), each with its values and their counts. *)
+AdminFacets = Get("/admin/data/:kind/facets", out = check.List(FacetRow, 0, 100), role = Super, about = "The values of the fields of a kind that has few.")
+
+(** A change of a thing in the history: when, which (data-created, data-edited, data-deleted), the fields it named,
+    and who made it. *)
+ChangeRow = check.Record({At: check.Time(), Kind: check.Text(1, 60), Fields: check.Text(0, 2000), User: check.Id(optional = true),
+  Who: check.Text(0, 300)})
+
+(** The changes of a thing that the administration made, the newest first, from the history of the platform. *)
+AdminThingHistory = Get("/admin/data/:kind/:id/history", out = check.List(ChangeRow, 0, 50), role = Super, about = "The changes of a thing.")
+
+(** A thing of a kind of the app made by a super-admin: Fields, a JSON object of its fields, each read through the
+    shape of its type, as AdminEdit; a secret field is refused, a kind of the platform's own too. *)
+AdminCreate = Post("/admin/data/:kind", body = check.Record({Fields: check.Text(2, 1000000, lines = true)}), out = ThingRow, role = Super,
+  about = "Makes a thing.")
+
+(** A thing of a kind of the app deleted by a super-admin, as cepheus.Delete: its links and the rules of the database
+    may refuse it (409, saying why). *)
+AdminDelete = Delete("/admin/data/:kind/:id", out = check.Record({Id: check.Id()}), role = Super, about = "Deletes a thing.")
 
 (** The fields of a thing changed by a super-admin: Fields, a JSON object of the fields to change, each read through the
     shape of its type (a date in seconds since 1970); a secret field is refused. The thing as it is now comes back. *)
@@ -150,16 +178,49 @@ AdminJobRetry = Post("/admin/jobs/:id/retry", role = Super, about = "Runs a dead
 (** A job that waits made dead, so that it never runs; a running one can't be (409). *)
 AdminJobCancel = Post("/admin/jobs/:id/cancel", role = Super, about = "Cancels a waiting job.")
 
-(** A point of the dashboard, a second of this process: its requests, those that failed (5xx) and those refused at
-    the door (by the site they came from, a limit, a sign-in missing, a role), the failed sign-ins of the last minute,
-    the median and 99th percentile of the time of its requests in milliseconds (of those the log kept, all of them
-    under LogLines a second), the jobs ready, running and dead (every 5 seconds), and when. *)
+(** A point of the dashboard, a second of this process (Step 1), a minute (Step 60) or ten minutes (Step 600): its
+    requests, those that failed (5xx) and those refused at the door (by the site they came from, a limit, a sign-in
+    missing, a role), the failed sign-ins of the last minute, the median and 99th percentile of the time of its
+    requests in milliseconds (of those the log kept, all of them under LogLines a second), the jobs ready, running and
+    dead (every 5 seconds), and when: At, in seconds since 1970, the end of its second, or the start of its minute or
+    ten minutes. Screens, the live screens open on this process (a page that left is counted until its screen ends,
+    ResumeTime seconds); SignedIn and FailedSignIns, the sign-ins that opened a session (every way in: a password, a
+    passkey, a provider, a second factor) and those refused. A minute's point sums its seconds, and ten minutes' their
+    minutes, but for Failures, Ready, Running, Dead and Screens, their last second's; their P50 and P99 are those of
+    every request of their span, within 1 % (a sketch of their times, DDSketch, the ten minutes' the minutes' merged).
+    And what the process uses (a minute's and ten minutes', the last second's): Cpu, its share of one core over the
+    second, in percent (200 for two cores busy); Memory, its bytes in RAM; DiskUsed and DiskTotal, the bytes of the
+    file system of the folder of the setting AdminDisk, when it is given. Each of these four is absent where the system
+    doesn't tell it. *)
 PointRow = check.Record({At: check.Float(), Requests: check.Float(0), Errors: check.Float(0), Origin: check.Float(0), Limit: check.Float(0),
   Signin: check.Float(0), Role: check.Float(0), Failures: check.Float(0), P50: check.Float(0), P99: check.Float(0), Ready: check.Float(0),
-  Running: check.Float(0), Dead: check.Float(0)})
+  Running: check.Float(0), Dead: check.Float(0), Step: check.Int(1, 600), Screens: check.Float(0), SignedIn: check.Float(0),
+  FailedSignIns: check.Float(0), Cpu: check.Float(0, optional = true), Memory: check.Float(0, optional = true), DiskUsed: check.Float(0, optional = true),
+  DiskTotal: check.Float(0, optional = true)})
 
-(** The dashboard live: a point each second, the last 300 of them. *)
-AdminSeries = Live("admin.series", out = PointRow, role = Super, about = "A point of the dashboard each second.")
+(** The dashboard live: the points of this process that its sampler keeps, a point a second for the last 15 minutes, a
+    point a minute and a point every ten minutes for the last 7 days, sampled from the start of the app whoever
+    watches. A screen asks the last Seconds of the seconds', the last Minutes of the minutes' and the last Tens of the
+    ten minutes' (300, none and none unless it says: the last five minutes, as before), gets them at once, then each
+    new point, and the points that leave its window as Removed. *)
+AdminSeries = Live("admin.series", args = check.Record({Seconds: check.Int(0, 900, optional = true, default = 300),
+  Minutes: check.Int(0, 10080, optional = true, default = 0), Tens: check.Int(0, 1008, optional = true, default = 0)}), out = PointRow,
+  role = Super, about = "The dashboard's points: a second's for 15 minutes, a minute's and ten minutes' for 7 days.")
+
+(* A column of the history: a number a point, at most a week of minutes. *)
+column = check.List(check.Float(), 0, 10080)
+
+(** The history of the dashboard, compact: the last Count points of a Step (1, a second's; 60, a minute's; 600, ten
+    minutes'; all those kept unless Count says), the oldest first, as columns: Ats, their times, and Cols, a list of
+    numbers for each field of PointRow, the times of the requests to the tenth of a millisecond; a field that a point
+    of them lacks (Cpu, Memory, DiskUsed, DiskTotal, where the system doesn't tell it) has no column. What a page asks
+    when it opens or when its range changes, then admin.series for the points that come. *)
+AdminSeriesData = Get("/admin/series", query = check.Record({Step: check.Int(1, 600), Count: check.Int(1, 10080, optional = true)}),
+  out = check.Record({Step: check.Int(1, 600), Ats: column, Cols: check.Record({Requests: column, Errors: column, Origin: column, Limit: column,
+    Signin: column, Role: column, Failures: column, SignedIn: column, FailedSignIns: column, P50: column, P99: column, Ready: column,
+    Running: column, Dead: column, Screens: column, Cpu: check.List(check.Float(), 0, 10080, optional = true),
+    Memory: check.List(check.Float(), 0, 10080, optional = true), DiskUsed: check.List(check.Float(), 0, 10080, optional = true),
+    DiskTotal: check.List(check.Float(), 0, 10080, optional = true)})}), role = Super, about = "The dashboard's history, as columns.")
 
 (** The events of the last hour, live, their times in seconds since 1970: each new one as it is written, by any server
     of the app. *)
@@ -177,7 +238,8 @@ AdminLogTail = Live("admin.logs", out = TailRow, role = Super, about = "The log 
 AdminShows = [AdminSeries, AdminTail, AdminLogTail]
 
 (** The endpoints of the app's part of the administration, served by package app. *)
-AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData, AdminEdit]
+AdminOfApp = [AdminApp, AdminSettings, AdminLogs, AdminEndpoints, AdminMetrics, AdminEvents, AdminKinds, AdminData, AdminEdit, AdminFacets,
+  AdminThingHistory, AdminCreate, AdminDelete]
 
 (** The endpoints of the accounts' part, served by package auth. *)
 AdminOfAccounts = [AdminStats, AdminUsers, AdminUser, AdminDisable, AdminEnable, AdminSignOut, AdminSuper, AdminTenants, AdminTenant, AdminRoles,

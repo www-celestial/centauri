@@ -103,6 +103,7 @@ defn screen(s, env, lives)
   if not Take(key, mostScreens, env.State)
     return refusedLive("This session has $mostScreens screens open already.")
   end
+  screenOpened(env.State)
   ended = fiber.Channel()
   stop = fiber.Channel()
   fiber.Spawn(() -> ending(s.Ended, stop, ended, key, env))
@@ -140,10 +141,12 @@ defn screen(s, env, lives)
 end
 
 defn ending(left, stop, ended, key, env)
-  (** Closes the screen's own Ended once the page left or the guard stopped it, and gives its place back. *)
+  (** Closes the screen's own Ended once the page left or the guard stopped it, and gives its place back: the screen no
+      longer counts among those open (Screens). *)
   _ = fiber.Select([left, stop])
   fiber.Close(ended)
   Give(key, env.State)
+  screenShut(env.State)
 end
 
 defn guarding(req, user, roles, stop, ended, env)

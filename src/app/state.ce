@@ -3,12 +3,13 @@
    fiber reads and writes at once without one: the rate limits, the sessions it read last (for SessionCache seconds) and
    the values it remembers. A request at a route reads its session and counts all its limits there (door), with no
    message. The fiber holds the slots of the password hashes, the last lines of the log, the events already written,
-   the failed sign-ins of the last minutes, and the clock of a test. Each process of cesia run --workers has its own: a
-   limit of 600 a minute is then 600 a minute in each worker. *)
+   the failed sign-ins of the last minutes, the count of the live screens open, and the clock of a test. Each process
+   of cesia run --workers has its own: a limit of 600 a minute is then 600 a minute in each worker. *)
 use std/dict
 use std/fiber
 use std/list
 use std/math
+use std/metrics
 use std/result
 use std/sys
 use std/value
@@ -103,11 +104,24 @@ Recall(key, state) = fiber.Recall(key, Now(state), state.Memo)
 (** Forgets the value kept under a key: the next Recall gives missing. *)
 Forget(key, state) = fiber.Forget(key, state.Memo)
 
-(** Counts a failed sign-in in the failures of the last minute. *)
-Failed(state) = fiber.Send({Op: "failed"}, state.Ch)
+defn Failed(state)
+  (** Counts a failed sign-in in the failures of the last minute, and in the metric centauri_signins_total of the result
+      failed. *)
+  metrics.Add("centauri_signins_total", labels = {result: "failed"})
+  fiber.Send({Op: "failed"}, state.Ch)
+end
 
 (** The failed sign-ins of the last minute (between 60 and 120 seconds of them, by whole minutes). *)
 Failures(state) = ask(state, {Op: "failures"})
+
+(* A live screen opened on this process, counted until its end. *)
+screenOpened(state) = fiber.Send({Op: "screen", By: 1}, state.Ch)
+
+(* The end of a live screen that screenOpened counted. *)
+screenShut(state) = fiber.Send({Op: "screen", By: -1}, state.Ch)
+
+(** The live screens open on this process, those a page left too until their screen ends (ResumeTime seconds). *)
+Screens(state) = ask(state, {Op: "screens"})
 
 defn door(ip, state, session, store, user, endpoint, gen)
   (** What a request at its route asks the state, with no message: {Ok, Retry, Key, User, Hit, Gen, Now}. session, the
@@ -167,6 +181,10 @@ kept(at, id, method, route, status, ms, ip, user, state) = fiber.Send({Op: "requ
     of the last line kept, to give as after the next time, so that a live tail of the log reads each line once. *)
 Tail(after, state) = ask(state, {Op: "tail", After: after})
 
+(** The times in milliseconds of the requests among the lines kept since the line numbered after, the oldest first, as
+    Tail would give them but for the rest of their lines: {Seq, Ms}, what the dashboard's sampler reads each second. *)
+Times(after, state) = ask(state, {Op: "times", After: after})
+
 (** Forgets every session the state keeps: a sign-out, a role changed, a user disabled are then read again from the
     database at their next request. *)
 forget(state) = fiber.Empty(state.Sessions)
@@ -187,6 +205,7 @@ defn own(ch, slots, most, kept, keys, st)
   fails = [0, 0]
   box = []
   places = dict.Dict()
+  screens = 0
   while true
     got = fiber.Receive(ch)
     if result.IsErr(got)
@@ -206,6 +225,9 @@ defn own(ch, slots, most, kept, keys, st)
     else if op == "tail"
       n = list.Min([list.Max([seq - m.After, 0]), kept, seq])
       fiber.Send({Seq: seq, Lines: [shown(lines[math.Mod(at - n + k - 1 + kept, kept) + 1]) for k in 1..n]}, m.Reply)
+    else if op == "times"
+      n = list.Min([list.Max([seq - m.After, 0]), kept, seq])
+      fiber.Send({Seq: seq, Ms: [x.Ms for x in [lines[math.Mod(at - n + k - 1 + kept, kept) + 1] for k in 1..n] if dict.Get("Op", x) == "request"]}, m.Reply)
     else if op == "slot"
       if free > 0
         free -= 1
@@ -253,6 +275,10 @@ defn own(ch, slots, most, kept, keys, st)
       fiber.Send(n < m.Most, m.Reply)
     else if op == "give"
       places[m.Name] = list.Max([0, dict.GetOr(m.Name, 0, places) - 1])
+    else if op == "screen"
+      screens = list.Max([0, screens + m.By])
+    else if op == "screens"
+      fiber.Send(screens, m.Reply)
     else if op == "mail"
       box = list.Append(m.Mail, if value.Len(box) >= 1000 list.Skip(1, box) else box end)
     else if op == "mails"

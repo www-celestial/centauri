@@ -24,6 +24,7 @@ use std/json
 use std/list
 use std/log
 use std/math
+use std/metrics
 use std/result
 use std/sys
 use std/text
@@ -507,12 +508,14 @@ defn signingIn(r, x, kinds)
 end
 
 defn opened(user, m, r, kind)
-  (** A new session of a user in a membership (missing for none): its cookie, and the Account. *)
+  (** A new session of a user in a membership (missing for none): its cookie, and the Account; counted in the metric
+      centauri_signins_total of the result ok, as every way in ends here. *)
   env = r.Env
   member = if value.IsMissing(m) missing else m.Member end
   tenant = if value.IsMissing(m) missing else m.Tenant end
   session = NewSession(user, member, tenant, r, env)
   done = cepheus.Write(session.Ops, env.Db, by = user, why = r.Why)?
+  metrics.Add("centauri_signins_total", labels = {result: "ok"})
   note(r, kind, "Signed in.", user = user, tenant = tenant, every = 0)
   out = account(user, tenant, if value.IsMissing(m) [] else m.Roles end, env.Db, env.Roles)?
   app.Reply(out, headers = [Cookie(session.Value(done.Things[1]), env, r.Settings.SessionMax)])

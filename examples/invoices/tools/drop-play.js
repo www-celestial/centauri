@@ -5,7 +5,7 @@
 // "FAIL ...", Box the place of what the step looked at, for a picture of that part of the page.
 window.dropPlay = (() => {
   // the names the player reads and presses, in French when the pages speak it (the document's lang)
-  const FR = { 'Data': 'Données', 'Save': 'Enregistrer', 'Mark paid': 'Marquer payée', 'Keep mine': 'Garder le mien',
+  const FR = { 'Data': 'Données', 'Invoices': 'Factures', 'Save': 'Enregistrer', 'Mark paid': 'Marquer payée', 'Keep mine': 'Garder le mien',
     'actions waiting': 'actions en attente', 'was refused': 'a été refusée', 'data reloaded': 'données rechargées', 'sending': 'envoi de' }
   const say = s => (document.documentElement.lang.startsWith('fr') && FR[s]) || s
   const LIVE = /^(Live|Direct)/, LINE = /^(Live|Offline|Connecting|Signed out|Screen closed|Direct|Hors ligne|Connexion|Déconnecté|Écran fermé)/
@@ -25,7 +25,8 @@ window.dropPlay = (() => {
   const node = async (role, name, ms) => until(async () => find(await tree(), named(role, name)), ms)
   const click = n => { const c = document.querySelector('canvas'), r = c.getBoundingClientRect()
     for (const type of ['pointerdown', 'pointerup'])
-      c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + Math.min(10, n.W / 2), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
+      // a row at its middle, where no box that checks it is; anything else near its start
+      c.dispatchEvent(new PointerEvent(type, { clientX: r.left + n.X + (n.Role === 'row' ? n.W / 2 : Math.min(10, n.W / 2)), clientY: r.top + n.Y + Math.min(6, n.H / 2), button: 0, bubbles: true })) }
   const press = async (role, name) => { const n = await node(role, name); if (!n) return false; click(n); await wait(400); return true }
   const type = async (name, text) => {
     const f = await node('textbox', name); if (!f) return false
@@ -49,6 +50,16 @@ window.dropPlay = (() => {
   const band = async () => { const s = await status(); return s ? { X: 0, Y: 0, W: innerWidth, H: s.Y + s.H + 8 } : null }
   const out = (cond, what, b) => JSON.stringify({ Line: (cond ? 'ok ' : 'FAIL ') + what, Box: b || null })
   const cellsOf = r => all(r, c => c.Role === 'cell').map(c => c.Name)
+  // the invoices of the data browser: by their kind in the side bar of the pages, or by Data then the kind in the dock
+  const toKind = async () => {
+    if (find(await tree(), x => x.Role === 'navigation')) await press('link', say('Invoices'))
+    else { await press('link', say('Data')); await wait(1200); await press('link', 'invoice') }
+    await wait(1500)
+  }
+  // the invoice chosen: the title of the details in the dock (invoice 65616), the line over the sheet's title in the
+  // pages (Invoices · id 65616)
+  const chosenOne = async () => until(async () => find(await tree(), n => n.Role === 'text' && /^invoice \d+$|· id \d+$/.test(n.Name || '')))
+  const idOf = n => Number(((n.Name || '').match(/(\d+)$/) || [])[1])
   const steps = {
     async live () {
       const s = await until(async () => { const n = await status(); return n && LIVE.test(n.Name) ? n : null })
@@ -59,12 +70,11 @@ window.dropPlay = (() => {
       return out(s, 'the band says at once: ' + (s ? s.Name : 'nothing'), await band())
     },
     async choose () {
-      await press('link', say('Data')); await wait(1200)
-      await press('link', 'invoice'); await wait(1500)
+      await toKind()
       const row = all(await tree(), n => n.Role === 'row')[2]; if (!row) return out(false, 'an invoice in the data browser')
       click(row); await wait(700)
-      const head = await until(async () => find(await tree(), n => n.Role === 'text' && /^invoice \d+$/.test(n.Name || '')))
-      return JSON.stringify({ Line: (head ? 'ok ' : 'FAIL ') + (head ? head.Name : 'no invoice') + ' chosen in the data browser', Id: head ? Number(head.Name.split(' ')[1]) : null })
+      const head = await chosenOne()
+      return JSON.stringify({ Line: (head ? 'ok ' : 'FAIL ') + (head ? head.Name : 'no invoice') + ' chosen in the data browser', Id: head ? idOf(head) : null })
     },
     async save (bill) {
       const typed = await type('BillTo', bill)
@@ -105,11 +115,10 @@ window.dropPlay = (() => {
     async again (bill) {
       // the kind read again (the data browser is a list, not a live view), the same invoice chosen; then a change
       // asked, and the network cut by the test as it goes (tools/drop-shot.ce cuts after this step returns)
-      const was = find(await tree(), n => n.Role === 'text' && /^invoice \d+$/.test(n.Name || ''))
-      await press('link', say('Data')); await wait(1200)
-      await press('link', 'invoice'); await wait(1500)
+      const was = find(await tree(), n => n.Role === 'text' && /^invoice \d+$|· id \d+$/.test(n.Name || ''))
+      await toKind()
       const row = all(await tree(), n => n.Role === 'row')[2]; if (row) { click(row); await wait(700) }
-      const now = await until(async () => find(await tree(), n => n.Role === 'text' && /^invoice \d+$/.test(n.Name || '')))
+      const now = await chosenOne()
       if (!was || !now || was.Name !== now.Name) return out(false, 'the same invoice chosen again')
       await type('BillTo', bill)
       await press('button', say('Save'))
