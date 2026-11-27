@@ -6,13 +6,17 @@ HTTP/3 and WebTransport, two settings, both off by default: nothing changes unti
 
 - `APP_HTTP3=on` serves the same routes over HTTP/3 (QUIC) beside TCP, on `APP_HTTP3_PORT` (0, the default, is
   `APP_PORT`, where browsers look): every response of TCP says so (`Alt-Svc`), and browsers come over QUIC by
-  themselves. It needs `APP_CERT` and `APP_KEY`; an OpenSSL without QUIC's server (3.0 on Ubuntu 22.04 and 24.04)
-  leaves TCP alone, with a warning at the start.
+  themselves. It needs `APP_CERT` and `APP_KEY`; a system without Cesia's QUIC (ngtcp2 on OpenSSL 3.5, which a
+  release of Cesia carries) leaves TCP alone, with a warning at the start. A connection survives the phone's change
+  of address (migration), a returning page asks at once (0-RTT, a request that changes something gets 425), and
+  `APP_HTTP3_CONGESTION` picks how fast it sends: `bbr` (the default, the fastest on every lossy link measured),
+  `cubic` or `reno`.
 - `APP_WEBTRANSPORT=on` lets the live screens take WebTransport sessions on `/live`, with the same frames and the same
   resume; the admin pages race it against WebSocket and keep the first that works (`<meta name="webtransport">`).
 - `app.Listen(env, listener)`: serves an app as `Run` does once started, on a listener of one's own (a test's).
 - The book: [When the connection drops](docs/book/connection.md) gains what QUIC adds and when it falls back, with a
-  measured migration; settings and security rows.
+  measured migration (Cesia's server keeps the connection: 155 ms to the next byte over 25 ms each way and 1 % lost,
+  against 222 ms for a new connection) and why HTTP/3 stays off by default; settings and security rows.
 
 The admin pages in French, and the book in French. Nothing breaks: every endpoint answers as it did. What changes,
 each additive: in an app of several languages (`APP_LANGS`), `GET /auth/me` sends `Content-Language`, the language the
