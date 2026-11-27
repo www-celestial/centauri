@@ -95,7 +95,9 @@ defn Run(title = "Admin", more = [], kinds = [], shows = [], words = missing)
     browser.Run(web.App([web.Route(x, p -> signIn(p, shown, note)) for x in paths], title = shown, say = t -> Say(t), theme = theme))
     return missing
   end
-  asked = [{Show: s.Name, Args: {}} for s in list.Concat(api.AdminShows, shows)]
+  (* the dashboard's points: the seconds of 15 minutes, the minutes of an hour, the ten minutes of a week (about 2,000
+     rows, 400 KB of JSON once) *)
+  asked = [{Show: s.Name, Args: if s.Name == "admin.series" {Seconds: 900, Minutes: 60, Tens: 1008} else {} end} for s in list.Concat(api.AdminShows, shows)]
   live = "/live?shows=$(encode.UrlEncode(json.Text(asked)))"
   mine = [{Title: x.Title, Path: x.Path, View: x.View} for x in more]
   menu = list.Concat(own, mine)

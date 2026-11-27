@@ -30,7 +30,7 @@ defn Users(p)
   ], height = missing, label = Say("Users"))
   web.Stack([
     web.Header(Say("Users")),
-    web.Row([Label(Say("E-mail starts"), width = 100), web.Input(search, label = Say("E-mail starts with"), width = 220, onEnter = find), Label(Say("Tenant id"), width = 70),
+    web.Row([Label(Say("E-mail starts"), width = 100), web.Input(search, label = Say("E-mail starts with"), width = 220, onEnter = find, icon = "search", hint = "/"), Label(Say("Tenant id"), width = 70),
       web.Input(tenant, label = Say("Tenant id"), width = 110, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8, wrap = true),
     table,
     ListState(l, rows),
@@ -174,7 +174,7 @@ defn Tenants(p)
     web.Column(Say("Created"), t -> Local(t.Created), sort = "Created", width = 170)], height = missing, label = Say("Tenants"))
   web.Stack([
     web.Header(Say("Tenants")),
-    web.Row([Label(Say("Name starts"), width = 100), web.Input(search, label = Say("Name starts with"), width = 220, onEnter = find), web.Button(Say("Search"), find, key = "C-f")], gap = 8, wrap = true),
+    web.Row([Label(Say("Name starts"), width = 100), web.Input(search, label = Say("Name starts with"), width = 220, onEnter = find, icon = "search", hint = "/"), web.Button(Say("Search"), find, key = "C-f")], gap = 8, wrap = true),
     table,
     ListState(l, rows),
     () -> tenantChosen(Chosen(table, rows), p),

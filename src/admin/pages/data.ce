@@ -211,9 +211,26 @@ defn editor(thing, kind, p, l, said, asking)
     if value.IsEmpty(acts) missing else web.Row([action(a, thing, p, said, asking, l) for a in acts], gap = 6) end,
     Question(asking),
     () -> said1(web.Get(said)),
+    () -> toasted(web.Get(said), p),
     web.Stack([fieldForm(x, save, said) for x in inputs], gap = 10),
   ], gap = 10)
   {View: view, Form: form}
+end
+
+(* The reply a toast said, so that it says each once. *)
+toastedOne = cell(missing)
+
+defn toasted(r, p)
+  (** A toast once a save is answered Ok: "Saved.", in the pages' language. Nothing to show. *)
+  if not web.IsSignal(r)
+    return missing
+  end
+  got = web.Get(r)
+  if value.IsSome(got) and result.IsOk(got) and peek(toastedOne) != r.Id
+    stash(r.Id, toastedOne)
+    web.Toast(p, Say("Saved."))
+  end
+  missing
 end
 
 defn fieldForm(x, save, said)
