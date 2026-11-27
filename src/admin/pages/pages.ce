@@ -166,8 +166,8 @@ defn desk(p, site)
   d = web.Dock([web.Panel(() -> pageTitle(site), () -> center(site), icon = () -> iconOf(rowOf(pagePath(site))), key = "Page")],
     left = [web.Panel(Say("Pages"), tree, icon = "list-tree", key = "Pages")],
     right = [web.Panel(Say("Details"), () -> details(site), icon = "sliders-horizontal", key = "Details")],
-    bottom = [web.Panel(Say("Events"), eventsConsole(p), icon = "radio", key = "Events"), web.Panel(Say("Log"), logConsole(p), icon = "logs", key = "Log"),
-      web.Panel(Say("Jobs"), jobsConsole(p), icon = "wrench", key = "Jobs")],
+    bottom = [web.Panel(Say("Events"), once(() -> web.Grow(eventsConsole(p))), icon = "radio", key = "Events"),
+      web.Panel(Say("Log"), once(() -> web.Grow(logConsole(p))), icon = "logs", key = "Log"), web.Panel(Say("Jobs"), once(() -> jobsConsole(p)), icon = "wrench", key = "Jobs")],
     toolbar = web.Toolbar([web.Icon("server", color = "Link"), web.Text(site.Title, font = "strong"), web.Divider(), () -> appLine(web.Get(site.App)), web.Spacer(),
       web.Button(Say("Refresh"), () -> web.Set(site.Page, web.Get(site.Page)), icon = "refresh-cw", key = "f5"), web.Divider(),
       web.Button(Say("Sign out"), () -> signOut(), icon = "log-out", key = "C-q")]),
@@ -258,6 +258,19 @@ defn counts(s)
     return missing
   end
   web.Text(text.Join(" · ", [Say("{N} users", {N: Num(s.Users)}), Say("{N} tenants", {N: Num(s.Tenants)}), Say("{N} sessions", {N: Num(s.Sessions)})]), color = gray, font = "code")
+end
+
+defn once(make)
+  (** A part of the page made the first time it shows, by make(), and the same one each time after: a panel of the
+      console that stays behind another, as the log behind the events, makes nothing and sorts nothing until it is
+      chosen. *)
+  made = cell(missing)
+  defn ()
+    if value.IsMissing(peek(made))
+      stash(make(), made)
+    end
+    peek(made)
+  end
 end
 
 defn eventsConsole(p)
