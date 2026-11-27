@@ -141,6 +141,8 @@ defn editor(thing, kind, p, l, said, asking)
     web.Set(said, Call(api.AdminEdit, {kind: kind.Name, id: thing.Id, Fields: json.Text(changes)}, p, base = seen, mine = changes))
     Again(l, web.Get(l.Args))
   end
+  (* a change not saved holds the way to another page, which asks first *)
+  web.Unsaved(p, () -> list.Any([web.Get(x.Value) != x.Was for x in inputs if x.Field.Secret != true]), save = save)
   own = dict.Get(kind.Name, p.Site.Kinds)
   acts = if value.IsMissing(own) [] else own.Actions end
   web.Inspector([

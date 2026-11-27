@@ -86,7 +86,10 @@ defn Run(title = "Admin", more = [], kinds = [], shows = [], words = missing)
   theme = themeOf(js.Call("./admin.js", "Theme", []))
   if me.Status != 200 or not value.IsDict(me.Data) or me.Data.Super != true
     note = if me.Status == 200 Say("{Email} is no super-admin of this platform.", {Email: me.Data.Email}) else "" end
-    browser.Run(web.App([web.Route("/", p -> signIn(p, shown, note))], title = shown, say = t -> Say(t), theme = theme))
+    (* the sign-in at the address of any page, which the page loads again once signed in: a link to a page kept or
+       shared opens on it after the sign-in *)
+    paths = list.Concat(list.Concat([x.Path for x in own], [x.Path for x in inner]), [x.Path for x in more])
+    browser.Run(web.App([web.Route(x, p -> signIn(p, shown, note)) for x in paths], title = shown, say = t -> Say(t), theme = theme))
     return missing
   end
   asked = [{Show: s.Name, Args: {}} for s in list.Concat(api.AdminShows, shows)]
@@ -226,12 +229,12 @@ end
 defn outline(p, site, stats, kinds)
   (** The rows of the outliner: the pages of the admin by what they are about, the kinds of the data under Data (the
       app's first, the platform's own in a row of their own, closed at first), the app's own pages last; the counts of
-      the platform beside its pages. *)
-  go = path -> (() -> web.Go(path, p))
+      the platform beside its pages. Each row of a page is a link to it: in a browser, its address is the admin's own
+      with the page after its # (/admin/#/users), and Ctrl or the middle button opens it in a new tab. *)
   s = OkOf(web.Get(stats))
   ks = OkOf(web.Get(kinds))
-  row = (title, path, n) -> web.Item(Say(title), icon = iconOf(path), key = path, on = go(path), count = n)
-  kind = k -> web.Item(kindTitle(k.Name, p), icon = "symbol-class", key = "/data/$(k.Name)", on = go("/data/$(k.Name)"))
+  row = (title, path, n) -> web.Item(Say(title), icon = iconOf(path), key = path, to = path, count = n)
+  kind = k -> web.Item(kindTitle(k.Name, p), icon = "symbol-class", key = "/data/$(k.Name)", to = "/data/$(k.Name)")
   known = if value.IsArray(ks) ks else [] end
   own = [k for k in known if text.StartsWith("centauri_", k.Name)]
   data = [kind(k) for k in known if not text.StartsWith("centauri_", k.Name)]
@@ -243,7 +246,7 @@ defn outline(p, site, stats, kinds)
       row("Tenants", "/tenants", count("Tenants"))]),
     web.Item(Say("Activity"), icon = "pulse", key = "activity", kids = [row("Events", "/events", missing), row("Log", "/logs", missing), row("Jobs", "/jobs", missing),
       row("Audit", "/audit", missing)]),
-    web.Item(Say("Data"), icon = "database", key = "/data", on = go("/data"), kids = data),
+    web.Item(Say("Data"), icon = "database", key = "/data", to = "/data", kids = data),
     web.Item(Say("Configuration"), icon = "settings-gear", key = "configuration", kids = [row("Settings", "/settings", missing), row("Webhooks", "/hooks", missing),
       row("Files", "/files", missing), row("Keys", "/keys", missing), row("Flags", "/flags", missing)])]
   if value.IsEmpty(site.More)

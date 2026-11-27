@@ -20,6 +20,7 @@ window.adminPlay = (() => {
     'Disable': 'Désactiver', 'Invoices — admin': 'Factures — administration', 'Events': 'Événements', 'Audit trail': 'Piste d’audit',
     'Keys of programs': 'Clés de programmes', 'Unpaid invoices': 'Factures impayées', 'Requests a second': 'Requêtes par seconde',
     'Invoices': 'Factures', 'User ': 'Utilisateur ', 'Tenant ': 'Tenant ', 'Roles of the invitation': 'Rôles de l’invitation',
+    "The changes of this page aren't saved.": 'Les changements de cette page ne sont pas enregistrés.',
   }
   const say = s => (document.documentElement.lang.startsWith('fr') && FR[s]) || s
   const wait = ms => new Promise(r => setTimeout(r, ms))
@@ -229,6 +230,29 @@ window.adminPlay = (() => {
       const refused = await says('422 Check the fields. (Total:')
       if (billTo) { await type('Total', '1280.5'); await press('button', 'Save') }
       return line(saved && refused, 'an invoice changed in place, a total that is no number refused with its field')
+    },
+    // a change not saved holds the way to another page: the band asks, Esc stays, Ctrl+D leaves without saving
+    async guard () {
+      const was = location.hash
+      await type('BillTo', 'Not saved')
+      await go('Dashboard'); await wait(600)
+      const ask = n => n.Role === 'alert' && n.Name === say("The changes of this page aren't saved.")
+      const asked = !!find(await tree(), ask) && location.hash === was
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await wait(400)
+      const stayed = !find(await tree(), ask) && location.hash === was
+      await go('Dashboard'); await wait(600)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true })); await wait(1200)
+      const left = location.hash === '#/' && !!await node('heading', 'Dashboard', 5000)
+      return line(asked && stayed && left, 'a change not saved: asked before leaving, Esc stays, Ctrl+D leaves')
+    },
+    // Back and Forward of the browser go through the pages visited, each at its own address
+    async history () {
+      const inData = async () => location.hash.startsWith('#/data/') && !!await node('textbox', 'BillTo', 5000)
+      history.back(); await wait(1500)
+      const back = await inData()
+      history.forward(); await wait(1500)
+      const forward = location.hash === '#/' && !!await node('heading', 'Dashboard', 5000)
+      return line(back && forward, 'Back to the invoice chosen in its kind, Forward to the dashboard')
     },
     async pay () {
       const inv = all(await tree(), n => n.Role === 'row')[1]; if (!inv) return line(false, 'an unpaid invoice')

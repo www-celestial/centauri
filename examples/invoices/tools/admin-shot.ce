@@ -116,7 +116,7 @@ defn main()
   evaluated(conn, n, sys.Read("tools/admin-play.js")?)?
   steps = [["lang", lang, "signin"], ["signIn", missing, "signin"], ["signedIn", missing, "dashboard"], ["lang", lang, "dashboard"], ["visit", "Dashboard", "dashboard"], ["visit", "Users", "users"], ["disable", missing, "users-disabled"],
     ["visit", "Tenants", "tenants"], ["visit", "Events", "events"], ["visit", "Log", "log"], ["visit", "Jobs", "jobs"], ["visit", "Webhooks", "webhooks"],
-    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"], ["markup", missing, "data-invoice"],
+    ["visit", "Files", "files"], ["visit", "Settings", "settings"], ["visit", "Data", "data"], ["edit", missing, "data-invoice"], ["markup", missing, "data-invoice"], ["guard", missing, "data-guard"], ["history", missing, "history"],
     ["visit", "Unpaid", "unpaid"], ["pay", missing, "unpaid-paid"], ["visit", "Audit", "audit"], ["audit", missing, "audit-after"],
     ["visit", "Keys", "keys"], ["revoke", missing, "keys-revoked"], ["visit", "Flags", "flags"], ["flag", missing, "flags-on"], ["user", missing, "user-factors"], ["signOut", missing, "signout"], ["signedOut", missing, "signout"]]
   if docs != ""
