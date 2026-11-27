@@ -176,10 +176,10 @@ defn Located(ip, env)
   (** The country (its ISO 3166 code) and the city (its English name) of an address, as APP_TELEMETRY_GEO says: none
       ("off", or no database), the country, or both ("city", what the CNIL lets a measure of audience keep, no finer). *)
   mode = env.Settings.TelemetryGeo
-  if mode == "off" or value.IsMissing(dict.Get("Geo", env)) or not value.IsText(ip)
+  if mode == "off" or value.IsMissing(env.State.Geo) or not value.IsText(ip)
     return {Country: missing, City: missing}
   end
-  r = Lookup(env.Geo, ip)
+  r = Lookup(env.State.Geo, ip)
   if not value.IsDict(r)
     return {Country: missing, City: missing}
   end

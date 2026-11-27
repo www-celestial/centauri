@@ -61,7 +61,6 @@ defn front(base, req, env)
   s = env.Settings
   peer = dict.GetOr("Peer", "", req)
   ip = if not s.TrustProxy and value.IsText(peer) and not text.Contains(":", peer) peer else Client(req, trustProxy = s.TrustProxy) end
-  span = if value.IsMissing(env.Otel) missing else otel.Server(env.Otel, req.Method, "", req.Headers, attributes = env.SpanBase) end
   out = missing
   if req.Path == "/health/live"
     out = json200({Status: "live"})
@@ -121,30 +120,38 @@ defn front(base, req, env)
     end
   end
   kept(start, rid, req.Method, route, out.Status, ms, ip, user, env.State)
-  if value.IsSome(span)
-    out = traced(span, out, req, ip, user, env)
-  end
   out
 end
 
-defn traced(span, out, req, ip, user, env)
+defn spanned(base, req, env)
+  (** A request at the door in its span of std/otel, with Otel on: the span opened before front, the parent of every
+      span of the request, and ended after it (traced). *)
+  st = env.State
+  span = otel.Server(st.Otel, req.Method, "", req.Headers, attributes = st.SpanBase)
+  traced(span, front(base, req, env), req, env)
+end
+
+defn traced(span, out, req, env)
   (** The span of a request ended, named by its route, its method and pattern (its method alone when no route took it,
       HTTP for a method that OpenTelemetry doesn't know: never a word that a client made up), with its status, the
       client's address as APP_TELEMETRY_IP says, and its user as APP_TELEMETRY_USER says; a sampled one tells the page
       its trace in Server-Timing, as OpenTelemetry's browser code reads it, and a live action in the answer's Trace. *)
   route = dict.Get("Route", out)
   status = out.Status
+  user = dict.Get("User", out)
   if span.Rec
     trace = "00-$(span.TraceId)-$(span.SpanId)-01"
     out = http.WithHeader("server-timing", "traceparent;desc=\"$trace\"", out)
     out.Trace = trace
   end
-  otel.End(span, failed = status >= 500, attributes = () -> attributesOf(route, status, ip, user, env), name = route)
+  otel.End(span, failed = status >= 500, attributes = () -> attributesOf(route, status, req, user, env), name = route)
   out
 end
 
-defn attributesOf(route, status, ip, user, env)
-  (** The attributes of a request's span that only its answer tells, made only when the span is kept. *)
+defn attributesOf(route, status, req, user, env)
+  (** The attributes of a request's span that only its answer tells, made only when the span is kept: the client's
+      address read again from the request, as front reads it. *)
+  ip = Client(req, trustProxy = env.Settings.TrustProxy)
   attrs = {"http.response.status_code": status}
   if value.IsText(route)
     attrs["http.route"] = text.Split(" ", route)[2]

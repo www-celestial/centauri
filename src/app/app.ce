@@ -163,7 +163,9 @@ end
 
 defn Start(a, s, db, readDb = missing, clock = missing)
   (** What every request of an app shares, env: its settings s (as Read gives them), its database, the database of a
-      token that reads only (for GetDb = "read"), the state of the process, the keys of libsodium, the time (the clock
+      token that reads only (for GetDb = "read"), the state of the process (with its telemetry: Otel, the tracer of
+      std/otel or missing, Browser, the tracer of the pages' telemetry, Geo, the database of addresses, SpanBase, the
+      attributes of every request's span), the keys of libsodium, the time (the clock
       of a test, when given), and Own, a fiber.Table of what a module keeps for as long as the process runs, one key of
       its name each (the admin's sampler of the dashboard: "admin.series"). An Ok of env; Handler(env) serves it. *)
   keys = crypto.Open()?
@@ -198,7 +200,13 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   browser = if value.IsSome(tracer) and s.TelemetryClient == "on" tracerOf(a, s, browser = true)? else missing end
   geo = if s.TelemetryGeo != "off" and value.IsText(dict.Get("TelemetryGeoFile", s)) OpenGeo(s.TelemetryGeoFile)? else missing end
   origin = http.ParseUrl(s.Origin)
-  env = {App: a, Settings: s, Otel: tracer, Browser: browser, Geo: geo, SpanBase: if result.IsOk(origin) {"url.scheme": if origin.Value.Secure "https" else "http" end, "server.address": origin.Value.Host} else {} end, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
+  (* in the state of the process, not in env: env keeps its 32 fields, which a record holds in one block, and every
+     request reads them at the cost of before *)
+  state.Otel = tracer
+  state.Browser = browser
+  state.Geo = geo
+  state.SpanBase = if result.IsOk(origin) {"url.scheme": if origin.Value.Secure "https" else "http" end, "server.address": origin.Value.Host} else {} end
+  env = {App: a, Settings: s, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
     Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
     Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: guards,
     Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
@@ -277,9 +285,17 @@ defn App(env)
   routes then doorOf(env)
 end
 
-(* The door of an app: front, and for an app of several languages its Problem Details translated after it; an app of
-   English alone pays no test for it. *)
-doorOf(env, routes) = if env.Words.Translating http.Wrap((next, req) -> translated(front(next, req, env), req, env), routes) else http.Wrap((next, req) -> front(next, req, env), routes) end
+defn doorOf(env, routes)
+  (** The door of an app: front, and for an app of several languages its Problem Details translated after it; with Otel
+      on, front in the span of the request (spanned). An app of English alone pays no test for it, nor one without
+      Otel for its spans. *)
+  if env.Words.Translating
+    if value.IsMissing(env.State.Otel) http.Wrap((next, req) -> translated(front(next, req, env), req, env), routes)
+    else http.Wrap((next, req) -> translated(spanned(next, req, env), req, env), routes) end
+  else
+    if value.IsMissing(env.State.Otel) http.Wrap((next, req) -> front(next, req, env), routes) else http.Wrap((next, req) -> spanned(next, req, env), routes) end
+  end
+end
 
 (** The function of a request that the app is: what http.Serve calls, and what a test calls without the network. *)
 Handler(env) = http.Handler(App(env))
@@ -379,8 +395,8 @@ defn Run(a)
   end
   log.Info("ready", {App: a.Name, Profile: s.Profile, Port: s.Port, Ms: (sys.Now() - started) * 1000})
   served = Listen(env)
-  if not value.IsMissing(env.Otel)
-    otel.Flush(env.Otel, timeout = 5)   (* what waits leaves before the process does *)
+  if not value.IsMissing(env.State.Otel)
+    otel.Flush(env.State.Otel, timeout = 5)   (* what waits leaves before the process does *)
   end
   ready("serve", served)
 end

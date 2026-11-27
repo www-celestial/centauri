@@ -247,7 +247,7 @@ defn took(r, x)
     _ = cepheus.Insert(ClientError, dict.Dict([p for p in dict.Pairs({View: x.View, Session: x.Session, Route: route, At: now, Type: e.Type, Message: e.Message, Stack: e.Stack,
       Source: e.Source, Count: e.Count, Browser: dict.Get("Browser", f), Version: dict.Get("Version", f), Os: dict.Get("Os", f), Untrusted: true}) if value.IsSome(p.Value)]), r.Db, why = "telemetry")?
   end
-  forwarded(r.Env.Browser, x, route, actions, dict.Values(errors), now)
+  forwarded(r.Env.State.Browser, x, route, actions, dict.Values(errors), now)
   missing
 end
 

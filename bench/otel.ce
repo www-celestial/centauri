@@ -70,15 +70,15 @@ for c in cases
   end
 end
 for x in apps
-  if value.IsSome(x.A.T.Env.Otel)
-    otel.Flush(x.A.T.Env.Otel)
+  if value.IsSome(x.A.T.Env.State.Otel)
+    otel.Flush(x.A.T.Env.State.Otel)
   end
 end
 
 for round in 1..rounds
   order = if math.Mod(round, 2) == 0 list.Reverse(cases) else cases end
   for c in order
-    tracer = c.Env.Otel
+    tracer = c.Env.State.Otel
     before = if value.IsSome(tracer) otel.Counts(tracer) else missing end
     start = sys.Now()
     for k in 1..n

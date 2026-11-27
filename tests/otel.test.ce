@@ -69,7 +69,7 @@ end
 
 defn sent(x)
   (** What the app sent once it flushed: {Spans, Logs}, the spans and the records of logs of every body. *)
-  otel.Flush(x.T.Env.Otel)
+  otel.Flush(x.T.Env.State.Otel)
   spans = []
   logs = []
   while true
@@ -219,7 +219,7 @@ defn isOffByDefaultAndCostsNothing()
   (** Without APP_OTEL, no tracer, no header of a trace, no span: the request is the one of before. *)
   t = apptest.Start(App)!
   got = t.Raw("GET", "/notes/1")
-  value.IsMissing(t.Env.Otel) and value.IsMissing(http.HeaderValue("server-timing", got.Headers)) and value.IsMissing(otel.Header())
+  value.IsMissing(t.Env.State.Otel) and value.IsMissing(http.HeaderValue("server-timing", got.Headers)) and value.IsMissing(otel.Header())
 end
 
 defn isMadeUpMethodNamedHttp()

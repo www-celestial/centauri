@@ -274,7 +274,8 @@ defn Send(env, m)
   id = encode.Hex(crypto.Random(12, env.Keys))
   msg = Message(m, fromOf(env), env.Now(), id)
   (* a span when the job that sends it is traced: the transport and the server, never an address *)
-  span = otel.Begin("mail send", kind = "client", attributes = {"centauri.mail.transport": t.Scheme, "server.address": dict.Get("Host", t)})
+  span = if value.IsMissing(otel.Header()) missing else otel.Begin("mail send", kind = "client", attributes = {"centauri.mail.transport": t.Scheme,
+    "server.address": dict.Get("Host", t)}) end
   sent = if t.Scheme == "test" kept(msg, env)
     else if t.Scheme == "log" logged(msg)
     else if t.Scheme == "file" filed(msg, t)

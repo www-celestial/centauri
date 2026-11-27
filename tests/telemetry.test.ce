@@ -174,7 +174,7 @@ defn isForwardedToOpenTelemetry()
   t = apptest.Start(App, settings = {Otel: "on", OtelEndpoint: "http://127.0.0.1:$(net.Port(l))", OtelProtocol: "json"})!
   _ = post(t, batch(items = [{K: "action", Name: "POST /notes", Ms: 38, Ok: true, Trace: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
     Server: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}, {K: "error", Type: "trap", Message: "unreachable"}]))
-  otel.Flush(t.Env.Browser)
+  otel.Flush(t.Env.State.Browser)
   bodies = []
   while true
     got = fiber.Receive(box, timeout = 0.3)

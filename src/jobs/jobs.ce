@@ -333,7 +333,7 @@ defn RunOne(id, kinds, env, beat = true)
   end
   jobEnv = dict.Put("Why", "job $(kind.Name) #$id", dict.Put("Job", {Id: id, Kind: kind.Name, Try: tries, Key: dict.Get("Key", j)}, env))
   (* with Otel on, a run is a span of a trace of its own, linked to the trace of the request that asked for it *)
-  span = if value.IsMissing(dict.Get("Otel", env)) missing else otel.Begin("process $(kind.Name)", kind = "consumer", tracer = env.Otel,
+  span = if value.IsMissing(env.State.Otel) missing else otel.Begin("process $(kind.Name)", kind = "consumer", tracer = env.State.Otel,
     links = if value.IsText(dict.Get("Trace", j)) [j.Trace] else [] end, attributes = {"messaging.system": "centauri", "messaging.operation.type": "process",
     "messaging.destination.name": kind.Name, "messaging.message.id": "$id", "centauri.job.try": tries}) end
   started = sys.Now()
