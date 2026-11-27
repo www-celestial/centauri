@@ -87,12 +87,18 @@ live.js, `websocket.Dial`'s `last`) and Ceres's (the page's client, `web.Connect
 
 - `admin.series` is the history of the process, sampled once for every page that watches it (each screen sampled for
   itself before): from the start of the app (from the first page that asks when `AdminPath` is `off`), a point a
-  second for 15 minutes and a point a minute for 7 days, bounded in memory (about 6 MB once full). A page asks
-  `{"Seconds": 900, "Minutes": 10080}` at most, and gets them at once, 500 a frame; with no arguments, the last 300
-  seconds as before, the ones already sampled at once. A tick costs 0.012 ms while no request comes (the metrics are
-  read only when a request came; 0.26 ms before, for each page open), 0.9 ms at 1,000 requests a second.
-- `PointRow` gains `Step` (1, a second's point; 60, a minute's), `Screens` (the live screens open on the process),
-  `SignedIn` and `FailedSignIns`. A minute's `P50` and `P99` are those of all its requests, within 1 % (DDSketch).
+  second for 15 minutes and a point a minute for 7 days, bounded in memory (about 6.6 MB once full, with the ten
+  minutes' ring). A page asks `{"Seconds": 900, "Minutes": 10080, "Tens": 1008}` at most, and gets them at once, 500
+  a frame; with no arguments, the last 300 seconds as before, the ones already sampled at once. A tick costs 0.012 ms
+  while no request comes (the metrics are read only when a request came; 0.26 ms before, for each page open), 0.9 ms
+  at 1,000 requests a second.
+- `PointRow` gains `Step` (1, a second's point; 60, a minute's; 600, ten minutes'), `Screens` (the live screens open
+  on the process), `SignedIn` and `FailedSignIns`. A minute's `P50` and `P99` are those of all its requests, within
+  1 % (DDSketch).
+- A third ring, a point every ten minutes for 7 days (1,008 points, `Step` 600), asked by `Tens` (0 to 1,008, none
+  unless given): its counts the sums of its minutes, its `P50` and `P99` those of all its requests (the minutes'
+  sketches merged). `{"Seconds": 900, "Minutes": 60, "Tens": 1008}` is 1,968 points, about 410 KB of JSON, where all
+  the minutes were 10,980 points and 2.3 MB.
 - The metric `centauri_signins_total{result}`, `ok` or `failed`; `app.Screens` (the live screens open) and
   `app.Times` (the times of the requests the log kept since a line) in the state of a process; `env.Own`, a table of
   what a module keeps for the life of the process.

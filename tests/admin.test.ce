@@ -270,7 +270,7 @@ defn isSeriesOneSamplerForEveryScreen()
   bug.Assert(value.IsMissing(fiber.Recall("admin.series", 0, one.Env.Own)), "no sampler before a screen asks")
   a = screen(one.Port, boss, ["admin.series"])
   b = screen(one.Port, boss, ["admin.series"])
-  c = screenOf(one.Port, boss, [{Show: "admin.series", Args: {Seconds: 1, Minutes: 10080}}])
+  c = screenOf(one.Port, boss, [{Show: "admin.series", Args: {Seconds: 1, Minutes: 10080, Tens: 1008}}])
   _ = signedIn(one.Port, "boss@example.com", "correct horse boss")
   _ = http.Fetch("http://localhost:$(one.Port)/auth/signin", method = "POST", body = json.Text({Email: "boss@example.com", Password: "wrong horse boss"}),
     headers = [{Name: "content-type", Value: "application/json"}])

@@ -22,13 +22,14 @@ defn point(at, requests, screens = 0, failures = 0)
   second(at, now, nothing, [], failures, {Ready: at, Running: 0, Dead: 1}, screens)
 end
 
-empty = {Seconds: [], SecondN: 0, Minutes: [], MinuteN: 0, Next: missing}
+empty = {Seconds: [], SecondN: 0, Minutes: [], MinuteN: 0, Tens: [], TenN: 0, Next: missing}
 
-defn fed(b, minute, ats)
-  (** A board and its minute after a point of each second of ats, each of one request of 2 ms: {Board, Minute}. *)
-  t = {Board: b, Minute: minute}
+defn fed(b, minute, ats, ten = missing)
+  (** A board, its minute and its ten minutes after a point of each second of ats, each of one request of 2 ms:
+      {Board, Minute, Ten}. *)
+  t = {Board: b, Minute: minute, Ten: ten}
   for at in ats
-    t = advanced(t.Board, t.Minute, point(at, 1), [2], missing)
+    t = advanced(t.Board, t.Minute, t.Ten, point(at, 1), [2], missing)
   end
   t
 end
@@ -101,18 +102,22 @@ end
 defn isMinuteRolledAtTheFirstSecondOfTheNext()
   t = fed(empty, missing, [k for k in 6030..6059])
   bug.Assert(t.Board.MinuteN == 0 and t.Board.SecondN == 30 and t.Minute.At == 6000, "no minute ends before the next: $(t.Board.MinuteN)")
-  t = fed(t.Board, t.Minute, [6060, 6061])
+  t = fed(t.Board, t.Minute, [6060, 6061], ten = t.Ten)
   first = t.Board.Minutes[1]
   bug.Assert(t.Board.MinuteN == 1 and first.At == 6000 and first.Step == 60 and first.Requests == 30 and math.Abs(first.P50 - 2) <= 0.02, "the minute of 30 seconds: $first")
   (* a clock that jumps (a machine asleep) ends the minute it was in; none is made for the minutes without a second *)
-  t = fed(t.Board, t.Minute, [9000])
+  t = fed(t.Board, t.Minute, [9000], ten = t.Ten)
+  bug.Assert(t.Board.TenN == 1 and t.Board.Tens[1].At == 6000 and t.Board.Tens[1].Requests == 32 and value.IsMissing(t.Ten), "its ten minutes end too: $(t.Board.Tens)")
   t.Board.MinuteN == 2 and t.Board.Minutes[2].At == 6060 and t.Board.Minutes[2].Requests == 2 and t.Minute.At == 9000
 end
 
 defn isBoardBoundedWhateverTheUptime()
-  (** An hour of seconds: the seconds' ring holds its 900, the minutes' every minute but the one going on. *)
+  (** An hour of seconds: the seconds' ring holds its 900, the minutes' every minute but the one going on, the ten
+      minutes' all but the last; each ring full keeps its size. *)
   t = fed(empty, missing, [k for k in 0..3599])
   b = t.Board
+  bug.Assert(value.Len(b.Tens) == 5 and b.TenN == 5 and b.Tens[5].At == 2400 and t.Ten.At == 3000, "the ten minutes: $(b.TenN)")
+  bug.Assert(value.Len(ring(0, [k for k in 1..Tens], Tens)) == Tens, "the ring of ten minutes keeps 1,008")
   value.Len(b.Seconds) == Seconds and b.SecondN == 3600 and b.Seconds[1].At == 2700 and value.Len(b.Minutes) == 59 and b.MinuteN == 59
 end
 
@@ -141,9 +146,9 @@ defn isChangesOfBothRings()
   (** A board that made a second and a minute: a screen of 2 seconds and 5 minutes gets both. *)
   t = fed(empty, missing, [k for k in 0..60])
   old = fed(empty, missing, [k for k in 0..59]).Board
-  c = changes(old, t.Board, {Seconds: 2, Minutes: 5})
+  c = changes(old, t.Board, {Seconds: 2, Minutes: 5, Tens: 0})
   bug.Assert(value.Equal([p.Step for p in c.Added], [1, 60]) and value.Equal([p.At for p in c.Removed], [58]), "both: $c")
-  quiet = changes(old, t.Board, {Seconds: 0, Minutes: 0})
+  quiet = changes(old, t.Board, {Seconds: 0, Minutes: 0, Tens: 0})
   value.Len(quiet.Added) + value.Len(quiet.Removed) == 0
 end
 
@@ -167,17 +172,17 @@ defn isScreenSentFramesOfChunkThenWhatChanged()
       board the point that came and the very one that left; its relay ends with the screen. *)
   own = fiber.Table(4)
   mins = [closed(folded(opened(k * 60), point(k * 60, 2), [1])) for k in 1..1100]
-  b = {Seconds: [point(k, 1) for k in 1..900], SecondN: 900, Minutes: mins, MinuteN: 1100, Next: fiber.Channel()}
+  b = {Seconds: [point(k, 1) for k in 1..900], SecondN: 900, Minutes: mins, MinuteN: 1100, Tens: [], TenN: 0, Next: fiber.Channel()}
   fiber.Remember("admin.series", b, 1e300, own)
   s = {Ended: fiber.Channel(), Env: {Own: own}}
   out = fiber.Channel(size = 64)
-  fiber.Spawn(() -> relaying(s, {Seconds: 900, Minutes: 10080}, b, out))
+  fiber.Spawn(() -> relaying(s, {Seconds: 900, Minutes: 10080, Tens: 1008}, b, out))
   got = [fiber.Receive(out, timeout = 1).Value for k in 1..4]
   sizes = [value.Len(dict.GetOr("Rows", dict.GetOr("Added", [], m), m)) for m in got]
   rows = list.Flatten([dict.GetOr("Rows", dict.GetOr("Added", [], m), m) for m in got])
   bug.Assert(value.Equal(sizes, [500, 500, 500, 500]) and dict.Has("Rows", got[1]) and got[1].Rows[1].At == 900, "frames of 500, the newest first: $sizes")
   bug.Assert(value.Len(list.Unique([json.Text(r) for r in rows])) == 2000 and rows[901].Step == 60 and rows[901].At == 66000, "every point once: $(rows[901])")
-  t = advanced(b, missing, point(901, 1), [1], fiber.Channel())
+  t = advanced(b, missing, missing, point(901, 1), [1], fiber.Channel())
   fiber.Remember("admin.series", t.Board, 1e300, own)
   fiber.Close(b.Next)
   next = fiber.Receive(out, timeout = 1).Value
@@ -185,4 +190,39 @@ defn isScreenSentFramesOfChunkThenWhatChanged()
   fiber.Close(s.Ended)
   fiber.Close(t.Board.Next)
   fiber.Receive(out, timeout = 1).Error.Kind == "closed"
+end
+
+defn isTenTheSumOfItsMinutes()
+  (** Ten minutes: the sums of their minutes, the last one's values, At their first second, Step 600; made at the first
+      second of the next ten, and sent to a screen that asks them as a minute's point is. *)
+  before = fed(empty, missing, [k for k in 0..599])
+  bug.Assert(before.Board.TenN == 0 and before.Ten.At == 0 and value.Len(before.Board.Minutes) == 9, "none before their end: $(before.Board.TenN)")
+  t = fed(before.Board, before.Minute, [600], ten = before.Ten)
+  ten = t.Board.Tens[1]
+  bug.Assert(t.Board.TenN == 1 and ten.At == 0 and ten.Step == 600 and ten.Requests == 600 and ten.SignedIn == 600 and ten.FailedSignIns == 1200, "the sums: $ten")
+  bug.Assert(ten.Ready == 599 and ten.Dead == 1 and math.Abs(ten.P50 - 2) <= 0.02 and value.Equal(dict.Keys(ten), dict.Keys(point(0, 0))), "the last values: $ten")
+  c = changes(before.Board, t.Board, {Seconds: 0, Minutes: 0, Tens: 3})
+  value.Len(c.Added) == 1 and c.Added[1].Step == 600 and value.Len(c.Removed) == 0
+end
+
+defn isTensQuantilesThoseOfAllTheirRequests()
+  (** The sketches of ten minutes merged are the sketch of all their times, bucket for bucket: their quantiles within
+      1 % of the exact ones over the 10 minutes. *)
+  ten = opened(0, span = 600)
+  every = []
+  for m in 0..9
+    minute = opened(m * 60)
+    for k in 0..59
+      ms = list.Sort([math.Round((0.2 + (m + 1) * 300 * (math.Mod(k * 131 + j * 17 + m, 211) / 211) ^ 5) * 1000) / 1000 for j in 1..50])
+      minute = folded(minute, point(m * 60 + k, 50), ms)
+      every = list.Concat(every, ms)
+    end
+    ten = joined(ten, minute, closed(minute))
+  end
+  whole = sketched(dict.Dict(), list.Sort(every))
+  same = value.Equal([[k, ten.Sketch[k]] for k in list.Sort(dict.Keys(ten.Sketch))], [[k, whole[k]] for k in list.Sort(dict.Keys(whole))])
+  every = list.Sort(every)
+  p = closed(ten, step = 600)
+  bug.Assert(same and ten.Times == 30000 and p.Requests == 30000, "merged as one: $(ten.Times)")
+  math.Abs(p.P50 - quantile(every, 0.5)) <= 0.01 * quantile(every, 0.5) + 0.0005 and math.Abs(p.P99 - quantile(every, 0.99)) <= 0.01 * quantile(every, 0.99) + 0.0005
 end

@@ -150,27 +150,29 @@ AdminJobRetry = Post("/admin/jobs/:id/retry", role = Super, about = "Runs a dead
 (** A job that waits made dead, so that it never runs; a running one can't be (409). *)
 AdminJobCancel = Post("/admin/jobs/:id/cancel", role = Super, about = "Cancels a waiting job.")
 
-(** A point of the dashboard, a second of this process (Step 1) or a minute of them (Step 60): its requests, those that
-    failed (5xx) and those refused at the door (by the site they came from, a limit, a sign-in missing, a role), the
-    failed sign-ins of the last minute, the median and 99th percentile of the time of its requests in milliseconds (of
-    those the log kept, all of them under LogLines a second), the jobs ready, running and dead (every 5 seconds), and
-    when: At, in seconds since 1970, the end of its second, or the start of its minute. Screens, the live screens open
-    on this process (a page that left is counted until its screen ends, ResumeTime seconds); SignedIn and FailedSignIns,
-    the sign-ins that opened a session (every way in: a password, a passkey, a provider, a second factor) and those
-    refused. A minute's point sums its seconds, but for Failures, Ready, Running, Dead and Screens, its last second's;
-    its P50 and P99 are those of every request of its minute, within 1 % (a sketch of their times, DDSketch). *)
+(** A point of the dashboard, a second of this process (Step 1), a minute (Step 60) or ten minutes (Step 600): its
+    requests, those that failed (5xx) and those refused at the door (by the site they came from, a limit, a sign-in
+    missing, a role), the failed sign-ins of the last minute, the median and 99th percentile of the time of its
+    requests in milliseconds (of those the log kept, all of them under LogLines a second), the jobs ready, running and
+    dead (every 5 seconds), and when: At, in seconds since 1970, the end of its second, or the start of its minute or
+    ten minutes. Screens, the live screens open on this process (a page that left is counted until its screen ends,
+    ResumeTime seconds); SignedIn and FailedSignIns, the sign-ins that opened a session (every way in: a password, a
+    passkey, a provider, a second factor) and those refused. A minute's point sums its seconds, and ten minutes' their
+    minutes, but for Failures, Ready, Running, Dead and Screens, their last second's; their P50 and P99 are those of
+    every request of their span, within 1 % (a sketch of their times, DDSketch, the ten minutes' the minutes' merged). *)
 PointRow = check.Record({At: check.Float(), Requests: check.Float(0), Errors: check.Float(0), Origin: check.Float(0), Limit: check.Float(0),
   Signin: check.Float(0), Role: check.Float(0), Failures: check.Float(0), P50: check.Float(0), P99: check.Float(0), Ready: check.Float(0),
-  Running: check.Float(0), Dead: check.Float(0), Step: check.Int(1, 60), Screens: check.Float(0), SignedIn: check.Float(0),
+  Running: check.Float(0), Dead: check.Float(0), Step: check.Int(1, 600), Screens: check.Float(0), SignedIn: check.Float(0),
   FailedSignIns: check.Float(0)})
 
-(** The dashboard live: the points of this process that its sampler keeps, a point a second for the last 15 minutes and
-    a point a minute for the last 7 days, sampled from the start of the app whoever watches. A screen asks the last
-    Seconds of the seconds' and the last Minutes of the minutes' (300 and none unless it says: the last five minutes, as
-    before), gets them at once, then each new point, and the points that leave its window as Removed. *)
+(** The dashboard live: the points of this process that its sampler keeps, a point a second for the last 15 minutes, a
+    point a minute and a point every ten minutes for the last 7 days, sampled from the start of the app whoever
+    watches. A screen asks the last Seconds of the seconds', the last Minutes of the minutes' and the last Tens of the
+    ten minutes' (300, none and none unless it says: the last five minutes, as before), gets them at once, then each
+    new point, and the points that leave its window as Removed. *)
 AdminSeries = Live("admin.series", args = check.Record({Seconds: check.Int(0, 900, optional = true, default = 300),
-  Minutes: check.Int(0, 10080, optional = true, default = 0)}), out = PointRow, role = Super,
-  about = "The dashboard's points: a second's for 15 minutes, a minute's for 7 days.")
+  Minutes: check.Int(0, 10080, optional = true, default = 0), Tens: check.Int(0, 1008, optional = true, default = 0)}), out = PointRow,
+  role = Super, about = "The dashboard's points: a second's for 15 minutes, a minute's and ten minutes' for 7 days.")
 
 (** The events of the last hour, live, their times in seconds since 1970: each new one as it is written, by any server
     of the app. *)

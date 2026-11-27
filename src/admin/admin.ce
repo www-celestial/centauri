@@ -2,9 +2,9 @@
     setting AdminPath (/admin by default, off for none), that talk to the app by the endpoints of the administration
     (api.AdminOfApp, api.AdminOfAccounts, the jobs') through the same door as any client, over the live screen of the
     page: the session of its cookie, the role super checked at each call, the limits, the shapes, the log. The module
-    adds the live shows of the pages (api.AdminShows): the dashboard's points, a second's for 15 minutes and a
-    minute's for 7 days, sampled once for the whole process from the start of the app; the events as they are written,
-    the log as it goes. No endpoint of its own, no other way in. An app lists Module() among its modules, after
+    adds the live shows of the pages (api.AdminShows): the dashboard's points, a second's for 15 minutes, a minute's and
+    ten minutes' for 7 days, sampled once for the whole process from the start of the app; the events as they are
+    written, the log as it goes. No endpoint of its own, no other way in. An app lists Module() among its modules, after
     auth's. The pages are built by the app, from its own entry, so that it adds its pages, columns and actions
     (package src/admin/pages): cesia build --target wasm admin/page.ce writes admin/page.wasm and its loader beside
     it, which Module(folder = "admin") serves. The book's chapter The admin shows both. *)
@@ -43,6 +43,9 @@ Seconds = 900
 
 (** The points of a minute the sampler keeps: seven days. *)
 Minutes = 10080
+
+(** The points of ten minutes the sampler keeps: seven days, in 1,008 points where a page draws a week. *)
+Tens = 1008
 
 (** The points of a frame at most, while a screen gets those the sampler kept. *)
 Chunk = 500
@@ -203,28 +206,54 @@ summed = ["Requests", "Errors", "Origin", "Limit", "Signin", "Role", "SignedIn",
 (** The minute that holds a time: its first second. *)
 minuteOf(at) = math.Floor(at / 60) * 60
 
-(** A minute begun, of the second at: nothing counted yet. *)
-opened(at) = {At: minuteOf(at), Requests: 0, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0, SignedIn: 0, FailedSignIns: 0, Last: missing,
-  Sketch: dict.Dict(), Times: 0}
+(** The ten minutes that hold a time: their first second. *)
+tenOf(at) = math.Floor(at / 600) * 600
 
-defn folded(m, p, ms)
-  (** A minute with a point of its seconds counted in, and the times ms of its requests. *)
+(** A span begun, of span seconds (a minute's, ten minutes'), that holds the second at: nothing counted yet. *)
+opened(at, span = 60) = {At: math.Floor(at / span) * span, Requests: 0, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0, SignedIn: 0, FailedSignIns: 0,
+  Last: missing, Sketch: dict.Dict(), Times: 0}
+
+defn summedIn(m, p)
+  (** A span with the counts of a point of it summed in, the point its last. *)
   for f in summed
     m[f] += p[f]
   end
   m.Last = p
+  m
+end
+
+defn folded(m, p, ms)
+  (** A minute with a point of its seconds counted in, and the times ms of its requests. *)
+  m = summedIn(m, p)
   m.Sketch = sketched(m.Sketch, ms)
   m.Times += value.Len(ms)
   m
 end
 
-defn closed(m)
-  (** The point of a minute: the sums of its seconds, its last second's Failures, jobs and screens, and the quantiles of
-      the times of all its requests. *)
+defn joined(t, minute, p)
+  (** Ten minutes with a minute of them counted in, p its point: the sketches of their times merged, the buckets of
+      one added to those of the other, so that the quantiles of the ten minutes are those of all their requests. *)
+  t = summedIn(t, p)
+  t.Sketch = merged(t.Sketch, minute.Sketch)
+  t.Times += minute.Times
+  t
+end
+
+defn merged(sk, other)
+  (** A sketch with the counts of another added, bucket by bucket: DDSketch merges with no loss. *)
+  for k in dict.Keys(other)
+    sk[k] = dict.GetOr(k, 0, sk) + other[k]
+  end
+  sk
+end
+
+defn closed(m, step = 60)
+  (** The point of a span of step seconds: the sums of its points, its last one's Failures, jobs and screens, and the
+      quantiles of the times of all its requests. *)
   l = m.Last
   {At: m.At, Requests: m.Requests, Errors: m.Errors, Origin: m.Origin, Limit: m.Limit, Signin: m.Signin, Role: m.Role, Failures: l.Failures,
     P50: sketchQuantile(m.Sketch, m.Times, 0.5), P99: sketchQuantile(m.Sketch, m.Times, 0.99), Ready: l.Ready, Running: l.Running, Dead: l.Dead,
-    Step: 60, Screens: l.Screens, SignedIn: m.SignedIn, FailedSignIns: m.FailedSignIns}
+    Step: step, Screens: l.Screens, SignedIn: m.SignedIn, FailedSignIns: m.FailedSignIns}
 end
 
 (** The points of a ring with p after them, the most last ones. *)
@@ -233,8 +262,8 @@ ring(p, xs, most) = list.Append(p, if value.Len(xs) < most xs else list.Skip(val
 (** The n last points of a ring. *)
 last(n, xs) = list.Skip(list.Max([0, value.Len(xs) - n]), xs)
 
-(** The board of a process's sampler: its rings, the seconds' and the minutes', the number of points each made since
-    the start, and Next, a channel closed when the next board is written. *)
+(** The board of a process's sampler: its rings, the seconds', the minutes' and the ten minutes', the number of points
+    each made since the start, and Next, a channel closed when the next board is written. *)
 board(env) = fiber.Recall("admin.series", 0, env.Own)
 
 defn sampler(env)
@@ -243,7 +272,7 @@ defn sampler(env)
   b = board(env)
   if value.IsMissing(b)
     (* no wait between the Recall and the Remember: no other fiber runs in between, so two screens never start two *)
-    b = {Seconds: [], SecondN: 0, Minutes: [], MinuteN: 0, Next: fiber.Channel()}
+    b = {Seconds: [], SecondN: 0, Minutes: [], MinuteN: 0, Tens: [], TenN: 0, Next: fiber.Channel()}
     fiber.Remember("admin.series", b, 1e300, env.Own)
     fiber.Spawn(() -> supervising(env))
   end
@@ -288,13 +317,16 @@ end
 
 defn begun(env)
   (** What the sampler of a process holds from one second to the next, as it starts: the board it wrote last, the
-      counters and the number of the last line of the log read, the jobs, the minute going on, and its ticks. *)
-  {Board: board(env), Before: totals(metrics.Text()), Seq: app.Times(0, env.State).Seq, Jobs: {Ready: 0, Running: 0, Dead: 0}, Minute: missing, Tick: 0}
+      counters and the number of the last line of the log read, the jobs, the minute and the ten minutes going on, and
+      its ticks. *)
+  {Board: board(env), Before: totals(metrics.Text()), Seq: app.Times(0, env.State).Seq, Jobs: {Ready: 0, Running: 0, Dead: 0}, Minute: missing, Ten: missing,
+    Tick: 0}
 end
 
 defn ticked(env, st)
   (** A second of the sampler: a point of this process, the counters' growth since the last one and the times of the
-      requests the log kept since; at the first second of a minute, the point of the minute before. The new board is
+      requests the log kept since; at the first second of a minute, the point of the minute before, and of the ten
+      minutes before at the first second of ten others. The new board is
       written, and the Next of the one before closed, so that the screens that wait for it wake, all at once. *)
   st.Tick += 1
   times = app.Times(st.Seq, env.State)
@@ -308,27 +340,43 @@ defn ticked(env, st)
   end
   p = second(math.Floor(env.Now()), now, st.Before, ms, app.Failures(env.State), st.Jobs, app.Screens(env.State))
   st.Before = now
-  t = advanced(st.Board, st.Minute, p, ms, fiber.Channel())
+  t = advanced(st.Board, st.Minute, st.Ten, p, ms, fiber.Channel())
   fiber.Remember("admin.series", t.Board, 1e300, env.Own)
   fiber.Close(st.Board.Next)
   st.Board = t.Board
   st.Minute = t.Minute
+  st.Ten = t.Ten
   st
 end
 
-defn advanced(b, minute, p, ms, next)
-  (** The board b after the point p of a second, ms the times of its requests, and minute the minute it counts in:
-      {Board, Minute}, the new board's Next next. The point of a minute goes in the minutes' ring at the first second
-      of another. *)
+defn advanced(b, minute, ten, p, ms, next)
+  (** The board b after the point p of a second, ms the times of its requests, minute the minute it counts in and ten
+      the ten minutes: {Board, Minute, Ten}, the new board's Next next. The point of a minute goes in the minutes' ring
+      at the first second of another, and in its ten minutes; the point of ten minutes in their ring at the first
+      second of ten others. A clock that jumps ends the spans it was in; none is made for the spans it jumped over. *)
   mins = b.Minutes
   minN = b.MinuteN
+  tens = b.Tens
+  tenN = b.TenN
   if value.IsSome(minute) and minuteOf(p.At) != minute.At
-    mins = ring(closed(minute), mins, Minutes)
+    mp = closed(minute)
+    mins = ring(mp, mins, Minutes)
     minN += 1
+    if value.IsSome(ten) and tenOf(minute.At) != ten.At
+      tens = ring(closed(ten, step = 600), tens, Tens)
+      tenN += 1
+      ten = missing
+    end
+    ten = joined(if value.IsMissing(ten) opened(minute.At, span = 600) else ten end, minute, mp)
     minute = missing
   end
-  {Board: {Seconds: ring(p, b.Seconds, Seconds), SecondN: b.SecondN + 1, Minutes: mins, MinuteN: minN, Next: next},
-    Minute: folded(if value.IsMissing(minute) opened(p.At) else minute end, p, ms)}
+  if value.IsSome(ten) and tenOf(p.At) != ten.At
+    tens = ring(closed(ten, step = 600), tens, Tens)
+    tenN += 1
+    ten = missing
+  end
+  {Board: {Seconds: ring(p, b.Seconds, Seconds), SecondN: b.SecondN + 1, Minutes: mins, MinuteN: minN, Tens: tens, TenN: tenN, Next: next},
+    Minute: folded(if value.IsMissing(minute) opened(p.At) else minute end, p, ms), Ten: ten}
 end
 
 defn moved(a, an, b, bn, w)
@@ -345,11 +393,12 @@ defn moved(a, an, b, bn, w)
 end
 
 defn changes(old, new, want)
-  (** What a screen that shows the last want.Seconds points of a second and want.Minutes of a minute of the board old
-      gets for the board new. *)
+  (** What a screen that shows the last want.Seconds points of a second, want.Minutes of a minute and want.Tens of ten
+      minutes of the board old gets for the board new. *)
   s = moved(old.Seconds, old.SecondN, new.Seconds, new.SecondN, want.Seconds)
   m = moved(old.Minutes, old.MinuteN, new.Minutes, new.MinuteN, want.Minutes)
-  {Added: list.Concat(s.Added, m.Added), Removed: list.Concat(s.Removed, m.Removed)}
+  t = moved(old.Tens, old.TenN, new.Tens, new.TenN, want.Tens)
+  {Added: list.Flatten([s.Added, m.Added, t.Added]), Removed: list.Flatten([s.Removed, m.Removed, t.Removed])}
 end
 
 ended(s) = not timedOut(fiber.Receive(s.Ended, timeout = 0))   (* Has the screen ended? *)
@@ -371,9 +420,9 @@ defn series(s, args)
 end
 
 defn relaying(s, want, b, out)
-  (** Sends a screen the points it asks of the board b, Chunk a frame at most, the newest first: the seconds, then the
-      minutes; then at each new board the points that came and those that left its window. *)
-  rows = list.Concat(list.Reverse(last(want.Seconds, b.Seconds)), list.Reverse(last(want.Minutes, b.Minutes)))
+  (** Sends a screen the points it asks of the board b, Chunk a frame at most, the newest first: the seconds, the
+      minutes, then the ten minutes; then at each new board the points that came and those that left its window. *)
+  rows = list.Flatten([list.Reverse(last(want.Seconds, b.Seconds)), list.Reverse(last(want.Minutes, b.Minutes)), list.Reverse(last(want.Tens, b.Tens))])
   n = value.Len(rows)
   group = 1
   fiber.Send({Group: group, Rows: list.Take(Chunk, rows)}, out)
