@@ -43,12 +43,14 @@ defn parsed(row)
 end
 
 defn listOf(p, name)
-  (** The list of the things of a kind, made once for the pages of the admin and kept: the thing opened and the list
-      again share it, so that opening a thing reads nothing again. *)
+  (** The list of the things of a kind, kept for the pages of the admin: a thing opened shares the list shown before
+      it, so that opening a thing reads nothing again; the list shown without a thing opened is read again. *)
   site = dict.Get("Site", p)
   kept = if value.IsDict(site) and "Lists" in site peek(site.Lists) else dict.Dict() end
   got = dict.Get(name, kept)
-  if value.IsSome(got)
+  (* a thing opened keeps the list as it is; the list shown without one is read again, by a list of its own (setting
+     the signals of the list kept from here would make the page read what it sets) *)
+  if value.IsSome(got) and value.IsSome(dict.Get("id", p.Params))
     return got
   end
   l = Lister(api.AdminData, {kind: name}, p, each = parsed)
