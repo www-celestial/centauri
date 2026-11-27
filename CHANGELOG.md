@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### The admin as a desktop tool, its pages at their own addresses
+
+- The admin pages laid out as a desktop tool, in Ceres's `web.Dock`: the pages in an outliner at the left (Platform,
+  Activity, Data with the app's kinds first and the platform's own in a row closed at first, Configuration, the app's
+  own pages), the page in the center, the thing chosen in the details at the right, the events, the log and the jobs
+  at the bottom, the app, Refresh and Sign out in a toolbar, the connection, who is signed in and the counts in a
+  status bar; the layout kept by the browser. The theme is a setting, `AdminTheme`: `dark` (the default), `light`, or
+  `system`.
+- Each page at its own address, the admin's with the page after a `#` (`/admin/#/users`): Back and Forward go through
+  the pages visited, an address kept or shared opens its page (after the sign-in when the session is gone), a row of
+  the outliner opens in a new tab with Ctrl or the middle button; a table found again has its order, its scroll and
+  its row chosen.
+- A thing changed in the details and not saved holds the way to another page, which asks first: save and leave, leave
+  without saving, or stay; closing the tab asks too. While no thing is chosen, the details show the kind: its name,
+  its module, its fields with their types.
+
 The admin pages in French, and the book in French. Nothing breaks: every endpoint answers as it did. What changes,
 each additive: in an app of several languages (`APP_LANGS`), `GET /auth/me` sends `Content-Language`, the language the
 app speaks to that user, and the actions of a live screen carry the browser's language, so their errors come in it;

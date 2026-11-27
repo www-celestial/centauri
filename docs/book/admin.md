@@ -185,6 +185,15 @@ and its rules, and keeps in its history who changed it and why. A field that `ap
 password, a webhook's secret) is never sent to a page, shown `(secret)`, and never changed. Each change is an event,
 `data-edited`, that names the fields and never their values.
 
+**Each page at its own address.** The pages are those of a web site: each has its address, the admin's own with the
+page after a `#` (`/admin/#/users`, `/admin/#/data/invoice`). Back and Forward of the browser go through the pages
+visited, an address kept or sent opens its page (after the sign-in, when the session is gone), and a row of the
+outliner pressed with Ctrl or the middle button opens its page in a new tab. A table found again has its order, its
+scroll and its row chosen of before. A thing changed in the details and not saved holds the way to another page: the
+band at the bottom of the window asks first, save and leave (Ctrl+S), leave without saving (Ctrl+D) or stay (Esc), and
+closing the tab asks too. While no thing is chosen, the details show its kind: its name, the module that declares it,
+and its fields with their types.
+
 ## 3. Your own admin page: the invoices of every office
 
 The support of the platform wants the unpaid invoices of every office, their sum by office, and to mark one paid when

@@ -207,6 +207,16 @@ d'où on ne peut pas revenir au texte) ou le secret d'un webhook, n'est jamais e
 `(secret)`, et jamais changé. Chaque changement est un événement, `data-edited`, qui nomme les champs et jamais leurs
 valeurs.
 
+**Chaque page à son adresse.** Les pages sont celles d'un site web : chacune a son adresse, celle de l'administration
+suivie de la page après un `#` (`/admin/#/users`, `/admin/#/data/invoice`). Précédent et Suivant du navigateur
+parcourent les pages visitées, une adresse gardée ou envoyée ouvre sa page (après la connexion, quand la session n'est
+plus là), et une ligne de l'arborescence (l'*outliner*, la liste des pages à gauche) pressée avec Ctrl ou le bouton du
+milieu ouvre sa page dans un nouvel onglet. Un tableau retrouvé a son tri, son défilement et sa ligne choisie d'avant.
+Une chose changée dans les détails et pas enregistrée retient le chemin vers une autre page : la bande en bas de la
+fenêtre demande d'abord, enregistrer et partir (Ctrl+S), partir sans enregistrer (Ctrl+D) ou rester (Échap), et fermer
+l'onglet demande aussi. Tant qu'aucune chose n'est choisie, les détails montrent son type (*kind*) : son nom, le module
+qui le déclare, et ses champs avec leur type.
+
 ## 3. Votre propre page d'administration : les factures de tous les cabinets
 
 Le support de la plateforme veut les factures impayées de tous les cabinets, leur somme par cabinet, et pouvoir en
