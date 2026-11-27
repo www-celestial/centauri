@@ -135,6 +135,11 @@ defn pageOf(p, m, site)
   web.Set(site.Detail, missing)
   web.Set(site.Sheet, missing)
   web.Set(site.Page, {Menu: m, P: q})
+  tree = peek(site.Tree)
+  if value.IsSome(tree)
+    (* the dock's outliner: the row of the page, a thing's kind for a thing opened *)
+    web.Set(tree.Chosen, rowOf(text.Split("?", p.Path)[1]))
+  end
   web.Stack([() -> againView(web.Get(p.Screen.Status), q, site), web.Conflicts(q, say = t -> Say(t)), web.Grow(m.View(q))], gap = 0)
 end
 
