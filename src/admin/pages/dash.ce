@@ -18,8 +18,8 @@ defn Dashboard(p)
     web.Title(Say("Dashboard")),
     (* the counts in two rows of three, so that the longest name keeps one line in a center of 600 pixels *)
     Replied(stats, s -> web.Stack([
-      web.Row([web.Grow(tile(Say("Users"), s.Users, "person")), web.Grow(tile(Say("Tenants"), s.Tenants, "organization")), web.Grow(tile(Say("Sessions"), s.Sessions, "account"))], gap = 4),
-      web.Row([web.Grow(tile(Say("Requests"), s.Requests, "pulse")), web.Grow(tile(Say("Refused"), s.Refused, "shield")), web.Grow(tile(Say("Failed sign-ins/min"), s.Failures, "lock"))], gap = 4),
+      web.Row([web.Grow(tile(Say("Users"), s.Users, "user")), web.Grow(tile(Say("Tenants"), s.Tenants, "building")), web.Grow(tile(Say("Sessions"), s.Sessions, "circle-user"))], gap = 4),
+      web.Row([web.Grow(tile(Say("Requests"), s.Requests, "activity")), web.Grow(tile(Say("Refused"), s.Refused, "shield")), web.Grow(tile(Say("Failed sign-ins/min"), s.Failures, "lock"))], gap = 4),
     ], gap = 4)),
     () -> nowLine(web.Get(points)),
     web.Row([

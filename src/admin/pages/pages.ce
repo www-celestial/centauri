@@ -142,13 +142,13 @@ defn rowOf(path)
 end
 
 (* The icon of each page, by its path, as the outliner and the center's tab show it. *)
-pageIcons = [["/", "dashboard"], ["/users", "person"], ["/tenants", "organization"], ["/events", "broadcast"], ["/logs", "output"], ["/jobs", "tools"],
-  ["/audit", "history"], ["/data", "database"], ["/settings", "settings-gear"], ["/hooks", "link"], ["/files", "files"], ["/keys", "key"], ["/flags", "flag"]]
+pageIcons = [["/", "layout-dashboard"], ["/users", "user"], ["/tenants", "building"], ["/events", "radio"], ["/logs", "logs"], ["/jobs", "wrench"],
+  ["/audit", "rotate-ccw-clock"], ["/data", "database"], ["/settings", "settings"], ["/hooks", "webhook"], ["/files", "files"], ["/keys", "key"], ["/flags", "flag"]]
 
 defn iconOf(path)
   (** The icon of a page's path: its own, a kind's for the data of a kind, a page's for the app's own pages. *)
   if text.StartsWith("/data/", path)
-    return "symbol-class"
+    return "box"
   end
   got = list.FindFirst(x -> x[1] == path, pageIcons)
   if value.IsMissing(got) "file-text" else got[2] end
@@ -165,13 +165,13 @@ defn desk(p, site)
   tree = web.Tree(() -> outline(p, site, stats, kinds), chosen = "/", closed = ["platform-kinds"], label = Say("Pages"))
   d = web.Dock([web.Panel(() -> pageTitle(site), () -> center(site), icon = () -> iconOf(rowOf(pagePath(site))), key = "Page")],
     left = [web.Panel(Say("Pages"), tree, icon = "list-tree", key = "Pages")],
-    right = [web.Panel(Say("Details"), () -> details(site), icon = "symbol-property", key = "Details")],
-    bottom = [web.Panel(Say("Events"), eventsConsole(p), icon = "broadcast", key = "Events"), web.Panel(Say("Log"), logConsole(p), icon = "output", key = "Log"),
-      web.Panel(Say("Jobs"), jobsConsole(p), icon = "tools", key = "Jobs")],
+    right = [web.Panel(Say("Details"), () -> details(site), icon = "sliders-horizontal", key = "Details")],
+    bottom = [web.Panel(Say("Events"), eventsConsole(p), icon = "radio", key = "Events"), web.Panel(Say("Log"), logConsole(p), icon = "logs", key = "Log"),
+      web.Panel(Say("Jobs"), jobsConsole(p), icon = "wrench", key = "Jobs")],
     toolbar = web.Toolbar([web.Icon("server", color = "Link"), web.Text(site.Title, font = "strong"), web.Divider(), () -> appLine(web.Get(site.App)), web.Spacer(),
-      web.Button(Say("Refresh"), () -> web.Set(site.Page, web.Get(site.Page)), icon = "refresh", key = "f5"), web.Divider(),
-      web.Button(Say("Sign out"), () -> signOut(), icon = "sign-out", key = "C-q")]),
-    status = web.StatusBar([web.Connection(p, say = t -> Say(t)), web.Divider(), web.Icon("account", color = "Muted"), web.Text(site.Me.Email), web.Divider(),
+      web.Button(Say("Refresh"), () -> web.Set(site.Page, web.Get(site.Page)), icon = "refresh-cw", key = "f5"), web.Divider(),
+      web.Button(Say("Sign out"), () -> signOut(), icon = "log-out", key = "C-q")]),
+    status = web.StatusBar([web.Connection(p, say = t -> Say(t)), web.Divider(), web.Icon("circle-user", color = "Muted"), web.Text(site.Me.Email), web.Divider(),
       web.Text(Say("every tenant"), color = "Muted"), web.Spacer(), () -> counts(OkOf(web.Get(stats)))]),
     key = "admin", sizes = {Left: 220, Right: 360, Bottom: 180})
   stash(d, site.Desk)
@@ -231,7 +231,7 @@ defn outline(p, site, stats, kinds)
   s = OkOf(web.Get(stats))
   ks = OkOf(web.Get(kinds))
   row = (title, path, n) -> web.Item(Say(title), icon = iconOf(path), key = path, on = go(path), count = n)
-  kind = k -> web.Item(kindTitle(k.Name, p), icon = "symbol-class", key = "/data/$(k.Name)", on = go("/data/$(k.Name)"))
+  kind = k -> web.Item(kindTitle(k.Name, p), icon = "box", key = "/data/$(k.Name)", on = go("/data/$(k.Name)"))
   known = if value.IsArray(ks) ks else [] end
   own = [k for k in known if text.StartsWith("centauri_", k.Name)]
   data = [kind(k) for k in known if not text.StartsWith("centauri_", k.Name)]
@@ -239,12 +239,12 @@ defn outline(p, site, stats, kinds)
     data = list.Append(web.Item(Say("Platform kinds"), icon = "server", key = "platform-kinds", kids = [kind(k) for k in own]), data)
   end
   count = name -> if value.IsDict(s) Num(dict.Get(name, s)) else missing end
-  out = [web.Item(Say("Platform"), icon = "organization", key = "platform", kids = [row("Dashboard", "/", missing), row("Users", "/users", count("Users")),
+  out = [web.Item(Say("Platform"), icon = "building", key = "platform", kids = [row("Dashboard", "/", missing), row("Users", "/users", count("Users")),
       row("Tenants", "/tenants", count("Tenants"))]),
-    web.Item(Say("Activity"), icon = "pulse", key = "activity", kids = [row("Events", "/events", missing), row("Log", "/logs", missing), row("Jobs", "/jobs", missing),
+    web.Item(Say("Activity"), icon = "activity", key = "activity", kids = [row("Events", "/events", missing), row("Log", "/logs", missing), row("Jobs", "/jobs", missing),
       row("Audit", "/audit", missing)]),
     web.Item(Say("Data"), icon = "database", key = "/data", on = go("/data"), kids = data),
-    web.Item(Say("Configuration"), icon = "settings-gear", key = "configuration", kids = [row("Settings", "/settings", missing), row("Webhooks", "/hooks", missing),
+    web.Item(Say("Configuration"), icon = "settings", key = "configuration", kids = [row("Settings", "/settings", missing), row("Webhooks", "/hooks", missing),
       row("Files", "/files", missing), row("Keys", "/keys", missing), row("Flags", "/flags", missing)])]
   if value.IsEmpty(site.More)
     return out
@@ -284,7 +284,7 @@ defn jobsConsole(p)
     () -> (if value.IsMissing(last()) web.Text(Say("Waiting for the first second…"), color = gray) else web.Stack([
       web.Property(Say("ready"), web.Text(Num(last().Ready), font = "code")), web.Property(Say("running"), web.Text(Num(last().Running), font = "code")),
       web.Property(Say("dead"), web.Text(Num(last().Dead), font = "code", color = red if last().Dead > 0 else gray))], gap = 2) end),
-    web.Row([web.Button(Say("Jobs"), () -> web.Go("/jobs", p), icon = "tools")]),
+    web.Row([web.Button(Say("Jobs"), () -> web.Go("/jobs", p), icon = "wrench")]),
   ], gap = 6)
 end
 
