@@ -302,7 +302,8 @@ the scheme, the host) and not more (Go and Java add the client's address and por
 peer's details). Where Go wins: its request without OpenTelemetry is cheaper (41 against 72 µs: Cesia's interpreted
 code against Go's compiled one), its memory is a fourth of Cesia's (15.7 MiB against 65.5 for two processes), and its
 SDK writes protobuf in compiled code, where Cesia writes it in Cesia. Java's agent instruments everything it finds,
-with nothing to write, at the price of 90 MiB more memory and a start of seconds.
+with nothing to write, at the price of 90 MiB more memory under load. To the first answer, 21 starts each: Cesia 12.7 ms
+off, 11.9 on (27.8 and 28.9 MiB), Go 4.2 and 5.5 ms (7.9 and 16.2 MiB), Java 3.5 s and 10.8 s (158 and 308 MiB).
 
 ## 8. The tests
 

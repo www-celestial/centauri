@@ -330,7 +330,8 @@ requête de Cesia ce qu'il coûte à une de Go, et un cinquième de ce que coût
 sa requête sans OpenTelemetry coûte moins (41 contre 72 µs : le code interprété de Cesia contre le code compilé de
 Go), sa mémoire est le quart de celle de Cesia (15,7 Mio contre 65,5 pour deux processus), et son SDK écrit le
 protobuf en code compilé, là où Cesia l'écrit en Cesia. L'agent de Java instrumente tout ce qu'il trouve, sans rien à
-écrire, au prix de 90 Mio de mémoire de plus et d'un démarrage de plusieurs secondes.
+écrire, au prix de 90 Mio de mémoire de plus sous charge. Jusqu'à la première réponse, 21 démarrages chacun : Cesia
+12,7 ms sans, 11,9 avec (27,8 et 28,9 Mio), Go 4,2 et 5,5 ms (7,9 et 16,2 Mio), Java 3,5 s et 10,8 s (158 et 308 Mio).
 
 ## 8. Les tests
 
