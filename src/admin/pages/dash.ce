@@ -146,7 +146,7 @@ defn board(cols, cross)
   per = () -> (if c().Step == 1 "/s" else if c().Step == 60 "/min" else if c().Step == 600 Say("/10 min") else "/$(Span(c().Step))" end)
   at = i -> clock(c().At[i], c().Step)
   pick = (f, i) -> (if c().N == 0 0 else if value.IsMissing(i) c()[f][c().N] else c()[f][i] end)
-  m = (title, figure, series, unit, note, style) -> web.Grow(web.Metric(title, figure, series, unit = unit, note = note, at = at, cross = cross, style = style))
+  m = (title, figure, series, unit, note, style) -> web.Grow(web.Metric(title, figure, series, unit = unit, note = note, at = at, cross = cross, style = style, say = t -> Say(t)))
   web.Stack([
     web.Row([m(Say("Requests"), i -> Num(pick("Requests", i)), () -> [{Values: c().Requests, Tone: "S1"}], per, () -> Say("peak {N}", {N: Num(list.Max(list.Append(0, c().Requests)))}), "area"),
       m(Say("Response time"), i -> "$(Num(pick("P50", i))) / $(Num(pick("P99", i)))", () -> [{Values: c().P50, Tone: "S1"}, {Values: c().P99, Tone: "S4"}], "ms", "p50 / p99", "line"),
