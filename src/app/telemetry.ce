@@ -1,0 +1,289 @@
+(* What the app learns of each visit of its pages (APP_TELEMETRY_CLIENT, on by default): a page of Ceres sends its
+   batches to POST /telemetry, its own app, never another site; each is read through its shape, its texts masked again,
+   its route, action names and kinds of error checked against what the app knows, then kept as things of
+   centauri_client_view, one a load of a page, centauri_client_action and centauri_client_error, which the admin's data
+   pages list; with APP_OTEL on, its actions are spans
+   and its errors lines of log, under the resource of the app's browsers. The defaults keep what the CNIL lets a site
+   measure without asking (first party, for the site alone, no address, no account, a session of a tab, kept 30 days);
+   the address and the account only as APP_TELEMETRY_IP and APP_TELEMETRY_USER say, and with APP_TELEMETRY_CONSENT=ask
+   only from a page whose visitor said yes. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use std/check
+use std/dict
+use std/json
+use std/list
+use std/math
+use std/metrics
+use std/otel
+use std/result
+use std/sys
+use std/text
+use std/value
+
+(* The kinds of error a page tells. *)
+errorTypes = {error: true, rejection: true, csp: true, resource: true, cesia: true, trap: true, fetch: true}
+
+word(c) = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 95 or c == 45   (* [A-Za-z0-9_-] *)
+
+defn Masked(s, most = 500)
+  (** A text of a page as the app keeps it: its addresses of mail, its runs of 6 digits or more, its runs of 24 letters,
+      digits, - or _ (a token, a key) masked, the query and the fragment of its addresses cut, most bytes at most: what
+      the page did already, done again, the page being anybody's.
+
+        Masked("ana@example.com paid 4111111111111111 at https://x.example/pay?token=abc#top") --> "<email> paid <number> at https://x.example/pay"
+        Masked("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9") --> "Bearer <token>" *)
+  if not value.IsText(s)
+    return ""
+  end
+  out = []
+  for part in text.Split(" ", s)
+    p = part
+    if text.Contains("://", p)
+      cut = text.ByteFindAny("?#", 1, p)
+      p = if value.IsSome(cut) text.ByteSlice(1, cut - 1, p) else p end
+    end
+    if text.Contains("@", p) and text.Contains(".", text.Split("@", p)[value.Len(text.Split("@", p))])
+      p = "<email>"
+    end
+    out = list.Append(runs(p), out)
+  end
+  t = text.Join(" ", out)
+  if text.ByteLength(t) > most text.ByteSlice(1, most, t) else t end
+end
+
+defn runs(p)
+  (** A word with its long runs of digits and its tokens masked. *)
+  bytes = text.Bytes(p)
+  out = []
+  k = 1
+  n = value.Len(bytes)
+  while k <= n
+    if word(bytes[k])
+      j = k
+      digits = true
+      while j <= n and word(bytes[j])
+        digits = digits and bytes[j] >= 48 and bytes[j] <= 57
+        j += 1
+      end
+      length = j - k
+      out = list.Append(if digits and length >= 6 "<number>" else if length >= 24 "<token>" else text.ByteSlice(k, j - 1, p) end, out)
+      k = j
+    else
+      out = list.Append(text.ByteSlice(k, k, p), out)
+      k += 1
+    end
+  end
+  text.Join("", out)
+end
+
+defn RouteOk(route)
+  (** A route as a page names its view: a pattern of the app's pages, "/invoices/:id", its parts that hold data (all
+      digits, or long) replaced by :id, 200 bytes at most; "" for anything else.
+
+        RouteOk("/invoices/42") --> "/invoices/:id"
+        RouteOk("/a/<script>") --> "" *)
+  if not value.IsText(route) or not text.StartsWith("/", route) or text.ByteLength(route) > 200
+    return ""
+  end
+  if not value.IsMissing(text.ByteFindAny("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/:_-.*", 1, route, not = true))
+    return ""
+  end
+  text.Join("/", [if text.ByteLength(p) >= 24 or (p != "" and value.IsMissing(text.ByteFindAny("0123456789", 1, p, not = true))) ":id" else p end for p in text.Split("/", route)])
+end
+
+defn originOk(ref)
+  (** The page a visit came from: "same", "" for none, or the origin of another site, scheme and host alone. *)
+  if not value.IsText(ref) or ref == "" or ref == "same"
+    return if ref == "same" "same" else "" end
+  end
+  parts = text.Split("/", ref)
+  if value.Len(parts) < 3 or not (parts[1] in ["http:", "https:"]) "" else Masked("$(parts[1])//$(parts[3])", most = 200) end
+end
+
+traceOk(t) = if value.IsSome(otel.Parse(t)) t else missing end   (* A traceparent, when it is one. *)
+
+defn telemetryOf()
+  (** The route of the pages' batches, beside the administration's. *)
+  [{Endpoint: api.Telemetry, Handler: took, Module: "centauri"}]
+end
+
+defn took(r, x)
+  (** POST /telemetry: a batch kept, or dropped when the app keeps none (APP_TELEMETRY_CLIENT off), when the process took
+      APP_TELEMETRY_MOST batches this minute already, or when its view is another session's: 204 all the same, so that
+      a page learns nothing from it. *)
+  s = r.Settings
+  if s.TelemetryClient != "on"
+    return missing
+  end
+  if text.ByteLength(r.Body) > 65536
+    return Fail(413, "A batch of telemetry holds 64 KiB at most.")
+  end
+  if not Allow([Limit("telemetry", s.TelemetryMost, 60, s.TelemetryMost)], r.Env.State).Ok
+    metrics.Add("centauri_telemetry_dropped_total", labels = {reason: "most"})
+    return missing
+  end
+  extras = s.TelemetryConsent == "none" or x.Consent
+  known = dict.Dict([{Key: b.Endpoint.Name, Value: true} for b in r.Env.Served])
+  found = cepheus.Find(2, (v, w) -> {Where: [[v, ClientView.View, x.View], [v, ClientView.Session, w]], Give: {Id: v, Session: w}}, r.Db)?
+  before = list.First(found)
+  if value.IsSome(before) and before.Session != x.Session
+    metrics.Add("centauri_telemetry_dropped_total", labels = {reason: "session"})
+    return missing
+  end
+  now = r.Now
+  old = if value.IsSome(before) cepheus.Get(ClientView, before.Id, r.Db)? else missing end
+  f = if value.IsMissing(before) {View: x.View, Session: x.Session, At: now, Untrusted: true, Errors: 0, ActionCount: 0} else {} end
+  if value.IsSome(old)
+    f.Reconnects = dict.Get("Reconnects", old)
+    f.Offline = dict.Get("Offline", old)
+  end
+  if value.IsMissing(before)
+    geo = Located(r.Ip, r.Env)
+    f.Country = geo.Country
+    f.City = geo.City
+    if extras
+      f.Ip = Truncated(r.Ip, s.TelemetryIp)
+      if s.TelemetryUser == "on" and value.IsDict(r.User)
+        f.User = r.User.Id
+        f.UserTenant = dict.Get("Tenant", r.User)
+      end
+    end
+  end
+  actions = []
+  errors = {}
+  journey = []
+  for i in x.Items
+    k = i.K
+    if k == "view"
+      route = RouteOk(i.Route)
+      if value.IsMissing(before) and value.IsMissing(dict.Get("Route", f))
+        f.Route = route
+        f.Ref = originOk(i.Ref)
+        f.Utm = if value.IsDict(i.Utm) json.Text(dict.Dict([{Key: p.Key, Value: Masked(p.Value, most = 100)} for p in dict.Pairs(i.Utm) if value.IsText(p.Value)])) else missing end
+      end
+      if route != ""
+        journey = list.Append(route, journey)
+      end
+    else if k == "device"
+      for name in ["Browser", "Version", "Os", "Lang", "Zone", "Net"]
+        f[name] = if value.IsText(i[name]) Masked(i[name], most = 64) else missing end
+      end
+      for name in ["Mobile", "Dark", "Motion", "Save", "Cores", "Memory", "Rtt", "Down", "Dpr"]
+        f[name] = i[name]
+      end
+      f.Screen = if value.IsArray(i.Screen) "$(i.Screen[1])x$(i.Screen[2])" else missing end
+      f.Viewport = if value.IsArray(i.Viewport) "$(i.Viewport[1])x$(i.Viewport[2])" else missing end
+    else if k == "nav"
+      f.Proto = if value.IsText(i.Proto) Masked(i.Proto, most = 20) else missing end
+      f.NavType = if value.IsText(i.Type) Masked(i.Type, most = 20) else missing end
+      f.DocBytes = i.Bytes
+      f.Trace = traceOk(i.Trace)
+    else if k == "wasm"
+      f.WasmFetch = i.Fetch
+      f.WasmBytes = i.Bytes
+      f.WasmStart = i.Start
+    else if k == "live"
+      if value.IsSome(i.Connect)
+        f.LiveConnect = i.Connect
+      end
+      if value.IsSome(i.Reconnect)
+        f.Reconnects = dict.GetOr("Reconnects", 0, f) + 1
+      end
+    else if k == "net" and i.Online == false
+      f.Offline = dict.GetOr("Offline", 0, f) + 1
+    else if k == "vitals"
+      for name in ["Lcp", "Inp", "Cls", "Fcp", "Ttfb"]
+        f[name] = i[name]
+      end
+    else if k == "long"
+      f.LongTasks = i.N
+      f.LongMs = i.Ms
+    else if k == "res"
+      f.Requests = i.N
+      f.Bytes = i.Bytes
+      f.Failed = i.Failed
+      f.Slowest = if value.IsDict(i.Slowest) and value.IsText(i.Slowest.Path) "$(Masked(i.Slowest.Path, most = 200)) $(i.Slowest.Ms) ms" else missing end
+    else if k == "frames"
+      f.Frames = i.N
+      f.FrameP50 = i.P50
+      f.FrameP95 = i.P95
+      f.FrameMax = i.Max
+      f.FirstPaint = i.First
+    else if k == "action" and value.Len(actions) < 50
+      actions = list.Append({Name: if value.IsText(i.Name) and dict.Has(i.Name, known) i.Name else "(other)" end, Ms: i.Ms, Ok: i.Ok == true,
+        Trace: traceOk(i.Trace), Server: traceOk(i.Server), Waited: i.Waited == true}, actions)
+    else if k == "error" and value.Len(errors) < 20
+      type = if value.IsText(i.Type) and dict.Has(i.Type, errorTypes) i.Type else "error" end
+      message = Masked(i.Message)
+      key = "$type $message"
+      errors[key] = if dict.Has(key, errors) dict.Put("Count", errors[key].Count + 1, errors[key]) else {Type: type, Message: message, Stack: Masked(i.Stack), Source: Masked(i.Source, most = 300), Count: 1} end
+    end
+  end
+  was = if value.IsSome(old) old else {} end
+  if value.Len(journey) > 0
+    f.Journey = text.Join(" ", list.Take(50, list.Concat([j for j in text.Split(" ", dict.GetOr("Journey", "", was)) if j != ""], journey)))
+  end
+  if x.End
+    f.Seconds = now - dict.GetOr("At", now, was)
+  end
+  if value.Len(actions) > 0
+    f.ActionCount = dict.GetOr("ActionCount", 0, was) + value.Len(actions)
+  end
+  if value.Len(errors) > 0
+    f.Errors = dict.GetOr("Errors", 0, was) + value.Len(errors)
+  end
+  kept = dict.Dict([p for p in dict.Pairs(f) if value.IsSome(p.Value)])
+  id = if value.IsMissing(before) cepheus.Insert(ClientView, kept, r.Db, why = "telemetry")? else before.Id end
+  if value.IsSome(before) and value.Len(kept) > 0
+    cepheus.Update(ClientView, id, kept, r.Db, why = "telemetry")?
+  end
+  route = dict.GetOr("Route", dict.GetOr("Route", "", was), f)
+  for a in actions
+    _ = cepheus.Insert(ClientAction, dict.Dict([p for p in dict.Pairs({View: x.View, Session: x.Session, Route: route, At: now, Name: a.Name, Ms: a.Ms, Ok: a.Ok,
+      Waited: a.Waited, Trace: a.Trace, Server: a.Server, Untrusted: true}) if value.IsSome(p.Value)]), r.Db, why = "telemetry")?
+  end
+  for e in dict.Values(errors)
+    _ = cepheus.Insert(ClientError, dict.Dict([p for p in dict.Pairs({View: x.View, Session: x.Session, Route: route, At: now, Type: e.Type, Message: e.Message, Stack: e.Stack,
+      Source: e.Source, Count: e.Count, Browser: dict.Get("Browser", f), Version: dict.Get("Version", f), Os: dict.Get("Os", f), Untrusted: true}) if value.IsSome(p.Value)]), r.Db, why = "telemetry")?
+  end
+  forwarded(r.Env.Browser, x, route, actions, dict.Values(errors), now)
+  missing
+end
+
+defn forwarded(t, x, route, actions, errors, now)
+  (** A batch sent on as OpenTelemetry's, when APP_OTEL is on: each action a span of the browser's (from the click to
+      its answer, its link to the server's trace), each error a line of log. *)
+  if value.IsMissing(t)
+    return missing
+  end
+  for a in actions
+    p = otel.Parse(a.Trace)
+    _ = otel.Span(t, a.Name, now - dict.GetOr("Ms", 0, a) / 1000, now, traceId = if value.IsSome(p) p.TraceId else missing end,
+      spanId = if value.IsSome(p) p.SpanId else missing end, kind = "client", failed = not a.Ok, links = if value.IsSome(a.Server) [a.Server] else [] end,
+      attributes = {"session.id": x.Session, "centauri.view": x.View, "url.template": route, "centauri.untrusted": true})
+  end
+  for e in errors
+    otel.Log(t, "error", e.Message, fields = {"exception.type": e.Type, "exception.stacktrace": e.Stack, "code.filepath": e.Source, "session.id": x.Session,
+      "url.template": route, "centauri.untrusted": true})
+  end
+end
+
+defn PruneTelemetry(env)
+  (** The things of client_view and client_error older than APP_TELEMETRY_KEEP days forgotten: what the keeper of the
+      app does every hour. An Ok of how many. *)
+  before = env.Now() - env.Settings.TelemetryKeep * 86400
+  gone = 0
+  for kind in [ClientView, ClientAction, ClientError]
+    old = cepheus.Find(2, (v, at) -> {Where: [[v, kind.At, at], cepheus.Below(at, before)], Give: {Id: v}, Limit: 1000}, env.Db)?
+    ops = []
+    for o in old
+      ops = list.Concat(ops, Gone(kind, o.Id, env.Db)?)
+      gone += 1
+    end
+    if value.Len(ops) > 0
+      cepheus.Write(ops, env.Db, why = "telemetry kept $(env.Settings.TelemetryKeep) days")?
+    end
+  end
+  result.Ok(gone)
+end

@@ -254,7 +254,8 @@ defn mounted(routes, env, handle)
   lives = dict.Dict([{Key: b.Endpoint.Name, Value: b} for b in env.App.Lives])
   st = env.Settings
   client = {Outbox: st.Outbox, OutboxCount: st.OutboxCount, OutboxBytes: st.OutboxBytes, OutboxWait: st.OutboxWait,
-    ReconnectFirst: st.ReconnectFirst, ReconnectMax: st.ReconnectMax, PingEvery: st.PingEvery, DeadAfter: st.DeadAfter}
+    ReconnectFirst: st.ReconnectFirst, ReconnectMax: st.ReconnectMax, PingEvery: st.PingEvery, DeadAfter: st.DeadAfter,
+    Telemetry: {On: st.TelemetryClient == "on", Sample: st.TelemetrySample, Every: st.TelemetryEvery, Path: "/telemetry"}}
   live.Route("/live", s -> screen(s, env, lives), routes, actions = actions(env, handle), resume = st.ResumeTime, buffer = st.ResumeBytes,
     same = (old, new) -> sameScreen(old, new, env), who = s -> whoOf(s.Request, env), client = client)
 end

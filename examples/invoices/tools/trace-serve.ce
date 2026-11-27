@@ -1,0 +1,29 @@
+(** The invoices and their admin pages, as tools/admin-serve.ce serves them, with OpenTelemetry on: the traces of the
+    server, its metrics and its logs, and what the pages tell of their visits, sent to a collector of OTLP at
+    APP_OTEL_ENDPOINT (http://127.0.0.1:4318 by default, as Jaeger's), every second; ROWS more clients make a slow list.
+    The tutorial of the chapter Telemetry. Build the pages first: cesia build --target wasm admin/page.ce. *)
+use deps/www-celestial/centauri/src/app
+use src/filled
+use std/http
+use std/io
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+
+defn main()
+  port = text.Number(if value.IsText(sys.Env("PORT")) sys.Env("PORT") else "8090" end)
+  rows = if value.IsText(sys.Env("ROWS")) text.Number(sys.Env("ROWS")) else 0 end
+  endpoint = if value.IsText(sys.Env("APP_OTEL_ENDPOINT")) sys.Env("APP_OTEL_ENDPOINT") else "http://127.0.0.1:4318" end
+  t = filled.App(port, rows = rows, more = {Otel: "on", OtelEndpoint: endpoint, OtelEvery: 1, TelemetryEvery: 5})?
+  l = net.Listen(port, host = "127.0.0.1")?
+  io.Print("http://127.0.0.1:$port/admin")
+  http.Serve(app.App(t.Env), listener = l)
+end
+
+got = main()
+if result.IsErr(got)
+  io.PrintError("trace-serve: $(got.Error)")
+  sys.Exit(1)
+end

@@ -1,0 +1,257 @@
+(** The telemetry of the pages, POST /telemetry: a batch kept as a view and its errors, which the admin's data pages
+    list; and what an attacker or a mistake tries: a flood of batches, a body too large, a view of another session,
+    secrets and addresses of mail in what a page says, markup in its texts, routes and names made up, the address and
+    the account of a visitor kept without his yes, data past their days, a database of countries. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/api
+use src/app
+use src/apptest
+use src/auth
+use std/bug
+use std/check
+use std/dict
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/math
+use std/net
+use std/otel
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Note = app.Kind("note", {Text: cepheus.Text()})
+AddNote = api.Post("/notes", body = check.Record({Text: check.Text(1, 100)}), out = check.Record({Id: check.Id()}), role = api.Public)
+Notes = app.Module("notes", kinds = [Note], serve = [app.Serve(AddNote, (r, x) -> {Id: cepheus.Insert(Note, {Text: x.Text}, r.Db)?})])
+App = app.Of([auth.Module(), Notes], name = "notes")
+
+defn batch(view = "a1b2c3d4e5f60718", session = "0011223344556677", items = missing, consent = false, last = false)
+  (** A batch as a page sends it. *)
+  {V: 1, Session: session, View: view, Consent: consent, End: last, Items: if value.IsSome(items) items else [
+    {K: "view", Route: "/notes/:id", Ref: "https://search.example/q?term=private", Utm: {source: "news", campaign: "ana@example.com"}},
+    {K: "device", Browser: "Chrome", Version: "158", Os: "Linux", Mobile: false, Screen: [1920, 1080], Viewport: [1280, 720], Dpr: 2, Dark: true, Lang: "fr-FR",
+      Zone: "Europe/Paris", Cores: 8, Memory: 8, Net: "4g", Rtt: 50, Down: 10},
+    {K: "nav", Type: "navigate", Proto: "h2", Ttfb: 42.5, Bytes: 2048, Trace: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+    {K: "vitals", Lcp: 812.3, Inp: 64, Cls: 0.02, Fcp: 401.1, Ttfb: 42.5},
+    {K: "frames", N: 30, P50: 2.1, P95: 6.4, Max: 12, First: 180},
+    {K: "action", Name: "POST /notes", Ms: 38, Ok: true, Trace: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
+    {K: "action", Name: "DELETE /everything", Ms: 1, Ok: true},
+    {K: "error", Type: "cesia", Message: "notes.ce:12:5: key token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 for ana@example.com", Stack: "in save\ncalled from main"},
+    {K: "error", Type: "made-up", Message: "<img src=x onerror=alert(1)> at https://app.test/notes?secret=42#frag"}] end}
+end
+
+defn post(t, b, ip = "198.51.100.7", raw = missing)
+  (** A batch sent from an address, as a page's beacon. *)
+  t.Handle({Method: "POST", Path: "/telemetry", Query: "", Headers: [{Name: "host", Value: "app.test"}, {Name: "content-type", Value: "application/json"},
+    {Name: "sec-fetch-site", Value: "same-origin"}], Body: if value.IsSome(raw) raw else json.Text(b) end, Peer: ip})
+end
+
+defn views(t)
+  (** The things of client_view, with their fields. *)
+  [cepheus.Get(app.ClientView, i.Id, t.Db)! for i in cepheus.Find(2, (v, w) -> {Where: [[v, app.ClientView.View, w]], Give: {Id: v}}, t.Db)!]
+end
+
+actionsOf(t) = [cepheus.Get(app.ClientAction, i.Id, t.Db)! for i in cepheus.Find(2, (e, w) -> {Where: [[e, app.ClientAction.View, w]], Give: {Id: e}}, t.Db)!]
+errorsOf(t) = [cepheus.Get(app.ClientError, i.Id, t.Db)! for i in cepheus.Find(2, (e, w) -> {Where: [[e, app.ClientError.View, w]], Give: {Id: e}}, t.Db)!]
+
+defn isBatchKeptAsAView()
+  (** A batch is a view: its route, its speed, its device, its actions by their names, its errors apart; all of it the
+      page's word, marked Untrusted. *)
+  t = apptest.Start(App)!
+  got = post(t, batch())
+  v = views(t)[1]
+  bug.Assert(got.Status == 204 and v.Route == "/notes/:id" and v.Lcp == 812.3 and v.Inp == 64 and v.Cls == 0.02 and v.Browser == "Chrome" and v.Screen == "1920x1080", "view: $v")
+  bug.Assert(v.Untrusted == true and v.FrameP95 == 6.4 and v.Trace == "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" and v.Errors == 2, "view: $v")
+  names = [a.Name for a in actionsOf(t)]
+  bug.Assert(value.Len(names) == 2 and "POST /notes" in names and "(other)" in names and v.ActionCount == 2, "actions: $names")
+  value.Len(errorsOf(t)) == 2
+end
+
+defn isWhatAPageSaysMasked()
+  (** A token, an address of mail, the query and the fragment of an address, the path of a page a visit came from:
+      masked or cut by the app, whatever the page did; a kind of error made up becomes "error"; a made-up route
+      nothing. *)
+  t = apptest.Start(App)!
+  _ = post(t, batch())
+  v = views(t)[1]
+  es = errorsOf(t)
+  all = json.Text([v, es])
+  bug.Assert(not text.Contains("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", all) and not text.Contains("ana@example.com", all) and not text.Contains("secret=42", all)
+    and not text.Contains("term=private", all), "masked: $all")
+  bug.Assert(v.Ref == "https://search.example" and text.Contains("<email>", v.Utm), "ref $(v.Ref), utm $(v.Utm)")
+  bug.Assert("error" in [e.Type for e in es] and not ("made-up" in [e.Type for e in es]), "types: $([e.Type for e in es])")
+  _ = post(t, batch(view = "ffffffffffff0001", items = [{K: "view", Route: "/users/<b>ana</b>"}, {K: "view", Route: "/notes/12345"}]))
+  w = list.First([x for x in views(t) if x.View == "ffffffffffff0001"])
+  w.Route == "" and w.Journey == "/notes/:id"
+end
+
+defn isMarkupKeptAsText()
+  (** Markup in what a page says is kept as text: the admin's data pages get it inside JSON (application/json, nosniff)
+      and draw it as text in their canvas, never as HTML. *)
+  t = apptest.Start(App)!
+  _ = post(t, batch())
+  e = list.First([x for x in errorsOf(t) if x.Type == "error"])
+  boss = t.Super()!
+  page = boss.Call(api.AdminData, {kind: "centauri_client_error"})!
+  bug.Assert(text.Contains("<img src=x onerror=alert(1)>", e.Message), "kept as text: $(e.Message)")
+  value.Len(page.Rows) == 2
+end
+
+defn isFloodBounded()
+  (** A flood of batches: 60 a minute from an address, then 429; APP_TELEMETRY_MOST a minute for the whole process,
+      past which a batch is dropped (204, nothing written, counted); a body past 64 KiB is refused unread past it. *)
+  t = apptest.Start(App, settings = {TelemetryMost: 5})!
+  outs = [post(t, batch(view = "f0f0f0f0f0f0f0$(text.PadLeft(2, "0", "$k"))"), ip = "198.51.100.$k").Status for k in 1..10]
+  bug.Assert(value.Equal(list.Unique(outs), [204]) and value.Len(views(t)) == 5, "outs $outs, views $(value.Len(views(t)))")
+  u = apptest.Start(App, settings = {LimitIp: 1000000})!
+  statuses = [post(u, batch(view = "e0e0e0e0e0e0e0$(text.PadLeft(2, "0", "$k"))"), ip = "203.0.113.9").Status for k in 1..62]
+  big = post(u, missing, raw = json.Text(batch(items = [{K: "error", Message: text.Repeat(590, "x")} for k in 1..120])))
+  bug.Assert(statuses[60] == 204 and statuses[61] == 429, "limited: $(list.Unique(statuses))")
+  big.Status == 413
+end
+
+defn isViewOfAnotherSessionUntouched()
+  (** A batch that names the view of another session, its id guessed or seen, changes nothing of it. *)
+  t = apptest.Start(App)!
+  _ = post(t, batch())
+  _ = post(t, batch(session = "9999999999999999", items = [{K: "vitals", Lcp: 99999}]))
+  views(t)[1].Lcp == 812.3
+end
+
+defn isVisitorNamedOnlyAsSaidAndAsked()
+  (** No address and no account by default; with APP_TELEMETRY_IP and APP_TELEMETRY_USER, only once the visitor said
+      yes to the app's banner (APP_TELEMETRY_CONSENT=ask, the default), or always with none. *)
+  plain = apptest.Start(App)!
+  _ = post(plain, batch())
+  asked = apptest.Start(App, settings = {TelemetryIp: "truncated", TelemetryUser: "on"})!
+  _ = post(asked, batch())
+  _ = post(asked, batch(view = "c0c0c0c0c0c0c0c0", consent = true))
+  none = apptest.Start(App, settings = {TelemetryIp: "full", TelemetryConsent: "none"})!
+  _ = post(none, batch())
+  a = views(plain)[1]
+  b = list.First([v for v in views(asked) if v.View == "a1b2c3d4e5f60718"])
+  c = list.First([v for v in views(asked) if v.View == "c0c0c0c0c0c0c0c0"])
+  bug.Assert(value.IsMissing(dict.Get("Ip", a)) and value.IsMissing(dict.Get("Ip", b)) and c.Ip == "198.51.100.0", "a $(dict.Get("Ip", a)) b $(dict.Get("Ip", b)) c $(dict.Get("Ip", c))")
+  views(none)[1].Ip == "198.51.100.7"
+end
+
+defn isOffKeepingNothing()
+  (** APP_TELEMETRY_CLIENT=off: a batch is taken and dropped, the pages are told it is off. *)
+  t = apptest.Start(App, settings = {TelemetryClient: "off"})!
+  got = post(t, batch())
+  got.Status == 204 and value.Len(views(t)) == 0
+end
+
+defn isKeptItsDaysOnly()
+  (** A view and its errors older than APP_TELEMETRY_KEEP days are forgotten by the keeper; the newer stay. *)
+  t = apptest.Start(App, settings = {TelemetryKeep: 2})!
+  _ = post(t, batch())
+  t.Advance(3 * 86400)
+  _ = post(t, batch(view = "b0b0b0b0b0b0b0b0"))
+  gone = app.PruneTelemetry(t.Env)!
+  gone == 5 and value.Equal([v.View for v in views(t)], ["b0b0b0b0b0b0b0b0"]) and value.Len(errorsOf(t)) == 2
+end
+
+defn isLastBatchEndingTheView()
+  (** The batches of a view add to it: its actions and errors added up, its duration once the last one comes. *)
+  t = apptest.Start(App)!
+  _ = post(t, batch())
+  t.Advance(42)
+  _ = post(t, batch(items = [{K: "action", Name: "POST /notes", Ms: 12, Ok: false}, {K: "vitals", Lcp: 812.3, Inp: 180}], last = true))
+  v = views(t)[1]
+  v.Seconds == 42 and v.ActionCount == 3 and v.Inp == 180
+end
+
+defn isForwardedToOpenTelemetry()
+  (** With APP_OTEL on, a page's action is a span of the browsers' service, its trace the page's, linked to the
+      server's; its error a line of log; nothing of the page in the server's own service. *)
+  l = net.Listen(0)!
+  box = fiber.Channel()
+  fiber.Spawn(() -> http.Serve(http.App() then http.Post("/v1/traces", r -> kept(r, box)) then http.Post("/v1/logs", r -> kept(r, box)) then http.Post("/v1/metrics", r -> kept(r, box)), listener = l, timeout = 5))
+  t = apptest.Start(App, settings = {Otel: "on", OtelEndpoint: "http://127.0.0.1:$(net.Port(l))", OtelProtocol: "json"})!
+  _ = post(t, batch(items = [{K: "action", Name: "POST /notes", Ms: 38, Ok: true, Trace: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+    Server: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}, {K: "error", Type: "trap", Message: "unreachable"}]))
+  otel.Flush(t.Env.Browser)
+  bodies = []
+  while true
+    got = fiber.Receive(box, timeout = 0.3)
+    if result.IsErr(got)
+      break
+    end
+    bodies = list.Append(got.Value, bodies)
+  end
+  spans = list.Flatten([list.Flatten([sc.spans for sc in rs.scopeSpans]) for rs in list.Flatten([dict.GetOr("resourceSpans", [], b) for b in bodies])])
+  click = list.First([s for s in spans if s.name == "POST /notes" and s.kind == 3])
+  services = list.Unique([list.First([a.value.stringValue for a in rs.resource.attributes if a.key == "service.name"]) for rs in list.Flatten([dict.GetOr("resourceSpans", [], b) for b in bodies])])
+  bug.Assert(click.traceId == "0af7651916cd43dd8448eb211c80319c" and click.links[1].traceId == "4bf92f3577b34da6a3ce929d0e0e4736", "click: $click")
+  logs = list.Flatten([list.Flatten([sc.logRecords for sc in rl.scopeLogs]) for rl in list.Flatten([dict.GetOr("resourceLogs", [], b) for b in bodies])])
+  "notes-browser" in services and "unreachable" in [r.body.stringValue for r in logs]
+end
+
+defn kept(r, box)
+  fiber.Send(json.Parse(r.Body)!, box)
+  http.Json({})
+end
+
+(* A database of MMDB of two networks, written as DB-IP's: 203.0.113.0/24 in Paris, 198.51.100.0/24 in Berlin. *)
+str(s) = list.Concat([64 + text.ByteLength(s)], text.Bytes(s))
+defn place(country, city)
+  list.Concat(list.Concat([226], str("city")), list.Concat(list.Concat([225], list.Concat(str("names"), list.Concat([225], list.Concat(str("en"), str(city))))),
+    list.Concat(str("country"), list.Concat([225], list.Concat(str("iso_code"), str(country))))))
+end
+
+defn mmdb(path)
+  data = [place("FR", "Paris"), place("DE", "Berlin")]
+  offsets = [0, value.Len(data[1])]
+  nets = [{Bits: [203, 0, 113], Data: 1}, {Bits: [198, 51, 100], Data: 2}]
+  left = [-1]
+  right = [-1]
+  for nw in nets
+    bits = list.Flatten([[math.Mod(math.Div(x, math.BitShift(1, 7 - i)), 2) for i in 0..7] for x in nw.Bits])
+    n = 1
+    for k in 1..24
+      leaf = k == 24
+      child = if bits[k] == 0 left[n] else right[n] end
+      v = if leaf {D: nw.Data} else child end
+      if not leaf and not value.IsDict(child) and child == -1
+        left = list.Append(-1, left)
+        right = list.Append(-1, right)
+        v = value.Len(left)
+      end
+      if bits[k] == 0
+        left[n] = v
+      else
+        right[n] = v
+      end
+      n = if leaf n else v end
+    end
+  end
+  count = value.Len(left)
+  rec = r -> if value.IsDict(r) count + 16 + offsets[r.D] else if r == -1 count else r - 1 end
+  three = x -> [math.Div(x, 65536), math.Mod(math.Div(x, 256), 256), math.Mod(x, 256)]
+  tree = list.Flatten([list.Concat(three(rec(left[k])), three(rec(right[k]))) for k in 1..count])
+  meta = list.Concat([227], list.Concat(list.Concat(str("node_count"), [196, 0, 0, math.Div(count, 256), math.Mod(count, 256)]),
+    list.Concat(list.Concat(str("record_size"), [162, 0, 24]), list.Concat(str("ip_version"), [162, 0, 4]))))
+  bytes = list.Concat(list.Concat(list.Concat(tree, list.Fill(0, 16)), list.Flatten(data)), list.Concat([171, 205, 239], list.Concat(text.Bytes("MaxMind.com"), meta)))
+  sys.Write(path, text.FromBytes(bytes))
+end
+
+defn isPlacedByTheDatabaseOnly()
+  (** The country and the city of a visit come from a database of DB-IP's format, the address itself kept nowhere;
+      APP_TELEMETRY_GEO=country keeps the country alone. *)
+  _ = sys.Mkdir(".cesia")
+  mmdb(".cesia/geo.mmdb")!
+  t = apptest.Start(App, settings = {TelemetryGeoFile: ".cesia/geo.mmdb"})!
+  _ = post(t, batch(), ip = "203.0.113.50")
+  _ = post(t, batch(view = "d0d0d0d0d0d0d0d0"), ip = "198.51.100.9")
+  _ = post(t, batch(view = "e1e1e1e1e1e1e1e1"), ip = "192.0.2.1")
+  c = apptest.Start(App, settings = {TelemetryGeoFile: ".cesia/geo.mmdb", TelemetryGeo: "country"})!
+  _ = post(c, batch(), ip = "203.0.113.50")
+  vs = dict.Dict([{Key: v.View, Value: v} for v in views(t)])
+  bug.Assert(vs["a1b2c3d4e5f60718"].Country == "FR" and vs["a1b2c3d4e5f60718"].City == "Paris" and vs["d0d0d0d0d0d0d0d0"].City == "Berlin", "placed: $vs")
+  bug.Assert(value.IsMissing(dict.Get("Country", vs["e1e1e1e1e1e1e1e1"])) and not text.Contains("203.0.113.50", json.Text(views(t))), "unknown, and no address")
+  v = views(c)[1]
+  v.Country == "FR" and value.IsMissing(dict.Get("City", v))
+end

@@ -1,0 +1,36 @@
+(** The contract of the telemetry of the pages: POST /telemetry, what a page of Ceres learns of its visit and sends to
+    its own app (Ceres's src/browser/telemetry.ce and web/telemetry.js). Every field is optional and bounded, and any
+    other is dropped as it is read: a page is anybody's, so its numbers are the page's word, kept as such
+    (Untrusted), and its texts are masked again by the app. *)
+use std/check
+
+short = check.Text(0, 100, optional = true)              (* A short text of the page. *)
+long = check.Text(0, 600, lines = true, optional = true) (* A message or a stack, masked by the page and again by the app. *)
+ms = check.Float(0, 86400000, optional = true)            (* A time in milliseconds. *)
+n = check.Int(0, 1000000000, optional = true)             (* A count, or bytes. *)
+pair = check.List(check.Int(0, 100000), 2, 2, optional = true)   (* A size, width and height in pixels. *)
+
+(** One record of a batch: its kind K, and the fields of that kind. *)
+Item = check.Record({
+  K: check.OneOf(["view", "device", "nav", "wasm", "live", "vitals", "long", "res", "frames", "action", "error", "net"]),
+  Route: check.Text(0, 200, optional = true), Ref: check.Text(0, 200, optional = true),
+  Utm: check.Record({source: short, medium: short, campaign: short, term: short, content: short}, optional = true),
+  Browser: short, Version: short, Os: short, Mobile: check.Bool(optional = true), Screen: pair, Viewport: pair, Dpr: check.Float(0, 20, optional = true),
+  Dark: check.Bool(optional = true), Motion: check.Bool(optional = true), Lang: check.Text(0, 35, optional = true), Zone: check.Text(0, 64, optional = true),
+  Cores: check.Int(0, 4096, optional = true), Memory: check.Float(0, 4096, optional = true), Net: check.Text(0, 10, optional = true),
+  Rtt: ms, Down: check.Float(0, 100000, optional = true), Save: check.Bool(optional = true), Online: check.Bool(optional = true),
+  Type: check.Text(0, 20, optional = true), Proto: check.Text(0, 20, optional = true), Ttfb: ms, Dns: ms, Tcp: ms, Dom: ms, Bytes: n, Trace: check.Text(0, 64, optional = true),
+  Fetch: ms, Start: ms, Connect: ms, Reconnect: ms,
+  Lcp: ms, Inp: ms, Cls: check.Float(0, 1000, optional = true), Fcp: ms,
+  N: n, Ms: ms, Max: ms, Failed: n, Slowest: check.Record({Path: check.Text(0, 200, optional = true), Ms: ms}, optional = true),
+  P50: ms, P95: ms, First: ms,
+  Name: check.Text(0, 200, optional = true), Ok: check.Bool(optional = true), Server: check.Text(0, 64, optional = true), Waited: check.Bool(optional = true),
+  Message: long, Stack: long, Source: check.Text(0, 300, optional = true), At: ms})
+
+(** A batch of a page: its session (a random id of its tab), its view (a random id of the page's load), whether the
+    visitor said yes to the app's banner (Consent), whether it is the last of the view (End), and its records. *)
+Beacon = check.Record({V: check.Int(1, 1), Session: check.Text(8, 32), View: check.Text(8, 32), Consent: check.Bool(optional = true, default = false),
+  End: check.Bool(optional = true, default = false), Items: check.List(Item, 0, 300)})
+
+(** POST /telemetry: a batch of a page, 204 whether kept or not; 60 a minute for an address, 64 KiB at most. *)
+Telemetry = Post("/telemetry", body = Beacon, role = Public, limit = 60, about = "A page's batch of telemetry: its speed, errors, device and journey.")

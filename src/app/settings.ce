@@ -77,6 +77,14 @@ Core = {
   OtelMetricsEvery: check.Int(1, 86400, optional = true, default = 60),
   TelemetryIp: check.OneOf(["none", "truncated", "full"], optional = true, default = "none"),
   TelemetryUser: check.OneOf(["off", "on"], optional = true, default = "off"),
+  TelemetryClient: check.OneOf(["on", "off"], optional = true, default = "on"),
+  TelemetrySample: check.Float(0, 1, optional = true, default = 1),
+  TelemetryEvery: check.Int(5, 3600, optional = true, default = 30),
+  TelemetryConsent: check.OneOf(["ask", "none"], optional = true, default = "ask"),
+  TelemetryKeep: check.Int(1, 760, optional = true, default = 30),
+  TelemetryGeo: check.OneOf(["off", "country", "city"], optional = true, default = "city"),
+  TelemetryGeoFile: check.Text(1, 1000, optional = true),
+  TelemetryMost: check.Int(1, 10000000, optional = true, default = 6000),
 }
 
 (** What each profile changes, and nothing else does. Mail and the database of a test come with L2 and apptest. *)

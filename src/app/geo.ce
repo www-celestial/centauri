@@ -1,0 +1,190 @@
+(* The country and the city of an address of the internet, from a database of MaxMind's format (MMDB), as DB-IP gives
+   its free one, "IP to City Lite" and "IP to Country Lite" under the licence Creative Commons Attribution 4.0
+   (https://db-ip.com/db/lite.php: its use names DB-IP.com). A search tree of the bits of the address, then a data
+   section of values; read here from its specification (https://maxmind.github.io/MaxMind-DB/), nothing to install.
+   The address itself is read for this and kept nowhere: only the country and the city are, as APP_TELEMETRY_GEO says. *)
+use std/dict
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+marker = "$(text.FromBytes([171, 205, 239]))MaxMind.com"   (* What comes before the metadata, at the end of the file. *)
+
+defn OpenGeo(path)
+  (** A database of MMDB read from a file: an Ok of what Located reads, or an Err that says why. *)
+  data = sys.Read(path)
+  if result.IsErr(data)
+    return result.Err({Kind: "geo", Message: "APP_TELEMETRY_GEO_FILE: $path can't be read."})
+  end
+  b = data.Value
+  n = text.ByteLength(b)
+  at = missing
+  k = list.Max([1, n - 131072])
+  while true
+    found = text.ByteFind(marker, k, b)
+    if value.IsMissing(found)
+      break
+    end
+    at = found
+    k = found + 1
+  end
+  if value.IsMissing(at)
+    return result.Err({Kind: "geo", Message: "APP_TELEMETRY_GEO_FILE: $path is no database of MMDB (MaxMind's format, as DB-IP's lite ones)."})
+  end
+  meta = decoded(b, at + text.ByteLength(marker), 0)
+  if not value.IsDict(meta.Value) or not value.IsInt(dict.Get("node_count", meta.Value)) or not (dict.Get("record_size", meta.Value) in [24, 28, 32])
+    return result.Err({Kind: "geo", Message: "APP_TELEMETRY_GEO_FILE: the metadata of $path can't be read."})
+  end
+  m = meta.Value
+  nodes = dict.Get("node_count", m)
+  size = dict.Get("record_size", m)
+  g = {Bytes: b, Nodes: nodes, Size: size, V6: dict.Get("ip_version", m) == 6, Data: math.Div(nodes * size, 4) + 16 + 1}
+  g.Start4 = if g.V6 walked(g, 0, [0 for i in 1..96]) else 0 end
+  result.Ok(g)
+end
+
+byte(b, k) = text.Byte(k, b)                     (* The byte at k, from 1. *)
+defn big(b, k, count)
+  (** A number of count bytes, the highest first. *)
+  x = 0
+  for i in 0..(count - 1)
+    x = x * 256 + byte(b, k + i)
+  end
+  x
+end
+
+defn record(g, node, right)
+  (** The left or right record of a node of the tree. *)
+  b = g.Bytes
+  if g.Size == 24
+    at = node * 6 + 1 + (if right 3 else 0 end)
+    return big(b, at, 3)
+  end
+  if g.Size == 28
+    at = node * 7 + 1
+    middle = byte(b, at + 3)
+    return if right math.Mod(middle, 16) * 16777216 + big(b, at + 4, 3) else math.Div(middle, 16) * 16777216 + big(b, at, 3) end
+  end
+  big(b, node * 8 + 1 + (if right 4 else 0 end), 4)
+end
+
+defn walked(g, node, bits)
+  (** The node, or the record past the tree, that the bits lead to from a node. *)
+  n = node
+  for bit in bits
+    if n >= g.Nodes
+      return n
+    end
+    n = record(g, n, bit == 1)
+  end
+  n
+end
+
+defn bitsOf(ip)
+  (** The bits of an address of IPv4 (32) or IPv6 (128), the highest first, or missing. *)
+  parts = text.Split(".", ip)
+  groups = if value.Len(parts) == 4 missing else ipv6(ip) end
+  numbers = if value.Len(parts) == 4 [text.Number(p) for p in parts] else groups end
+  if value.IsMissing(numbers) or list.Any([not value.IsInt(x) for x in numbers])
+    return missing
+  end
+  width = if value.Len(parts) == 4 8 else 16 end
+  list.Flatten([[math.Mod(math.Div(x, math.BitShift(1, width - 1 - i)), 2) for i in 0..(width - 1)] for x in numbers])
+end
+
+defn Lookup(g, ip)
+  (** The record of the database for an address, a map as MMDB holds it, or missing. *)
+  bits = bitsOf(ip)
+  if value.IsMissing(bits) or (value.Len(bits) == 128 and not g.V6)
+    return missing
+  end
+  n = if value.Len(bits) == 32 walked(g, g.Start4, bits) else walked(g, 0, bits) end
+  if n <= g.Nodes
+    return missing
+  end
+  decoded(g.Bytes, g.Data + n - g.Nodes - 16, g.Data).Value
+end
+
+defn decoded(b, at, base)
+  (** The value of the data section at the byte at (from 1), and the byte after it: {Value, Next}. base is where the
+      data section starts, which its pointers count from. *)
+  control = byte(b, at)
+  type = math.Div(control, 32)
+  k = at + 1
+  if type == 0
+    type = 7 + byte(b, k)
+    k += 1
+  end
+  if type == 1
+    ss = math.Mod(math.Div(control, 8), 4)
+    v = math.Mod(control, 8)
+    p = if ss == 0 v * 256 + byte(b, k) else if ss == 1 (v * 65536 + big(b, k, 2)) + 2048 else if ss == 2 (v * 16777216 + big(b, k, 3)) + 526336 else big(b, k, 4) end
+    return {Value: decoded(b, base + p, base).Value, Next: k + ss + 1}
+  end
+  size = math.Mod(control, 32)
+  if size == 29
+    size = 29 + byte(b, k)
+    k += 1
+  else if size == 30
+    size = 285 + big(b, k, 2)
+    k += 2
+  else if size == 31
+    size = 65821 + big(b, k, 3)
+    k += 3
+  end
+  if type == 2 or type == 4
+    return {Value: text.ByteSlice(k, k + size - 1, b), Next: k + size}
+  end
+  if type == 3
+    return {Value: text.Numbers("f64", text.FromBytes(list.Reverse(text.Bytes(text.ByteSlice(k, k + 7, b)))))[1], Next: k + 8}
+  end
+  if type == 15
+    return {Value: text.Numbers("f32", text.FromBytes(list.Reverse(text.Bytes(text.ByteSlice(k, k + 3, b)))))[1], Next: k + 4}
+  end
+  if type in [5, 6, 8, 9, 10]
+    return {Value: if size == 0 0 else big(b, k, list.Min([size, 7])) end, Next: k + size}
+  end
+  if type == 14
+    return {Value: size == 1, Next: k}
+  end
+  if type == 7
+    out = {}
+    for i in 1..size
+      key = decoded(b, k, base)
+      v = decoded(b, key.Next, base)
+      out[value.Text(key.Value)] = v.Value
+      k = v.Next
+    end
+    return {Value: out, Next: k}
+  end
+  if type == 11
+    out = []
+    for i in 1..size
+      v = decoded(b, k, base)
+      out = list.Append(v.Value, out)
+      k = v.Next
+    end
+    return {Value: out, Next: k}
+  end
+  {Value: missing, Next: k + size}
+end
+
+defn Located(ip, env)
+  (** The country (its ISO 3166 code) and the city (its English name) of an address, as APP_TELEMETRY_GEO says: none
+      ("off", or no database), the country, or both ("city", what the CNIL lets a measure of audience keep, no finer). *)
+  mode = env.Settings.TelemetryGeo
+  if mode == "off" or value.IsMissing(dict.Get("Geo", env)) or not value.IsText(ip)
+    return {Country: missing, City: missing}
+  end
+  r = Lookup(env.Geo, ip)
+  if not value.IsDict(r)
+    return {Country: missing, City: missing}
+  end
+  country = dict.Get("country", r)
+  city = dict.Get("city", r)
+  {Country: if value.IsDict(country) dict.Get("iso_code", country) else missing end,
+    City: if mode == "city" and value.IsDict(city) and value.IsDict(dict.Get("names", city)) dict.Get("en", city.names) else missing end}
+end

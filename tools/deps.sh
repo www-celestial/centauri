@@ -27,7 +27,7 @@ mkdir -p "$web/src" "$web/web"
 cp "$ceres/cesia.toml" "$web/"
 for p in web browser form; do cp -R "$ceres/src/$p" "$web/src/"; done
 rm -f "$web"/src/*/*.test.ce "$web"/src/*/*.test.snap
-cp "$ceres/web/ceres.js" "$web/web/"
+cp "$ceres/web/ceres.js" "$ceres/web/telemetry.js" "$web/web/"
 if [ "$into" != "." ]; then
   # an app of Centauri: Centauri's own packages too
   own=$into/deps/www-celestial/centauri

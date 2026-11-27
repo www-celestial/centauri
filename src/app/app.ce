@@ -21,6 +21,7 @@ use std/io
 use std/json
 use std/list
 use std/log
+use std/math
 use std/metrics
 use std/otel
 use std/quic
@@ -179,13 +180,15 @@ defn Start(a, s, db, readDb = missing, clock = missing)
       ends = dict.Get("Ends", m)
     end
   end
-  served = [rated(b, whoModule) for b in list.Concat(adminOfApp(), a.Served)]
+  served = [rated(b, whoModule) for b in list.Concat(list.Concat(adminOfApp(), telemetryOf()), a.Served)]
   cors = [text.Trim(o) for o in text.Split(",", s.Cors) if text.Trim(o) != ""]
   guards = Guards(s.Csp, text.StartsWith("https://", s.Origin))
   words = wordsOf(a, s)
   tracer = if s.Otel == "on" tracerOf(a, s)? else missing end
+  browser = if value.IsSome(tracer) and s.TelemetryClient == "on" tracerOf(a, s, browser = true)? else missing end
+  geo = if s.TelemetryGeo != "off" and value.IsText(dict.Get("TelemetryGeoFile", s)) OpenGeo(s.TelemetryGeoFile)? else missing end
   origin = http.ParseUrl(s.Origin)
-  env = {App: a, Settings: s, Otel: tracer, SpanBase: if result.IsOk(origin) {"url.scheme": if origin.Value.Secure "https" else "http" end, "server.address": origin.Value.Host} else {} end, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
+  env = {App: a, Settings: s, Otel: tracer, Browser: browser, Geo: geo, SpanBase: if result.IsOk(origin) {"url.scheme": if origin.Value.Secure "https" else "http" end, "server.address": origin.Value.Host} else {} end, Db: db, ReadDb: readDb, State: state, Keys: keys, Key: key, Who: who, Roles: a.Roles, Forked: value.IsMissing(dict.Get("CepheusUrl", s)),
     Served: served, Cors: cors, Https: text.StartsWith("https://", s.Origin), Profile: Profiles[s.Profile], Pages: a.Pages,
     Started: sys.Now(), Prefix: "$(encode.Hex(crypto.Random(3, keys)))-", Guards: guards,
     Expanded: dict.Dict([{Key: r, Value: Expand([r], a.Roles)} for r in dict.Keys(a.Roles)]),
@@ -198,10 +201,12 @@ defn Start(a, s, db, readDb = missing, clock = missing)
   result.Ok(env)
 end
 
-defn tracerOf(a, s)
+defn tracerOf(a, s, browser = false)
   (** The tracer of std/otel that the settings ask for (Otel on): its resource the app's name (or OtelService), its
       version, the profile as its environment; an Ok, or an Err that stops the start. OtelHeaders holds name=value
-      pairs with commas, each value percent-encoded, as OTEL_EXPORTER_OTLP_HEADERS writes them. *)
+      pairs with commas, each value percent-encoded, as OTEL_EXPORTER_OTLP_HEADERS writes them. The browsers' tracer,
+      with browser, is the service's name with "-browser", which sends what the pages told (traces and logs) and
+      nothing of the process's own. *)
   headers = []
   given = dict.Get("OtelHeaders", s)
   for pair in text.Split(",", if value.IsText(given) given else "" end)
@@ -211,10 +216,11 @@ defn tracerOf(a, s)
     end
   end
   words = t -> [text.Trim(w) for w in text.Split(",", t) if text.Trim(w) != ""]
-  made = otel.Start(service = if value.IsText(dict.Get("OtelService", s)) s.OtelService else a.Name end, version = a.Version, environment = s.Profile, endpoint = s.OtelEndpoint,
+  name = if value.IsText(dict.Get("OtelService", s)) s.OtelService else a.Name end
+  made = otel.Start(service = if browser "$name-browser" else name end, version = a.Version, environment = s.Profile, endpoint = s.OtelEndpoint,
     protocol = s.OtelProtocol, compression = s.OtelCompression, headers = headers, sample = s.OtelSample, always = words(s.OtelAlways),
-    slow = s.OtelSlow / 1000, trust = s.OtelTrust, signals = words(s.OtelSignals), queue = s.OtelQueue, every = s.OtelEvery,
-    metricsEvery = s.OtelMetricsEvery)
+    slow = s.OtelSlow / 1000, trust = s.OtelTrust, signals = if browser [w for w in words(s.OtelSignals) if w != "metrics"] else words(s.OtelSignals) end,
+    queue = s.OtelQueue, every = s.OtelEvery, metricsEvery = s.OtelMetricsEvery, hooks = not browser)
   if result.IsErr(made) result.Err({Kind: "api", Message: "APP_OTEL: $(made.Error.Message)"}) else made end
 end
 
@@ -291,10 +297,16 @@ defn ready(what, x)
 end
 
 defn keeping(env)
-  (** The keeper of the app, every minute: the idempotency keys past their time forgotten. *)
+  (** The keeper of the app, every minute: the idempotency keys past their time forgotten; every hour, the telemetry of
+      the pages older than APP_TELEMETRY_KEEP days. *)
+  minutes = 0
   while not sys.StopAsked()
     sys.Sleep(60)
     _ = ForgetKeys(env)
+    minutes += 1
+    if math.Mod(minutes, 60) == 1
+      _ = PruneTelemetry(env)
+    end
   end
 end
 

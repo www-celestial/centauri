@@ -43,7 +43,30 @@ Uploading = Kind("centauri_upload", {Key: cepheus.Text(unique = true), Parts: ce
   Type: cepheus.Text(), Name: cepheus.Text(), PartSize: cepheus.Int(), At: cepheus.Date()})
 
 (** The kinds of package app. *)
-Kinds = [Event, Counter, Parts, Bytes, MigrationRun, Once, Uploading]
+(* The telemetry of the pages (telemetry.ce). *)
+(** A load of a page, as its batches told it: its route, its speed, its device, its journey. *)
+ClientView = Kind("centauri_client_view", {View: cepheus.Text(unique = true), Session: cepheus.Text(), Route: cepheus.Text(), Journey: cepheus.Text(),
+  Ref: cepheus.Text(), Utm: cepheus.Text(), At: cepheus.Date(), Seconds: cepheus.Float(), Lcp: cepheus.Float(), Inp: cepheus.Float(),
+  Cls: cepheus.Float(), Fcp: cepheus.Float(), Ttfb: cepheus.Float(), Proto: cepheus.Text(), NavType: cepheus.Text(), DocBytes: cepheus.Int(),
+  Trace: cepheus.Text(), WasmFetch: cepheus.Float(), WasmBytes: cepheus.Int(), WasmStart: cepheus.Float(), FirstPaint: cepheus.Float(),
+  Frames: cepheus.Int(), FrameP50: cepheus.Float(), FrameP95: cepheus.Float(), FrameMax: cepheus.Float(), LongTasks: cepheus.Int(),
+  LongMs: cepheus.Float(), Requests: cepheus.Int(), Bytes: cepheus.Int(), Failed: cepheus.Int(), Slowest: cepheus.Text(), LiveConnect: cepheus.Float(),
+  Reconnects: cepheus.Int(), Offline: cepheus.Int(), Browser: cepheus.Text(), Version: cepheus.Text(), Os: cepheus.Text(), Mobile: cepheus.Bool(),
+  Screen: cepheus.Text(), Viewport: cepheus.Text(), Dpr: cepheus.Float(), Dark: cepheus.Bool(), Motion: cepheus.Bool(), Lang: cepheus.Text(),
+  Zone: cepheus.Text(), Cores: cepheus.Int(), Memory: cepheus.Float(), Net: cepheus.Text(), Rtt: cepheus.Float(), Down: cepheus.Float(),
+  Save: cepheus.Bool(), Country: cepheus.Text(), City: cepheus.Text(), Ip: cepheus.Text(), User: cepheus.Link(), UserTenant: cepheus.Link(),
+  ActionCount: cepheus.Int(), Errors: cepheus.Int(), Untrusted: cepheus.Bool()})
+
+(** An action of a page, from its click to its answer: its name, its time, whether it went, its trace and the server's. *)
+ClientAction = Kind("centauri_client_action", {View: cepheus.Text(), Session: cepheus.Text(), Route: cepheus.Text(), At: cepheus.Date(), Name: cepheus.Text(),
+  Ms: cepheus.Float(), Ok: cepheus.Bool(), Waited: cepheus.Bool(), Trace: cepheus.Text(), Server: cepheus.Text(), Untrusted: cepheus.Bool()})
+
+(** An error a page saw: its kind, its message and stack masked, its place, how many times in the batch. *)
+ClientError = Kind("centauri_client_error", {View: cepheus.Text(), Session: cepheus.Text(), Route: cepheus.Text(), At: cepheus.Date(), Type: cepheus.Text(),
+  Message: cepheus.Text(), Stack: cepheus.Text(), Source: cepheus.Text(), Count: cepheus.Int(), Browser: cepheus.Text(), Version: cepheus.Text(),
+  Os: cepheus.Text(), Untrusted: cepheus.Bool()})
+
+Kinds = [Event, Counter, Parts, Bytes, MigrationRun, Once, Uploading, ClientView, ClientAction, ClientError]
 
 defn IdOf(x)
   (** An id from outside, as a parameter of a path: an Int above 0 from a whole number or its digits, else missing.
