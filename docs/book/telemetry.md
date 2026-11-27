@@ -147,10 +147,16 @@ cheapest request 1 µs: its tracer and three values more made the app's record 3
 is no longer one block, each of its reads 30 ns slower. They live in the state of the process now, and the door opens
 a span only with `APP_OTEL` on.
 
-The start pays for it, though: `bench/serve.ce` to its first answer, 21 starts alternated, took 72.1 ms [66.6, 230.4]
-before and 78.2 ms [72.3, 277.9] now (p 0.02), 77.0 ms with OpenTelemetry on; and 39.0 MiB of memory then, against
-34.9: 2.3 MiB of it are the three kinds of the pages' telemetry, which Cepheus declares at the start (about 29 KB a
-field, 79 fields), the rest the code that came with them.
+The start pays for some of it, though. `bench/serve.ce` to its first answer, against the binaries and the code of
+before, 21 starts alternated on a calm machine (a load of 2), took 68.5 ms [65.3, 140.5] before and 73.8 ms [70.6,
+81.4] with the first version of this (p < 0.001), its memory 37.3 MiB then 41.4. The kinds of the pages' telemetry
+were 2.2 ms and 3.7 MiB of it: Cepheus declares each field of a kind at every start of an app in memory, about 27 µs and
+45 KB a field, and they held 81; they hold 41 now, the rest in `Detail`. Measured again since on a machine loaded by
+other work (a load of 8 to 15, where medians wander by tens of ms), the quickest of 41 starts took 65.4 ms before and
+69.5 now, the memory 37.9 MiB and 40.9. What is left is the code that came with them (std/otel, the endpoint of the
+pages, 25 settings), which Cesia loads with the program, and Cepheus's 41 fields. Most of the memory is what the start
+allocates, which the heap keeps for later: OCaml's heap itself holds 0.7 MiB more. None of it would be paid if Cepheus
+declared a kind at its first write and Cesia loaded a module at its first call, which neither does yet.
 
 ## 4. What the pages tell
 

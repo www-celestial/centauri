@@ -165,10 +165,18 @@ la moins chère : son tracer et trois valeurs de plus faisaient 36 champs à l'e
 enregistrement de plus de 32 champs n'est plus d'un seul bloc, chacune de ses lectures 30 ns plus lente. Ils vivent
 maintenant dans l'état du processus, et la porte n'ouvre un span qu'avec `APP_OTEL` allumé.
 
-Le démarrage, lui, le paie : `bench/serve.ce` jusqu'à sa première réponse, 21 démarrages alternés, a pris 72,1 ms
-[66,6 ; 230,4] avant et 78,2 ms [72,3 ; 277,9] maintenant (p de 0,02), 77,0 ms avec OpenTelemetry allumé ; et 39,0 Mio
-de mémoire maintenant, contre 34,9 avant : 2,3 Mio en sont les trois kinds de la télémétrie des pages, que Cepheus
-déclare au démarrage (environ 29 Ko par champ, 79 champs), le reste le code venu avec eux.
+Le démarrage, lui, en paie une part. `bench/serve.ce` jusqu'à sa première réponse, face aux binaires et au code
+d'avant, 21 démarrages alternés sur une machine calme (une charge de 2), a pris 68,5 ms [65,3 ; 140,5] avant et 73,8 ms
+[70,6 ; 81,4] avec la première version de tout ceci (p < 0,001), sa mémoire 37,3 Mio puis 41,4. Les kinds de la
+télémétrie des pages en étaient 2,2 ms et 3,7 Mio : Cepheus déclare chaque champ d'un kind à chaque démarrage d'une app
+en mémoire, environ 27 µs et 45 Ko par champ, et ils en avaient 81 ; ils en ont 41 maintenant, le reste dans `Detail`.
+Mesuré de nouveau depuis sur une machine chargée par d'autres travaux (une charge de 8 à 15, où les médianes errent de
+dizaines de ms), le plus rapide de 41 démarrages a pris 65,4 ms avant et 69,5 maintenant, la mémoire 37,9 Mio et 40,9.
+Ce qui reste est le code venu avec eux (std/otel, l'endpoint des pages, 25 réglages), que Cesia charge avec le
+programme, et les 41 champs de Cepheus. L'essentiel de la mémoire est ce que le démarrage alloue, que le tas garde pour
+plus tard : le tas d'OCaml lui-même tient 0,7 Mio de plus. Rien de tout cela ne serait payé si Cepheus déclarait un
+kind à sa première écriture et si Cesia chargeait un module à son premier appel, ce que ni l'un ni l'autre ne fait
+encore.
 
 ## 4. Ce que disent les pages
 
