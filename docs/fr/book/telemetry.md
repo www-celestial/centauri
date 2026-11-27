@@ -303,12 +303,34 @@ pour Java, qui réécrit les classes à leur chargement ; Django avec `opentelem
 chaque base de données avec son propre wrapper (une enveloppe autour de ses appels) :
 
 ```java
-// Spring Boot 3: spring-boot-starter-actuator, micrometer-tracing-bridge-otel, opentelemetry-exporter-otlp, and
+// Spring Boot: spring-boot-starter-actuator, micrometer-tracing-bridge-otel, opentelemetry-exporter-otlp, and
 // management.tracing.sampling.probability=1.0, management.otlp.tracing.endpoint=http://localhost:4318/v1/traces
 ```
 
 Centauri n'a besoin d'aucun agent, d'aucun wrapper et d'aucune dépendance : sa porte, ses appels, ses jobs et les
-moteurs de Cesia sont tracés là où ils sont. COMPARAISON SERVEUR (à remplir)
+moteurs de Cesia sont tracés là où ils sont. Ce que cela coûte à côté d'eux, sur la même petite app (`GET /hello` qui
+répond un JSON d'un champ, un span par requête, chacune gardée et envoyée par OTLP sur HTTP en protobuf à un collector
+qui prend et jette), en Cesia avec std/otel, en Go 1.26 avec le SDK d'OpenTelemetry et `otelhttp`, et en Spring Boot
+4.2 sur Java 21 avec l'agent d'OpenTelemetry : 21 tours, sans et avec en alternance, 16 connexions gardées ouvertes,
+le serveur épinglé à un cœur physique, la charge et le collector à un autre, sur une machine partagée avec d'autres
+travaux (une charge de 4,5 à 36, 18,7 en médiane : les requêtes par seconde ont varié d'un facteur dix d'un tour à
+l'autre, et c'est le temps de processeur par requête qu'il faut lire) :
+
+| une requête de `/hello` | sans | avec | ce que coûte OpenTelemetry | octets par span sur le réseau |
+|---|---:|---:|---:|---:|
+| Cesia, std/otel | 71,6 µs [47,7 ; 102,6] | 147,9 µs [94,9 ; 185,8] | +76 µs | 173 |
+| Go 1.26, le SDK 1.47 d'OpenTelemetry et `otelhttp` 0.72 | 41,1 µs [26,3 ; 68,0] | 125,4 µs [81,1 ; 186,8] | +84 µs | 430 |
+| Spring Boot 4.2 et l'agent 2.34 d'OpenTelemetry pour Java | 309,4 µs [58,2 ; 810,9] | 734,7 µs [270,0 ; 1 266,9] | +425 µs | 491 |
+
+Le temps de processeur du serveur par requête, médianes [min ; max] ; chaque « avec » diffère de son « sans »
+(Mann-Whitney, un test qui dit si deux séries de mesures diffèrent vraiment : p < 0,001). OpenTelemetry coûte à une
+requête de Cesia ce qu'il coûte à une de Go, et un cinquième de ce que coûte l'agent pour Java ; un span de Cesia prend
+2,5 fois moins d'octets, puisqu'il nomme ce qu'il doit (la route, la méthode, le statut, le schéma, l'hôte) et pas plus
+(Go et Java ajoutent l'adresse et le port du client, le user agent, le protocole, les détails du pair). Où Go gagne :
+sa requête sans OpenTelemetry coûte moins (41 contre 72 µs : le code interprété de Cesia contre le code compilé de
+Go), sa mémoire est le quart de celle de Cesia (15,7 Mio contre 65,5 pour deux processus), et son SDK écrit le
+protobuf en code compilé, là où Cesia l'écrit en Cesia. L'agent de Java instrumente tout ce qu'il trouve, sans rien à
+écrire, au prix de 90 Mio de mémoire de plus et d'un démarrage de plusieurs secondes.
 
 ## 8. Les tests
 

@@ -124,8 +124,8 @@ on 8 cores from other work):
 Medians [min, max]; each column differs from off (Mann-Whitney, p < 0.02). Protobuf is the default
 (`APP_OTEL_PROTOCOL`): 2.4 times fewer bytes than JSON, for 5 to 10 % more time, which Cesia spends writing protobuf
 where it writes JSON natively; JSON is there for a collector that takes only it, or on this machine, where the bytes
-cost nothing, to spare those microseconds. `APP_OTEL_COMPRESSION=gzip` (zlib, with the permission `ffi=z`) cuts the bytes again, for a collector
-across a network: 6 spans and 3 lines took 1,163 bytes with gzip, 1,853 without.
+cost nothing, to spare those microseconds. `APP_OTEL_COMPRESSION=gzip` (zlib, with the permission `ffi=z`) cuts the
+bytes again, for a collector across a network: 6 spans and 3 lines took 1,163 bytes with gzip, 1,853 without.
 
 So a trace sampled costs a request of Centauri 35 to 60 µs, about 20 to 25 µs a span from its start to the collector,
 all of it in Cesia; a request not sampled, 7 to 8 µs (its ids, its context, its door's checks). On a real Cepheus over
@@ -276,12 +276,33 @@ Java, which rewrites the classes as they load; Django with `opentelemetry-instru
 with its own wrapper:
 
 ```java
-// Spring Boot 3: spring-boot-starter-actuator, micrometer-tracing-bridge-otel, opentelemetry-exporter-otlp, and
+// Spring Boot: spring-boot-starter-actuator, micrometer-tracing-bridge-otel, opentelemetry-exporter-otlp, and
 // management.tracing.sampling.probability=1.0, management.otlp.tracing.endpoint=http://localhost:4318/v1/traces
 ```
 
 Centauri needs no agent, no wrapper and no dependency: its door, its calls, its jobs and Cesia's engines are traced
-where they are. SERVER COMPARISON (to fill)
+where they are. What it costs beside them, on the same tiny app (`GET /hello` answering a JSON of one field, one span a
+request, every one sampled and sent by OTLP over HTTP in protobuf to a collector that takes and drops), in Cesia with
+std/otel, in Go 1.26 with OpenTelemetry's SDK and `otelhttp`, and in Spring Boot 4.2 on Java 21 with OpenTelemetry's
+agent: 21 rounds, off and on alternated, 16 connections kept open, the server pinned to one physical core, the load
+and the collector to another, on a machine shared with other work (a load of 4.5 to 36, 18.7 in the median: the
+requests a second moved by a factor of ten from round to round, so the time of processor a request is the measure to
+read):
+
+| a request of `/hello` | off | on | OpenTelemetry costs | bytes a span on the wire |
+|---|---:|---:|---:|---:|
+| Cesia, std/otel | 71.6 µs [47.7, 102.6] | 147.9 µs [94.9, 185.8] | +76 µs | 173 |
+| Go 1.26, OpenTelemetry's SDK 1.47 and `otelhttp` 0.72 | 41.1 µs [26.3, 68.0] | 125.4 µs [81.1, 186.8] | +84 µs | 430 |
+| Spring Boot 4.2 and OpenTelemetry's agent 2.34 for Java | 309.4 µs [58.2, 810.9] | 734.7 µs [270.0, 1,266.9] | +425 µs | 491 |
+
+The time of processor of the server a request, medians [min, max]; each "on" differs from its "off" (Mann-Whitney,
+p < 0.001). OpenTelemetry costs a request of Cesia what it costs one of Go, and a fifth of what the agent for Java
+costs; a span of Cesia takes 2.5 times fewer bytes, since it names what it must (the route, the method, the status,
+the scheme, the host) and not more (Go and Java add the client's address and port, the user agent, the protocol, the
+peer's details). Where Go wins: its request without OpenTelemetry is cheaper (41 against 72 µs: Cesia's interpreted
+code against Go's compiled one), its memory is a fourth of Cesia's (15.7 MiB against 65.5 for two processes), and its
+SDK writes protobuf in compiled code, where Cesia writes it in Cesia. Java's agent instruments everything it finds,
+with nothing to write, at the price of 90 MiB more memory and a start of seconds.
 
 ## 8. The tests
 
