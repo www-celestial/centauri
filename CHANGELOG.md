@@ -112,6 +112,12 @@ live.js, `websocket.Dial`'s `last`) and Ceres's (the page's client, `web.Connect
   unless given): its counts the sums of its minutes, its `P50` and `P99` those of all its requests (the minutes'
   sketches merged). `{"Seconds": 900, "Minutes": 60, "Tens": 1008}` is 1,968 points, about 410 KB of JSON, where all
   the minutes were 10,980 points and 2.3 MB.
+- `PointRow` gains `Cpu` (the share of a core over the second, in percent), `Memory` (bytes in RAM), `DiskUsed` and
+  `DiskTotal` (the file system of the folder of the new setting `AdminDisk`), each absent where the system doesn't
+  tell it, from Cesia's `sys.Usage()` and `sys.Disk(path)`. A database's writes have no source yet.
+- `GET /admin/series?Step=1|60|600&Count=n`, the history as columns (`{Step, Ats, Cols}`), oldest first: 83 KB for
+  the 900 seconds, 6 KB for the 60 last minutes, 96 KB for the 1,008 ten minutes, where the rows of `admin.series`
+  were 412 KB. The admin module serves it.
 - The metric `centauri_signins_total{result}`, `ok` or `failed`; `app.Screens` (the live screens open) and
   `app.Times` (the times of the requests the log kept since a line) in the state of a process; `env.Own`, a table of
   what a module keeps for the life of the process.

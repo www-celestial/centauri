@@ -4,7 +4,8 @@
     page: the session of its cookie, the role super checked at each call, the limits, the shapes, the log. The module
     adds the live shows of the pages (api.AdminShows): the dashboard's points, a second's for 15 minutes, a minute's and
     ten minutes' for 7 days, sampled once for the whole process from the start of the app; the events as they are
-    written, the log as it goes. No endpoint of its own, no other way in. An app lists Module() among its modules, after
+    written, the log as it goes; and one endpoint, the dashboard's history as columns (api.AdminSeriesData), of the
+    role super as every other: no other way in. An app lists Module() among its modules, after
     auth's. The pages are built by the app, from its own entry, so that it adds its pages, columns and actions
     (package src/admin/pages): cesia build --target wasm admin/page.ce writes admin/page.wasm and its loader beside
     it, which Module(folder = "admin") serves. The book's chapter The admin shows both. *)
@@ -26,9 +27,11 @@ use std/text
 use std/value
 
 (** The settings of the admin pages: the path they are served at, as /admin, or off for none (the endpoints stay, for
-    programs); their theme, dark (the default), light, or system, which follows the browser's. *)
+    programs); their theme, dark (the default), light, or system, which follows the browser's; AdminDisk, a folder
+    whose file system the dashboard watches (DiskUsed and DiskTotal), as the data folder of the Cepheus of this
+    machine, none unless given: the app reads it, and needs --allow read on it. *)
 Settings = {AdminPath: check.Text(1, 200, optional = true, default = "/admin"),
-  AdminTheme: check.OneOf(["dark", "light", "system"], optional = true, default = "dark")}
+  AdminTheme: check.OneOf(["dark", "light", "system"], optional = true, default = "dark"), AdminDisk: check.Text(1, 4096, optional = true)}
 
 (* The background of the page before its first frame, as the theme paints it: no flash of white in the dark. *)
 backs = {dark: "#151515", light: "#d4d4d4", system: "#151515"}
@@ -58,7 +61,7 @@ defn Module(folder = "admin", entry = "page", title = missing)
       beside them, from cesia build --target wasm folder/entry.ce), served at AdminPath with its index.html; title
       names the browser's tab, the app's name by default. *)
   app.Module("admin", settings = Settings, serve = [app.Live(api.AdminSeries, series), app.Live(api.AdminTail, tail),
-    app.Live(api.AdminLogTail, logTail)], pages = env -> pagesOf(env, folder, entry, title), verify = env -> built(env, folder, entry),
+    app.Live(api.AdminLogTail, logTail), app.Serve(api.AdminSeriesData, seriesData)], pages = env -> pagesOf(env, folder, entry, title), verify = env -> built(env, folder, entry),
     start = started)
 end
 
@@ -248,13 +251,42 @@ defn merged(sk, other)
 end
 
 defn closed(m, step = 60)
-  (** The point of a span of step seconds: the sums of its points, its last one's Failures, jobs and screens, and the
-      quantiles of the times of all its requests. *)
+  (** The point of a span of step seconds: the sums of its points, its last one's Failures, jobs, screens and use of the
+      machine, and the quantiles of the times of all its requests. *)
   l = m.Last
-  {At: m.At, Requests: m.Requests, Errors: m.Errors, Origin: m.Origin, Limit: m.Limit, Signin: m.Signin, Role: m.Role, Failures: l.Failures,
+  out = {At: m.At, Requests: m.Requests, Errors: m.Errors, Origin: m.Origin, Limit: m.Limit, Signin: m.Signin, Role: m.Role, Failures: l.Failures,
     P50: sketchQuantile(m.Sketch, m.Times, 0.5), P99: sketchQuantile(m.Sketch, m.Times, 0.99), Ready: l.Ready, Running: l.Running, Dead: l.Dead,
     Step: step, Screens: l.Screens, SignedIn: m.SignedIn, FailedSignIns: m.FailedSignIns}
+  for f in used
+    if dict.Has(f, l)
+      out[f] = l[f]
+    end
+  end
+  out
 end
+
+(* The fields of a point of what the process uses, each where the system tells it. *)
+used = ["Cpu", "Memory", "DiskUsed", "DiskTotal"]
+
+defn usage(p, u, cpu, disk)
+  (** A second's point with what the process uses: cpu its share of a core over the second, in percent, or missing;
+      u what sys.Usage gives; disk an Ok of what sys.Disk gives, or missing. *)
+  out = p
+  if value.IsSome(cpu)
+    out.Cpu = cpu
+  end
+  if value.IsSome(u.Memory)
+    out.Memory = u.Memory
+  end
+  if value.IsSome(disk) and result.IsOk(disk)
+    out.DiskUsed = disk.Value.Used
+    out.DiskTotal = disk.Value.Total
+  end
+  out
+end
+
+(** The share of a core, in percent to the tenth, of the CPU seconds cpu taken over the seconds wall. *)
+share(cpu, wall) = math.Round(cpu / list.Max([wall, 0.000001]) * 1000) / 10
 
 (** The points of a ring with p after them, the most last ones. *)
 ring(p, xs, most) = list.Append(p, if value.Len(xs) < most xs else list.Skip(value.Len(xs) - most + 1, xs) end)
@@ -320,7 +352,7 @@ defn begun(env)
       counters and the number of the last line of the log read, the jobs, the minute and the ten minutes going on, and
       its ticks. *)
   {Board: board(env), Before: totals(metrics.Text()), Seq: app.Times(0, env.State).Seq, Jobs: {Ready: 0, Running: 0, Dead: 0}, Minute: missing, Ten: missing,
-    Tick: 0}
+    Tick: 0, Cpu: sys.Usage().Cpu, Wall: sys.Now()}
 end
 
 defn ticked(env, st)
@@ -338,8 +370,14 @@ defn ticked(env, st)
     (* the jobs counted at the first second, then every 5: the start of the app asks nothing of the database *)
     st.Jobs = jobCounts(env)
   end
+  u = sys.Usage()
+  wall = sys.Now()
+  folder = dict.Get("AdminDisk", env.Settings)
   p = second(math.Floor(env.Now()), now, st.Before, ms, app.Failures(env.State), st.Jobs, app.Screens(env.State))
+  p = usage(p, u, share(u.Cpu - st.Cpu, wall - st.Wall), if value.IsMissing(folder) missing else sys.Disk(folder) end)
   st.Before = now
+  st.Cpu = u.Cpu
+  st.Wall = wall
   t = advanced(st.Board, st.Minute, st.Ten, p, ms, fiber.Channel())
   fiber.Remember("admin.series", t.Board, 1e300, env.Own)
   fiber.Close(st.Board.Next)
@@ -450,6 +488,36 @@ defn relaying(s, want, b, out)
       fiber.Send({Group: group, Added: c.Added, Removed: c.Removed}, out)
     end
   end
+end
+
+(* The fields of a point that each point has, as the columns of the history give them. *)
+counted = ["Requests", "Errors", "Origin", "Limit", "Signin", "Role", "Failures", "SignedIn", "FailedSignIns", "P50", "P99", "Ready", "Running",
+  "Dead", "Screens"]
+
+defn columns(step, ps)
+  (** Points of a step as the history gives them: {Step, Ats, Cols}, a list of numbers for each field, the times of the
+      requests to the tenth of a millisecond; a field of what the process uses only when every point has it. *)
+  cols = {}
+  for f in counted
+    cols[f] = if f == "P50" or f == "P99" [math.Round(p[f] * 10) / 10 for p in ps] else [p[f] for p in ps] end
+  end
+  for f in used
+    if value.Len(ps) > 0 and list.All([dict.Has(f, p) for p in ps])
+      cols[f] = [p[f] for p in ps]
+    end
+  end
+  {Step: step, Ats: [p.At for p in ps], Cols: cols}
+end
+
+defn seriesData(r, q)
+  (** GET /admin/series: the last Count points of a Step that the sampler of the process keeps (started here if it was
+      not), the oldest first, as columns. *)
+  if not (q.Step in [1, 60, 600])
+    return app.Fail(422, "Check the query.", fields = {Step: "1, 60 or 600: the points of a second, of a minute, of ten minutes."})
+  end
+  b = sampler(r.Env)
+  kept = if q.Step == 1 b.Seconds else if q.Step == 60 b.Minutes else b.Tens end
+  result.Ok(columns(q.Step, if value.IsMissing(q.Count) kept else last(q.Count, kept) end))
 end
 
 (* ---- The events as they are written, and the log as it goes. *)

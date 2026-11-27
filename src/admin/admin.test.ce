@@ -8,6 +8,7 @@ use std/fiber
 use std/json
 use std/list
 use std/math
+use std/result
 use std/value
 
 (* The metrics of a process as std/metrics writes them. *)
@@ -225,4 +226,39 @@ defn isTensQuantilesThoseOfAllTheirRequests()
   p = closed(ten, step = 600)
   bug.Assert(same and ten.Times == 30000 and p.Requests == 30000, "merged as one: $(ten.Times)")
   math.Abs(p.P50 - quantile(every, 0.5)) <= 0.01 * quantile(every, 0.5) + 0.0005 and math.Abs(p.P99 - quantile(every, 0.99)) <= 0.01 * quantile(every, 0.99) + 0.0005
+end
+
+defn isUsageOfTheProcessInThePoint()
+  (** What the process uses goes in a second's point when the system tells it, and nothing when it doesn't: no
+      number made up. *)
+  p = usage(point(0, 1), {Cpu: 9.5, Memory: 214000000}, share(0.25, 1.0), result.Ok({Total: 1000, Used: 400, Free: 500}))
+  bare = usage(point(0, 1), {Cpu: 9.5, Memory: missing}, missing, missing)
+  bug.Assert(p.Cpu == 25 and p.Memory == 214000000 and p.DiskUsed == 400 and p.DiskTotal == 1000, "the use: $p")
+  bug.Assert(not list.Any([dict.Has(f, bare) for f in used]), "none made up: $bare")
+  bug.Assert(share(2, 1) == 200 and share(0.0333, 1) == 3.3 and share(1, 0) > 0, "a share of a core: $(share(0.0333, 1))")
+  disk = usage(point(0, 1), {Cpu: 1, Memory: 1}, 1, result.Err("gone"))
+  not dict.Has("DiskUsed", disk) and not dict.Has("DiskTotal", disk)
+end
+
+defn isMinutesUsageTheLastSeconds()
+  m = opened(0)
+  for k in 0..59
+    m = folded(m, usage(point(k, 1), {Cpu: 0, Memory: 1000 + k}, k, missing), [1])
+  end
+  p = closed(m)
+  bare = closed(folded(opened(0), point(1, 1), [1]))
+  p.Cpu == 59 and p.Memory == 1059 and not dict.Has("DiskUsed", p) and not dict.Has("Cpu", bare)
+end
+
+defn isHistoryInColumns()
+  (** The history as columns, the oldest first, a column a field, the times to the tenth of a millisecond; a field of
+      the use only when every point has it. *)
+  ps = [usage(second(k, {Requests: k, Errors: 0, Origin: 0, Limit: 0, Signin: 0, Role: 0, SignedIn: 0, FailedSignIns: 0}, nothing, [1.23456, 9.87654], 0, jobs, 2),
+    {Cpu: 0, Memory: 5000}, if k == 1 missing else 4.5 end, missing) for k in 1..3]
+  c = columns(1, ps)
+  bug.Assert(c.Step == 1 and value.Equal(c.Ats, [1, 2, 3]) and value.Equal(c.Cols.Requests, [1, 2, 3]) and value.Equal(c.Cols.Memory, [5000, 5000, 5000]), "columns: $c")
+  bug.Assert(c.Cols.P50[1] == 1.2 and c.Cols.P99[1] == 9.9 and value.Equal(c.Cols.Screens, [2, 2, 2]), "rounded: $(c.Cols.P50)")
+  bug.Assert(not dict.Has("Cpu", c.Cols) and not dict.Has("DiskUsed", c.Cols), "no column a point lacks: $(dict.Keys(c.Cols))")
+  empty = columns(600, [])
+  value.Len(empty.Ats) == 0 and value.Len(empty.Cols.Requests) == 0 and not dict.Has("Memory", empty.Cols)
 end
