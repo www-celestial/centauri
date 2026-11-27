@@ -351,10 +351,10 @@ defn Listen(env, listener = missing)
 end
 
 defn quicServer(s)
-  (** The listener of HTTP/3, beside TCP, on UDP Http3Port (the TCP port by default, as browsers find it). An OpenSSL
-      without QUIC's server (before 3.6, as the 3.0 of Ubuntu 22.04 and 24.04) or a port taken leaves TCP alone, with a
-      warning: HTTP/3 is a way more, never the only one. *)
-  made = quic.Open() then result.AndThen(q -> http3.Server(s.Cert, dict.Get("Key", s), q, port = if s.Http3Port == 0 s.Port else s.Http3Port end, host = s.Host))
+  (** The listener of HTTP/3, beside TCP, on UDP Http3Port (the TCP port by default, as browsers find it), its
+      congestion control Http3Congestion. A system without QUIC (no ngtcp2 on OpenSSL 3.5 or later) or a port taken
+      leaves TCP alone, with a warning: HTTP/3 is a way more, never the only one. *)
+  made = quic.Open() then result.AndThen(q -> http3.Server(s.Cert, dict.Get("Key", s), q, port = if s.Http3Port == 0 s.Port else s.Http3Port end, host = s.Host, congestion = s.Http3Congestion))
   if result.IsErr(made)
     log.Warn("http3: off, TCP alone", {Error: made.Error.Message})
     return missing
