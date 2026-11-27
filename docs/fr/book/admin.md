@@ -125,7 +125,8 @@ comme un outil de bureau, des panneaux ancrés avec des onglets (*dock*), sont �
 
 | page | ce qu'elle montre | ce qu'elle fait, par quel endpoint |
 |---|---|---|
-| Tableau de bord | un tableau de bord qui surveille la plateforme en direct : une bande de son état (la connexion, les requêtes de la dernière minute, le p50 et le p99 de la durée d'une requête — la durée sous laquelle passent la moitié, et 99 %, des requêtes —, les erreurs, les jobs en échec, les sessions, depuis quand l'app tourne) ; six graphiques qui partagent un réticule (*crosshair*, la ligne qui suit la souris), sur 15 minutes, une heure, un jour ou une semaine : les requêtes, la durée d'une requête, les erreurs 5xx (les réponses d'erreur du serveur), les refus à la porte par raison (un autre site, une limite, pas de session, un rôle), les connexions échouées, les jobs prêts, en cours et morts ; le log à mesure qu'il s'écrit, par niveau, avec une pause ; les premiers pas d'une app neuve | le show `admin.series` (chaque seconde, à partir des métriques et du log du processus), `admin.logs`, `GET /admin/stats`, `GET /admin/app` |
+| Tableau de bord | un tableau de bord qui surveille la plateforme en direct : une bande de son état (la connexion, les requêtes de la dernière minute, le p50 et le p99 de la durée d'une requête — la durée sous laquelle passent la moitié, et 99 %, des requêtes —, les erreurs, les jobs en échec, les sessions, le CPU et la mémoire du processus, le disque du dossier d'`AdminDisk` quand il est
+réglé, depuis quand l'app tourne) ; six graphiques qui partagent un réticule (*crosshair*, la ligne qui suit la souris), sur 15 minutes, une heure, un jour ou une semaine : les requêtes, la durée d'une requête, les erreurs 5xx (les réponses d'erreur du serveur), les refus à la porte par raison (un autre site, une limite, pas de session, un rôle), les connexions échouées, les jobs prêts, en cours et morts ; le log à mesure qu'il s'écrit, par niveau, avec une pause ; les premiers pas d'une app neuve | l'historique `GET /admin/series` (en colonnes, lu une fois par plage), le show `admin.series` (chaque seconde après lui, à partir des métriques et du log du processus), `admin.logs`, `GET /admin/stats`, `GET /admin/app` |
 | Utilisateurs | 50 par page, filtrés par le début de leur e-mail ou par un tenant, triés d'un clic sur un titre | désactiver, activer, déconnecter partout, faire ou défaire un super-admin, chaque action confirmée d'abord (`POST /admin/users/:id/disable`...) |
 | Un utilisateur | son compte, ses tenants avec ses rôles, chacun dans un champ ; ses moyens de connexion et ses seconds facteurs : un mot de passe ou non, TOTP et les codes de secours restants, chaque passkey (une clé d'accès gardée par l'appareil, qui remplace le mot de passe) avec sa date de création, son dernier usage et si son appareil l'a vérifié, les fournisseurs (providers), comme Google ; ses sessions | les rôles enregistrés sur place (`PUT /admin/tenants/:id/members/:user`) ; son TOTP et ses codes de secours, ou ses passkeys, retirés quand il a perdu son appareil (`POST /admin/users/:id/factors/reset`) ; une session choisie dans le tableau terminée seule (`DELETE /admin/sessions/:id`) ; chaque action confirmée d'abord |
 | Tenants, un tenant | filtrés par le début de leur nom ; ses membres et leurs rôles | les rôles sur place, un utilisateur ajouté par son id avec des rôles ; quelqu'un invité par mail avec des rôles (`POST /admin/tenants/:id/invites`) |
@@ -309,8 +310,9 @@ defn unpaid(p)
 end
 
 pages.Run(title = "Invoices — admin", words = words.Words,
-  kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number"), pages.Column("BillTo", title = "Bill to"), pages.Column("Status"),
-    pages.Column("Total", show = v -> "$(pages.Num(v)) €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
+  kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number", width = 80), pages.Column("Client"), pages.Column("Due", width = 110),
+    pages.Column("Status", width = 100), pages.Column("Total", show = v -> pages.Money(v, currency = "€"), width = 110)],
+    actions = [pages.Action("Mark paid", e.AdminPay)])],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])
 ```
 
@@ -320,10 +322,12 @@ Le fichier entier est `examples/invoices/admin/page.ce` (avec `byOffice` et `pay
 - `pages.Page(title, path, view)` : une page dans le menu, après celles de Centauri. `view(p)` donne ses widgets (les
   éléments de la page : un titre, un tableau, un bouton...) ; il appelle les endpoints de l'app par
   `pages.Call(endpoint, args, p)`, ou en lit un qui rend des pages par `pages.Lister`.
-- `pages.Kind(name, title, columns, actions)` : comment le navigateur de données montre un kind.
-  `pages.Column(field, title, show, width)` : une colonne (ses premiers champs quand il n'y en a aucune).
-  `pages.Action(label, endpoint, args, confirm)` : un bouton sur la chose choisie, avec `{id: its id}` par défaut,
-  confirmé d'abord sauf si `confirm = false`.
+- `pages.Kind(name, title, columns, actions, fields, create)` : comment le navigateur de données montre un kind.
+  `pages.Column(field, title, show, width)` : une colonne (ses premiers champs quand il n'y en a aucune), montrée
+  comme son type le dit sans `show` (une date à l'heure du lecteur, un montant, le titre que nomme un lien).
+  `fields` : les champs que montre le panneau (tous sauf ceux que l'app garde pour elle quand il n'y en a aucun) ;
+  `create = false` retire Nouveau. `pages.Action(label, endpoint, args, confirm)` : un bouton sur la chose choisie et
+  sur les lignes cochées, avec `{id: its id}` par défaut, confirmé d'abord sauf si `confirm = false`.
 - les outils de chaque page : `pages.Lister`, `ListRows`, `ListState`, `More`, `Again`, `Chosen` (la ligne qu'un clic a
   choisie, dans l'ordre que montre le tableau), `Confirm` et `Question`, `Replied` (une réponse montrée, ou son
   problème), `Local` (une heure à l'heure de celui qui regarde), `Cell`.

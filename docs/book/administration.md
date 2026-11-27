@@ -15,7 +15,10 @@ event of the history, and nobody disables himself or takes the role from himself
 | `GET /admin/metrics` | the metrics of this process, one row a value |
 | `GET /admin/endpoints` | every endpoint of the app, by module, with its role and its limit |
 | `GET /admin/events?Kind=&Tenant=&User=` | the history: sign-ups, sign-ins and their failures, lockouts, refusals, invitations, roles, users disabled |
-| `GET /admin/kinds`, `GET /admin/data/:kind?Tenant=` | the kinds of the database with their fields, and the things of one, by pages |
+| `GET /admin/kinds`, `GET /admin/data/:kind?Tenant=&Where=&Search=` | the kinds of the database with their fields and how many things each holds, and the things of one, by pages: those whose fields have the values of `Where` (a JSON object, `{"Status":"paid"}`), those whose texts hold `Search`, any case (5,000 things read at most a page: Cepheus finds a value's start, not a text inside it); each with the things its links name, by their title |
+| `GET /admin/data/:kind/facets` | the fields of a kind of at most 12 values, each value with how many things have it |
+| `GET /admin/data/:kind/:id/history` | what the administration changed of a thing, the newest first, and who |
+| `POST /admin/data/:kind {Fields}`, `DELETE /admin/data/:kind/:id` | a thing of a kind of the app made, or deleted (its links and the database's rules may refuse it: 409); the platform's own kinds are kept by their own pages |
 | `GET /admin/users?Search=&Tenant=`, `GET /admin/users/:id` | the users, newest first; one, with his tenants, roles and sessions, and his `Factors`: TOTP on or not, the recovery codes left, a password or not, his passkeys, the providers he signs in with |
 | `DELETE /admin/sessions/:id` | one session ends; the user's others go on |
 | `POST /admin/users/:id/factors/reset {Totp, Passkeys}` | his TOTP and recovery codes, his passkeys, taken away when he lost his device; his sessions go on ([passkeys](passkeys.md#6-when-a-device-is-lost)) |
@@ -59,11 +62,13 @@ millisecond. `Count` is all the points kept unless given. Measured on a full his
 83 KB of JSON, `Step=60&Count=60` 6 KB, `Step=600&Count=1008` 96 KB, where the rows of `admin.series` were 412 KB.
 
 `GET /admin/events` also takes `Route`, `Since` and `Until` (ISO 8601). `GET /admin/data/:kind` and `GET /admin/kinds`
-never give a field that `app.Kind(..., secret = [...])` names: it comes as `(secret)`, and `Secret` marks it among the
+never give a field that `app.Kind(..., secret = [...])` names (`title = "Number"` names the field that a link
+shows of a thing of the kind; without it, its first field of text): it comes as `(secret)`, and `Secret` marks it among the
 fields of its kind; Centauri's own (the hashes of passwords, sessions, invitations and codes, of the keys of programs,
 the recovery codes, the tickets of a second step, the ceremonies of passkeys and the flows of providers, the sealed
-secrets of TOTP, a webhook's secret) are named so. Each change of `PATCH /admin/data`, `retry` and `cancel` is an
-event (`data-edited`, `job-retried`, `job-cancelled`), and so are a session ended (`signout`), factors taken away
+secrets of TOTP, a webhook's secret) are named so. Each change of `POST`, `PATCH` and `DELETE /admin/data`, `retry` and
+`cancel` is an event (`data-created`, `data-edited`, `data-deleted`, `job-retried`, `job-cancelled`), which names the
+fields, never their values,, and so are a session ended (`signout`), factors taken away
 (`factors-reset`), an invitation (`invite`), a key revoked (`key-revoked`) and a flag set (`flag`), with the others:
 [the admin pages](admin.md) show them as the audit trail.
 

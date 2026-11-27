@@ -9,7 +9,16 @@
   where one is at the top, the palette of Ctrl+K, the buttons of the density and of the theme, who is signed in and
   Sign out at the foot; a phone gets a drawer, rows as cards and the sheet over the whole window.
 - A thing of the data opens in a sheet beside its list, at its own address (`/admin/#/data/invoice/65616`), each field
-  with its name and type over its input; a change not saved is asked about in the sheet, inline.
+  with its name over its input; a change not saved is asked about in the sheet, inline. The fields an app keeps for
+  itself are left out (Search, those a rule gives; `pages.Kind(fields = [...])` names those shown instead), a link
+  shows the title of the thing it names as a link to its page, and the activity of the thing comes under its fields.
+- Every kind's page, one way for all: its name in capitals and plural with its count in the side bar, chips of the
+  values of a field of few with their counts, a search over its texts (/), New for a kind of the app
+  (`pages.Kind(create = false)` closes it), a box before each row and a band of the kind's actions and Delete for the
+  rows checked, each asked first; amounts with two decimals, grouped as the language writes them (1,280.50 €,
+  1 280,50 €). Their endpoints: `GET /admin/data/:kind?Where=&Search=`, `GET /admin/data/:kind/facets`,
+  `GET /admin/data/:kind/:id/history`, `POST /admin/data/:kind`, `DELETE /admin/data/:kind/:id`; `app.Kind(title = ...)`
+  names the field a link shows.
 - The dashboard watches the platform: a strip of its state, six graphs of its real numbers that share a crosshair, over
   15 minutes, an hour, a day or a week, the log live by level with a pause, the first steps of a fresh app.
 - Settings, Look: the theme, the density of the rows, the layout on the web (pages, or the dock of a desktop tool) and

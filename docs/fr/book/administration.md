@@ -19,7 +19,10 @@ plateforme en garde donc toujours un.
 | `GET /admin/metrics` | les métriques de ce processus, une ligne par valeur |
 | `GET /admin/endpoints` | chaque endpoint de l'app, par module, avec son rôle et sa limite |
 | `GET /admin/events?Kind=&Tenant=&User=` | l'historique : les inscriptions, les connexions et leurs échecs, les blocages, les refus, les invitations, les rôles, les utilisateurs désactivés |
-| `GET /admin/kinds`, `GET /admin/data/:kind?Tenant=` | les kinds de la base de données avec leurs champs, et les choses (*things* dans le code) de l'un d'eux, par pages |
+| `GET /admin/kinds`, `GET /admin/data/:kind?Tenant=&Where=&Search=` | les kinds de la base de données avec leurs champs et combien de choses chacun en a, et les choses (*things* dans le code) de l'un d'eux, par pages : celles dont les champs ont les valeurs de `Where` (un objet JSON, `{"Status":"paid"}`), celles dont les textes contiennent `Search`, sans tenir compte de la casse (5 000 choses lues au plus par page : Cepheus trouve le début d'une valeur, pas un texte à l'intérieur) ; chacune avec les choses que nomment ses liens, par leur titre |
+| `GET /admin/data/:kind/facets` | les champs d'un kind qui ont au plus 12 valeurs, chaque valeur avec le nombre de choses qui l'ont |
+| `GET /admin/data/:kind/:id/history` | ce que l'administration a changé d'une chose, le plus récent d'abord, et qui |
+| `POST /admin/data/:kind {Fields}`, `DELETE /admin/data/:kind/:id` | une chose d'un kind de l'app créée, ou supprimée (ses liens et les règles de la base peuvent le refuser : 409) ; les kinds de la plateforme sont gardés par leurs propres pages |
 | `GET /admin/users?Search=&Tenant=`, `GET /admin/users/:id` | les utilisateurs, les plus récents d'abord ; un utilisateur, avec ses tenants, ses rôles et ses sessions, et ses `Factors` : TOTP (le code à six chiffres d'une app d'authentification, qui change toutes les 30 secondes) activé ou non, les codes de secours restants, un mot de passe ou non, ses passkeys (des clés d'accès gardées par l'appareil, qui remplacent le mot de passe), les fournisseurs (providers, comme Google) avec lesquels il se connecte |
 | `DELETE /admin/sessions/:id` | une session prend fin ; les autres de l'utilisateur continuent |
 | `POST /admin/users/:id/factors/reset {Totp, Passkeys}` | son TOTP et ses codes de secours, ses passkeys, retirés quand il a perdu son appareil ; ses sessions continuent ([passkeys](passkeys.md#6-quand-un-appareil-est-perdu)) |
@@ -68,13 +71,15 @@ milliseconde. `Count` vaut tous les points gardés s'il n'est pas donné. Mesur�
 d'`admin.series` faisaient 412 Ko.
 
 `GET /admin/events` prend aussi `Route`, `Since` et `Until` (ISO 8601). `GET /admin/data/:kind` et `GET /admin/kinds`
-ne donnent jamais un champ que nomme `app.Kind(..., secret = [...])` : il arrive comme `(secret)`, et `Secret` le marque
+ne donnent jamais un champ que nomme `app.Kind(..., secret = [...])` (`title = "Number"` nomme le champ qu'un lien
+montre d'une chose du kind ; sans lui, son premier champ de texte) : il arrive comme `(secret)`, et `Secret` le marque
 parmi les champs de son kind. Ceux de Centauri sont nommés ainsi : les hashs des mots de passe, des sessions, des
 invitations et des codes, ceux des clés de programme, les codes de secours, les tickets d'une seconde étape, les
 cérémonies des passkeys et les flux des fournisseurs, les secrets scellés de TOTP, le secret d'un webhook. (Un hash est
 une empreinte : un nombre calculé à partir d'un texte, d'où on ne peut pas revenir au texte ; un webhook, un appel HTTP
-que l'app envoie à un partenaire quand quelque chose arrive.) Chaque changement par `PATCH /admin/data`, `retry` et
-`cancel` est un événement (`data-edited`, `job-retried`, `job-cancelled`), comme le sont une session terminée
+que l'app envoie à un partenaire quand quelque chose arrive.) Chaque changement par `POST`, `PATCH` et `DELETE /admin/data`,
+`retry` et `cancel` est un événement (`data-created`, `data-edited`, `data-deleted`, `job-retried`, `job-cancelled`),
+qui nomme les champs, jamais leurs valeurs,, comme le sont une session terminée
 (`signout`), des facteurs retirés (`factors-reset`), une invitation (`invite`), une clé révoquée (`key-revoked`) et un
 flag réglé (`flag`), avec les autres : [les pages d'administration](admin.md) les montrent comme la piste d'audit.
 

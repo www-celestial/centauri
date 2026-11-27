@@ -106,12 +106,14 @@ defn browseOf(p, name)
   made
 end
 
-defn listOf(p, name, b, search, chip, field)
-  (** The list of the things of a kind for a search and a chip (its field's value, or "all"), read once and kept: a
-      thing opened and the list again share it; Refresh reads it again. *)
+defn listOf(p, name, b, search, chip, field, fresh)
+  (** The list of the things of a kind for a search and a chip (its field's value, or "all"), kept: a thing opened
+      shares the list shown before it, so that opening a thing reads nothing again; the list shown without a thing
+      opened (fresh) is read again, by a list of its own (setting the signals of the list kept from here would make the
+      page read what it sets). *)
   key = if chip == "all" "$search|all" else "$search|$chip|$field" end
   got = dict.Get(key, peek(b.Lists))
-  if value.IsSome(got)
+  if value.IsSome(got) and not fresh
     stash(got, b.Now)
     return got
   end
@@ -184,7 +186,7 @@ defn thingsOf(kind, p, b, id, fresh, height)
     web.Spread(() -> chipsOf(facetOf(OkOf(web.Get(facets))), b, kind), web.Input(b.Search, label = Say("Search"), placeholder = Say("Search the texts"), icon = "search", hint = "/", width = 260)),
     (* what is done to the rows checked, and what it asks and answers: nothing high while there is nothing *)
     web.Stack([web.Bulk(b.Checks, bulkOf(kind, p, b, asking, said), say = t -> Say(t)), Question(asking), () -> said1(web.Get(said))], gap = 0),
-    () -> listPart(kind, p, b, id, fresh, height, dock, web.Get(b.Search), web.Get(b.Chip), facetField(OkOf(web.Get(facets)))),
+    () -> listPart(kind, p, b, id, fresh, height, dock, web.Get(b.Search), web.Get(b.Chip), facets),
   ], gap = 10)
 end
 
@@ -198,10 +200,12 @@ defn refresh(b)
   end
 end
 
-defn listPart(kind, p, b, id, fresh, height, dock, search, chip, field)
-  (** The table of the things a search and a chip find, and the thing opened in the sheet or the details. *)
+defn listPart(kind, p, b, id, fresh, height, dock, search, chip, facets)
+  (** The table of the things a search and a chip find, and the thing opened in the sheet or the details. The facets
+      are read only for a chip chosen, so that their reply doesn't read the list again. *)
   site = p.Site
-  got = listOf(p, kind.Name, b, search, chip, field)
+  field = if chip == "all" missing else facetField(OkOf(web.Get(facets))) end
+  got = listOf(p, kind.Name, b, search, chip, field, value.IsMissing(id) and not fresh)
   l = got.L
   rows = got.Rows
   table = web.Table(rows, columnsOf(kind, p), height = height, label = kind.Name, key = t -> t.Id, open = t -> web.Go("/data/$(kind.Name)/$(t.Id)", p),

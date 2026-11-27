@@ -107,7 +107,8 @@ same pages laid out as a desktop tool, docked panels with tabs, are one choice a
 
 | page | what it shows | what it does, through which endpoint |
 |---|---|---|
-| Dashboard | a board that watches the platform live: a strip of its state (the connection, the requests of the last minute, p50 and p99 of a request, the errors, the jobs that failed, the sessions, how long the app has run); six graphs that share a crosshair, over 15 minutes, an hour, a day or a week: requests, the time of a request, 5xx errors, refusals at the door by reason (another site, a limit, no session, a role), failed sign-ins, jobs ready, running and dead; the log as it is written, by level, with a pause; the first steps of a fresh app | the show `admin.series` (each second, from the metrics and the log of the process), `admin.logs`, `GET /admin/stats`, `GET /admin/app` |
+| Dashboard | a board that watches the platform live: a strip of its state (the connection, the requests of the last minute, p50 and p99 of a request, the errors, the jobs that failed, the sessions, the CPU and the memory of the process, the disk of `AdminDisk`'s folder when set,
+how long the app has run); six graphs that share a crosshair, over 15 minutes, an hour, a day or a week: requests, the time of a request, 5xx errors, refusals at the door by reason (another site, a limit, no session, a role), failed sign-ins, jobs ready, running and dead; the log as it is written, by level, with a pause; the first steps of a fresh app | the history `GET /admin/series` (columns, read once a range), the show `admin.series` (each second after it, from the metrics and the log of the process), `admin.logs`, `GET /admin/stats`, `GET /admin/app` |
 | Users | 50 a page, by the start of their e-mail or of a tenant, sorted by a click on a title | disable, enable, sign out everywhere, make or unmake a super-admin, each asked first (`POST /admin/users/:id/disable`...) |
 | A user | his account, his tenants with his roles in a field each; his ways of signing in and second factors (a password or not, TOTP and the recovery codes left, each passkey with when it was made and last used and whether its device verified him, the providers); his sessions | roles saved in place (`PUT /admin/tenants/:id/members/:user`); his TOTP and recovery codes, or his passkeys, taken away when he lost his device (`POST /admin/users/:id/factors/reset`); a session chosen in the table ended alone (`DELETE /admin/sessions/:id`); each asked first |
 | Tenants, a tenant | by the start of their name; its members and their roles | roles in place, a user added by his id with roles; someone invited by mail with roles (`POST /admin/tenants/:id/invites`) |
@@ -282,8 +283,9 @@ defn unpaid(p)
 end
 
 pages.Run(title = "Invoices — admin", words = words.Words,
-  kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number"), pages.Column("BillTo", title = "Bill to"), pages.Column("Status"),
-    pages.Column("Total", show = v -> "$(pages.Num(v)) €")], actions = [pages.Action("Mark paid", e.AdminPay)])],
+  kinds = [pages.Kind("invoice", title = "Invoices", columns = [pages.Column("Number", width = 80), pages.Column("Client"), pages.Column("Due", width = 110),
+    pages.Column("Status", width = 100), pages.Column("Total", show = v -> pages.Money(v, currency = "€"), width = 110)],
+    actions = [pages.Action("Mark paid", e.AdminPay)])],
   more = [pages.Page("Unpaid", "/unpaid", unpaid)])
 ```
 
@@ -292,9 +294,11 @@ The whole file is `examples/invoices/admin/page.ce` (with `byOffice` and `paying
 
 - `pages.Page(title, path, view)`: a page in the menu after Centauri's; `view(p)` gives its widgets, and calls the
   app's endpoints by `pages.Call(endpoint, args, p)`, or reads one of pages by `pages.Lister`.
-- `pages.Kind(name, title, columns, actions)`: how the data browser shows a kind; `pages.Column(field, title, show,
-  width)` a column (its first fields when none); `pages.Action(label, endpoint, args, confirm)` a button on the thing
-  chosen, `{id: its id}` by default, asked first unless `confirm = false`.
+- `pages.Kind(name, title, columns, actions, fields, create)`: how the data browser shows a kind; `pages.Column(field,
+  title, show, width)` a column (its first fields when none), shown as its type says without `show` (a date in the
+  reader's time, an amount, the title a link names); `fields` the fields the sheet shows (all but those the app keeps
+  for itself when none); `create = false` keeps New away; `pages.Action(label, endpoint, args, confirm)` a button on
+  the thing chosen and on the rows checked, `{id: its id}` by default, asked first unless `confirm = false`.
 - the tools of every page: `pages.Lister`, `ListRows`, `ListState`, `More`, `Again`, `Chosen` (the row a click chose,
   in the order the table shows), `Confirm` and `Question`, `Replied` (a reply shown, or its problem), `Local` (a time
   on the viewer's clock), `Cell`.
