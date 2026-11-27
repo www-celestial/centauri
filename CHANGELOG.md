@@ -14,6 +14,8 @@ measure without asking.
   (`APP_OTEL_SAMPLE`, `APP_OTEL_ALWAYS`, `APP_OTEL_SLOW`), a `traceparent` from outside restarted with a link
   (`APP_OTEL_TRUST`), `APP_OTEL_SIGNALS`, `APP_OTEL_SERVICE`, `APP_OTEL_QUEUE`, `APP_OTEL_EVERY`,
   `APP_OTEL_METRICS_EVERY`; the client's address and account only as `APP_TELEMETRY_IP` and `APP_TELEMETRY_USER` say.
+  The exports on one connection kept open to the collector, https with `APP_OTEL_CA` for an authority of its own.
+  With `APP_OTEL` off a request costs what it did (`bench/micro.ce`, no difference to measure).
   A request that no route took is named by its method alone, `HTTP` when OpenTelemetry doesn't know it: never a word
   a client made up.
 - The pages' telemetry (`APP_TELEMETRY_CLIENT`, on): `POST /telemetry` takes their batches, bounded (300 a minute an

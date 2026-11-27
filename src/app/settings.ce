@@ -67,6 +67,7 @@ Core = {
   OtelProtocol: check.OneOf(["protobuf", "json"], optional = true, default = "protobuf"),
   OtelCompression: check.OneOf(["none", "gzip"], optional = true, default = "none"),
   OtelHeaders: check.Secret(optional = true),
+  OtelCa: check.Text(1, 1000, optional = true),
   OtelSample: check.Float(0, 1, optional = true, default = 1),
   OtelAlways: check.Text(0, 100, optional = true, default = "errors,slow"),
   OtelSlow: check.Int(1, 3600000, optional = true, default = 1000),

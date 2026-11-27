@@ -121,6 +121,15 @@ borne qui double à partir d'une seconde, ou après le `Retry-After` qu'il deman
 et compté. Chacun attend déjà encodé, tel qu'il partira : une file pleine de 2 048 spans prend 1,2 Mo de mémoire en
 protobuf, 2,3 en JSON (à côté d'une file de 16, face à un collector qui ne répond rien).
 
+**Une seule connexion.** Les exports passent par une connexion gardée ouverte vers le collector, comme les SDK de Go
+et de Java gardent la leur (le `http.Kept` de Cesia), rouverte quand le collector l'a fermée. Face à une connexion par
+export, comme au début : un export de 2 Kio a pris 87 µs de CPU au lieu de 131 en http, et 142 au lieu de 1 399 en
+https, dont il ne paie plus le *handshake* TLS (la poignée de main qui ouvre une connexion chiffrée) ; 2 350 octets
+sur le réseau au lieu de 6 328 en https, les mêmes 2,3 Ko en http sans les poignées de main de TCP (21 tours de 500
+exports en alternance, le programme fixé sur un cœur physique, le collector et un proxy qui compte les octets sur un
+autre, p < 0,001). Un collector en https : `APP_OTEL_ENDPOINT=https://...`, son autorité dans `APP_OTEL_CA` quand le
+système ne la connaît pas.
+
 ## 3. Protobuf ou JSON
 
 Mesuré par `bench/otel.ce` : les mêmes requêtes à une app avec OpenTelemetry éteint, allumé sans aucune trace gardée,
@@ -148,11 +157,13 @@ collector, tout cela en Cesia ; une requête non gardée, de 7 à 8 µs (ses ids
 porte). Sur un vrai Cepheus à travers le réseau, dont une lecture prend de 100 µs à 1 ms, c'est quelques pour cent ; en
 mémoire, comme ici, cela double le prix des requêtes les moins chères : une app chargée baisse `APP_OTEL_SAMPLE` et
 garde celles qui échouent ou qui sont lentes avec `APP_OTEL_ALWAYS`. Avec OpenTelemetry éteint, une requête coûte ce
-qu'elle coûtait : `bench/micro.ce`, les binaires d'avant et de maintenant en alternance (21 tours), a donné 20,4 µs et
-22,4 µs pour la requête publique (p < 0,01), 36,4 et 37,2 pour une chose par son id (p de 0,07) : les deux tests
-d'`APP_OTEL` de la porte et une route de plus coûtent 2 µs à la requête la moins chère ; une route de std/http seul qui
-lit Cepheus a bougé d'autant (5,4 et 6,0 µs), alors que rien d'elle n'a changé, sauf la vérification d'un hook (un point
-d'accroche, où le tracing se branche) à chaque appel d'un moteur.
+qu'elle coûtait : `bench/micro.ce` face aux binaires et au code d'avant (Cesia, Centauri et Ceres du 2026-11-27), 42
+processus de chaque côté en alternance, le programme fixé sur un cœur physique, a donné 15,79 µs et 15,62 µs pour la
+requête publique (p de 0,26), 29,30 et 28,52 pour une chose par son id (p de 0,24), 5,05 et 5,19 µs pour une route de
+std/http seul qui lit Cepheus (p de 0,24) : aucune différence à mesurer. Une première version coûtait 1 µs à la requête
+la moins chère : son tracer et trois valeurs de plus faisaient 36 champs à l'enregistrement de l'app, et un
+enregistrement de plus de 32 champs n'est plus d'un seul bloc, chacune de ses lectures 30 ns plus lente. Ils vivent
+maintenant dans l'état du processus, et la porte n'ouvre un span qu'avec `APP_OTEL` allumé.
 
 Le démarrage, lui, le paie : `bench/serve.ce` jusqu'à sa première réponse, 21 démarrages alternés, a pris 72,1 ms
 [66,6 ; 230,4] avant et 78,2 ms [72,3 ; 277,9] maintenant (p de 0,02), 77,0 ms avec OpenTelemetry allumé ; et 39,0 Mio
@@ -223,6 +234,7 @@ erreurs des lignes de log, d'un service à elles, `<app>-browser`.
 | `APP_OTEL_PROTOCOL` | `protobuf` | ou `json` |
 | `APP_OTEL_COMPRESSION` | `none` | ou `gzip` (zlib : la permission `ffi=z`) |
 | `APP_OTEL_HEADERS` | aucun, un secret | les headers de chaque export, `name=value` séparés par des virgules, les valeurs encodées en pourcent (`%2C` pour une virgule), comme la clé d'un fournisseur (vendor) |
+| `APP_OTEL_CA` | aucun | l'autorité d'un collector en https que le système ne connaît pas, un fichier PEM |
 | `APP_OTEL_SAMPLE` | 1 | la part des nouvelles traces gardées, de 0 à 1 |
 | `APP_OTEL_ALWAYS`, `APP_OTEL_SLOW` | `errors,slow`, 1000 | garder le span d'une requête non gardée qui a échoué, ou qui a pris plus que ces millisecondes |
 | `APP_OTEL_TRUST` | `restart` | un `traceparent` venu du dehors commence une nouvelle trace, liée à lui ; `trust` continue avec lui |

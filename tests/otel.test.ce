@@ -19,6 +19,7 @@ use std/otel
 use std/result
 use std/sys
 use std/text
+use std/tls
 use std/value
 
 Note = app.Kind("note", {Text: cepheus.Text()})
@@ -45,6 +46,28 @@ Notes = app.Module("notes", kinds = [Note], jobs = [Told], serve = [app.Serve(Ge
   app.Serve(api.Get("/ask", query = check.Record({Port: check.Int()}), out = check.Record({Status: check.Int()}), role = api.Public), ask),
   app.Serve(Boom, r -> app.Fail(500, "The disk is full."))])
 App = app.Of([Notes, jobs.Module()], name = "notes", version = "2.1.0")
+
+dir = ".cesia/tls"
+
+defn certs()
+  (** An authority and a certificate of localhost it signed, made once by openssl (the same as tests/calls.test.ce). *)
+  if result.IsOk(sys.Read("$dir/server.pem")) and result.IsOk(sys.Read("$dir/ca.pem"))
+    return result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+  end
+  sys.Mkdir(dir)?
+  sys.Write("$dir/san.txt", "subjectAltName=DNS:localhost,IP:127.0.0.1\n")?
+  steps = [["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=centauri test authority", "-days", "3650", "-keyout", "$dir/ca.key", "-out", "$dir/ca.pem"],
+    ["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-subj", "/CN=localhost", "-keyout", "$dir/server.key", "-out", "$dir/server.csr"],
+    ["x509", "-req", "-in", "$dir/server.csr", "-CA", "$dir/ca.pem", "-CAkey", "$dir/ca.key", "-CAcreateserial", "-days", "3650", "-out", "$dir/server.pem", "-extfile", "$dir/san.txt"]]
+  for args in steps
+    p = sys.Start("openssl", args = args)?
+    _ = sys.ReadOutput(p)
+    if sys.WaitExit(p) != 0
+      return result.Err({Kind: "test", Message: "openssl $(args[1]) failed"})
+    end
+  end
+  result.Ok({Ca: "$dir/ca.pem", Cert: "$dir/server.pem", Key: "$dir/server.key"})
+end
 
 defn collector()
   (** A collector of OTLP/JSON on a free port: {Url, Box}, each body it takes on Box with its path. *)
@@ -234,4 +257,23 @@ defn isMadeUpMethodNamedHttp()
   _ = y.T.Raw("BREW", "/coffee")
   s = server(sent(y))
   attrOf(s, "http.request.method") == "_OTHER" and attrOf(s, "http.request.method_original") == "BREW"
+end
+
+defn isHttpsCollectorOnOneConnection()
+  (** An https collector, its authority APP_OTEL_CA: the exports go over TLS (on one connection kept open, which
+      std/otel's own tests count). *)
+  c = certs()!
+  l = net.Listen(0)!
+  box = fiber.Channel()
+  took = r -> keep(r, box)
+  fiber.Spawn(() -> http.Serve(http.App() then http.Post("/v1/traces", took) then http.Post("/v1/logs", took) then http.Post("/v1/metrics", took), listener = l,
+    wrap = tls.Server(c.Cert, c.Key, tls.Open()!)!, timeout = 5))
+  t = apptest.Start(App, settings = {Otel: "on", OtelEndpoint: "https://localhost:$(net.Port(l))", OtelCa: c.Ca, OtelProtocol: "json", OtelEvery: 1})!
+  for k in 1..3
+    _ = t.Raw("GET", "/notes/1")
+    otel.Flush(t.Env.State.Otel)
+  end
+  spans = sent({T: t, Box: box}).Spans
+  counts = otel.Counts(t.Env.State.Otel)
+  value.Len(spans) >= 3 and counts.Failed == 0 and counts.Exports >= 3
 end

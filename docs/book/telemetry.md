@@ -107,6 +107,14 @@ under a bound that doubles from a second, or the `Retry-After` it asks, five tri
 Each waits encoded as it will leave: a queue full of 2,048 spans takes 1.2 MB of memory with protobuf, 2.3 with JSON
 (beside a queue of 16, with a collector that answers nothing).
 
+**One connection.** The exports go on one connection kept open to the collector, as the SDKs of Go and Java keep
+theirs (Cesia's `http.Kept`), opened again when the collector closed it. Against a connection each, as at first: an
+export of 2 KiB took 87 µs of CPU instead of 131 over http, and 142 instead of 1,399 over https, whose TLS handshake
+it no longer pays; 2,350 bytes on the wire instead of 6,328 over https, the same 2.3 KB over http without the
+handshakes of TCP (21 rounds of 500 exports alternated, the program pinned to one physical core, the collector and a
+proxy that counts the bytes to another, p < 0.001). An https collector: `APP_OTEL_ENDPOINT=https://...`, its authority
+in `APP_OTEL_CA` when the system doesn't know it.
+
 ## 3. Protobuf or JSON
 
 Measured by `bench/otel.ce`: the same requests to an app with OpenTelemetry off, on with no trace sampled, and on with
@@ -131,11 +139,13 @@ So a trace sampled costs a request of Centauri 35 to 60 µs, about 20 to 25 µs 
 all of it in Cesia; a request not sampled, 7 to 8 µs (its ids, its context, its door's checks). On a real Cepheus over
 the network, whose read takes 100 µs to 1 ms, this is a few percent; in memory, as here, it doubles the cheapest
 requests: a busy app lowers `APP_OTEL_SAMPLE` and keeps the failed and slow ones with `APP_OTEL_ALWAYS`. With
-OpenTelemetry off, a request costs what it did: `bench/micro.ce`, the binaries of before and of now alternated (21
-runs), gave 20.4 µs and 22.4 µs for the public request (p < 0.01), 36.4 and 37.2 for a thing by its id (p 0.07): the
-door's two tests of `APP_OTEL` and a route more cost the cheapest request 2 µs; a route of std/http alone that reads
-Cepheus moved by as much (5.4 and 6.0 µs), with nothing of it changed but the check of a hook at each call of an
-engine.
+OpenTelemetry off, a request costs what it did: `bench/micro.ce` against the binaries and the code of before
+(Cesia, Centauri and Ceres of 2026-11-27), 42 processes a side alternated, the program pinned to one physical core,
+gave 15.79 µs and 15.62 µs for the public request (p 0.26), 29.30 and 28.52 for a thing by its id (p 0.24), 5.05 and
+5.19 µs for a route of std/http alone that reads Cepheus (p 0.24): no difference to measure. A first version cost the
+cheapest request 1 µs: its tracer and three values more made the app's record 36 fields, and a record of more than 32
+is no longer one block, each of its reads 30 ns slower. They live in the state of the process now, and the door opens
+a span only with `APP_OTEL` on.
 
 The start pays for it, though: `bench/serve.ce` to its first answer, 21 starts alternated, took 72.1 ms [66.6, 230.4]
 before and 78.2 ms [72.3, 277.9] now (p 0.02), 77.0 ms with OpenTelemetry on; and 39.0 MiB of memory then, against
@@ -200,6 +210,7 @@ of a service of their own, `<app>-browser`.
 | `APP_OTEL_PROTOCOL` | `protobuf` | or `json` |
 | `APP_OTEL_COMPRESSION` | `none` | or `gzip` (zlib: the permission `ffi=z`) |
 | `APP_OTEL_HEADERS` | none, a secret | headers of each export, `name=value` with commas, values percent-encoded, as a vendor's key |
+| `APP_OTEL_CA` | none | the authority of an https collector that the system doesn't know, a PEM file |
 | `APP_OTEL_SAMPLE` | 1 | the share of new traces kept, 0 to 1 |
 | `APP_OTEL_ALWAYS`, `APP_OTEL_SLOW` | `errors,slow`, 1000 | keep the span of a request not sampled that failed, or that took more than these milliseconds |
 | `APP_OTEL_TRUST` | `restart` | a `traceparent` from outside starts a new trace, linked to it; `trust` goes on with it |
