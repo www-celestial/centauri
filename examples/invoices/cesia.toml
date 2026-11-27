@@ -40,6 +40,12 @@ timeout = "120"
 file = "tools/admin-serve.ce"
 allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", "read", "read=/usr/share/zoneinfo"]
 
+# The invoices and their admin pages as admin-serve gives them, with OpenTelemetry on, sending to a collector of OTLP at
+# APP_OTEL_ENDPOINT (http://127.0.0.1:4318, Jaeger's): the tutorial of the chapter Telemetry. Build the pages first.
+[tasks.trace-serve]
+file = "tools/trace-serve.ce"
+allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env", "net", "read", "read=/usr/share/zoneinfo"]
+
 # The test of the admin pages in Chrome without a window (CHROME, a Chrome or a chrome-headless-shell), driven by its
 # DevTools protocol: pictures of each page in OUT (shots/). cesia build --target wasm admin/page.ce first.
 [tasks.admin-shot]

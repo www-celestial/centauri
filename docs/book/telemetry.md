@@ -51,7 +51,7 @@ Then the invoices, with a month of data, their admin pages and OpenTelemetry on:
 ```sh
 cd examples/invoices
 cesia build --target wasm admin/page.ce
-cesia run --allow native=cepheus,ffi=sodium,ffi=ssl,ffi=crypto,env,net,read tools/trace-serve.ce
+cesia do trace-serve
 # http://127.0.0.1:8090/admin, super@app.test, "correct horse super"
 ```
 
