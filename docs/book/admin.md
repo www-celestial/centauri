@@ -97,9 +97,17 @@ urlpatterns = [path("admin/", admin.site.urls)]
 
 ## 2. The pages
 
+On the web the admin is laid out as the pages of a web site (Ceres's `web.Shell`, the chapter Pages of a web app of
+its book): the app and its pages in a side bar at the left, by what they are about (Data, People, Activity, Setup),
+with their counts and the jobs that failed; where one is at the top, with the palette of Ctrl+K that finds a page or a
+kind by its name, the button of the density of the rows and the one of the theme; the page in the middle, which scrolls;
+a thing opened in a sheet at the right, beside the page on a wide window, over it on a narrower one, the whole window on
+a phone, where the side bar is a drawer. Who is signed in and Sign out (Ctrl+Q) stand at the foot of the side bar. The
+same pages laid out as a desktop tool, docked panels with tabs, are one choice away in the settings.
+
 | page | what it shows | what it does, through which endpoint |
 |---|---|---|
-| Dashboard | the counts (users, tenants, sessions, requests, refused, failed sign-ins of the last minute); a point each second of the last five minutes: requests and 5xx, p50 and p99 of a request, refusals at the door by reason (another site, a limit, no session, a role) and failed sign-ins, jobs ready, running and dead; the last events | the show `admin.series` (each second, from the metrics and the log of the process), `admin.events`, `GET /admin/stats` |
+| Dashboard | a board that watches the platform live: a strip of its state (the connection, the requests of the last minute, p50 and p99 of a request, the errors, the jobs that failed, the sessions, how long the app has run); six graphs that share a crosshair, over 15 minutes, an hour, a day or a week: requests, the time of a request, 5xx errors, refusals at the door by reason (another site, a limit, no session, a role), failed sign-ins, jobs ready, running and dead; the log as it is written, by level, with a pause; the first steps of a fresh app | the show `admin.series` (each second, from the metrics and the log of the process), `admin.logs`, `GET /admin/stats`, `GET /admin/app` |
 | Users | 50 a page, by the start of their e-mail or of a tenant, sorted by a click on a title | disable, enable, sign out everywhere, make or unmake a super-admin, each asked first (`POST /admin/users/:id/disable`...) |
 | A user | his account, his tenants with his roles in a field each; his ways of signing in and second factors (a password or not, TOTP and the recovery codes left, each passkey with when it was made and last used and whether its device verified him, the providers); his sessions | roles saved in place (`PUT /admin/tenants/:id/members/:user`); his TOTP and recovery codes, or his passkeys, taken away when he lost his device (`POST /admin/users/:id/factors/reset`); a session chosen in the table ended alone (`DELETE /admin/sessions/:id`); each asked first |
 | Tenants, a tenant | by the start of their name; its members and their roles | roles in place, a user added by his id with roles; someone invited by mail with roles (`POST /admin/tenants/:id/invites`) |
@@ -121,10 +129,12 @@ seconds to wait on a 429. Every list is a table of Ceres: only the rows in sight
 
 Each task, as the page shows it:
 
-**See the platform.** The Dashboard: the counts at the top, then the requests and their time, a point each second,
-live.
+**See the platform.** The Dashboard: the strip of its state at the top, then six graphs of this process, a point a
+second over the last 15 minutes (a minute a point over longer ranges, as the server keeps them); the mouse over one
+shows the same moment in all of them, each with its number then. The log runs under them, the newest line first: All,
+Warnings or Errors, and Pause keeps the lines in sight while one reads them.
 
-![The dashboard: six boxes of counts (users, tenants, sessions, requests, refused, failed sign-ins a minute), the line of the last second, and the graphs "Requests a second" and "Time of a request (ms)".](images/admin-dashboard.png)
+![The admin, dark: the side bar of the pages (Dashboard chosen; the kinds under Data; Users 7 and Tenants 5 under People; Jobs with 1 failed in red under Activity; the setup; the app's own page Unpaid), the top bar with the path and the buttons of search, density and theme, and the dashboard: the strip Live, requests/min, p50 and p99, errors, 1 job failed, sessions, up; six graphs; the live log.](images/admin-dashboard.png)
 
 **Disable a user.** Users, a click on his row, then Disable: the page asks first, Yes does it, and the table is read
 again. Enable, Sign out everywhere and Make a super-admin work the same way.
@@ -161,12 +171,11 @@ variable, its value (a secret is `(secret)`) and where it came from.
 
 ![The files: the kind of the scans of the invoices and its things, their names, types and sizes.](images/admin-files.png)
 
-![The settings: their names, variables, values (secrets masked) and where each came from: env, code or default.](images/admin-settings.png)
+**Change a thing in place.** The kind in the side bar, a click on the thing: it opens in the sheet at the right, at its
+own address (`/admin/#/data/invoice/65616`), each field with its name and type over its input; change one, then Save
+(Ctrl+S). A value of the wrong type is refused with its field, and the change is in the Audit.
 
-**Change a thing in place.** Data, the kind, a click on the thing: each field in its input; change one, then Save. A
-value of the wrong type is refused with its field, and the change is in the Audit.
-
-![The data browser on the invoices: the table of their number, client, status and total, the first chosen, and under it the editor of its fields (Tenant, Number, Client, BillTo changed, Search, Date, Due, Status, Total), each with its type, and Save.](images/admin-data-edit.png)
+![The data browser on the invoices: the table of their number, client, state as a pill and total, the first opened, and at the right the sheet of its fields (Tenant, Number, Client, BillTo changed, Search, Date, Due, Status, Total), each with its type, the app's action Mark paid, Cancel and Save.](images/admin-data-edit.png)
 
 ![The audit trail: each change of a super-admin, when, which change, by whom, from which address and route, and what.](images/admin-audit.png)
 
@@ -186,13 +195,21 @@ password, a webhook's secret) is never sent to a page, shown `(secret)`, and nev
 `data-edited`, that names the fields and never their values.
 
 **Each page at its own address.** The pages are those of a web site: each has its address, the admin's own with the
-page after a `#` (`/admin/#/users`, `/admin/#/data/invoice`). Back and Forward of the browser go through the pages
-visited, an address kept or sent opens its page (after the sign-in, when the session is gone), and a row of the
-outliner pressed with Ctrl or the middle button opens its page in a new tab. A table found again has its order, its
-scroll and its row chosen of before. A thing changed in the details and not saved holds the way to another page: the
-band at the bottom of the window asks first, save and leave (Ctrl+S), leave without saving (Ctrl+D) or stay (Esc), and
-closing the tab asks too. While no thing is chosen, the details show its kind: its name, the module that declares it,
-and its fields with their types.
+page after a `#` (`/admin/#/users`, `/admin/#/data/invoice`), and so has a thing opened (`/admin/#/data/invoice/65616`).
+Back and Forward of the browser go through the pages visited, an address kept or sent opens its page (after the
+sign-in, when the session is gone), and a row of the side bar pressed with Ctrl or the middle button opens its page in
+a new tab. A list found again has its order and its scroll of before, a thing opened and closed too. A thing changed in
+the sheet and not saved holds the way to another page: the sheet asks first, under its title, Keep editing (Esc),
+Discard changes (Ctrl+D) or Save and leave (Ctrl+S), and closing the tab asks too.
+
+**The look, on this machine.** Settings, Look: the theme (System follows the device, Light, Dark), the density of the
+rows (24, 30 or 44 pixels; the rows button of the top bar goes round them too), the layout on the web (Pages, or Dock:
+panels like a desktop app, the outliner at the left, the details at the right, the events, the log and the jobs at the
+bottom) and the tabs (On keeps the pages opened as tabs under the top bar, as in an editor; Off leaves that to the
+browser's own tabs). Each choice applies at once and stays on this machine; the setting `AdminTheme` of the server
+gives the theme of a machine that chose none.
+
+![The settings: the card Look with Theme (System, Light, Dark), Density (Dense, Compact, Comfortable), Layout on the web (Pages, Dock) and Tabs on the web (Off, On), then the card of the app's settings.](images/admin-settings.png)
 
 ## 3. Your own admin page: the invoices of every office
 
@@ -335,7 +352,7 @@ kind, a column, an action) must be in the catalogue, not empty, with the names o
 given straight to a widget of Ceres (`web.Text("…")`, `label = "…"`) shows in English in every language, and is named
 with its line. Centauri's own pages pass the same check (`tests/translated.test.ce`).
 
-![The dashboard in French: "Tableau de bord", the boxes Utilisateurs, Tenants, Sessions, Requêtes, Refusées and "Connexions échouées/min", the line "Dernière seconde : …" and the graphs "Requêtes par seconde" and "Durée d'une requête (ms)".](images/admin-dashboard-fr.png)
+![The dashboard in French: the side bar Données, Personnes, Activité, Réglages; « Tableau de bord » and « La santé de la plateforme, en direct »; the strip « requêtes/min », « tâches en échec »; the graphs « Requêtes », « Temps de réponse », « Erreurs »; « Journal en direct ».](images/admin-dashboard-fr.png)
 
 ```python
 # Django: {% translate %} in the templates and gettext in the code, makemessages then compilemessages,

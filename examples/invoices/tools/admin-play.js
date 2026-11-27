@@ -108,11 +108,12 @@ window.adminPlay = (() => {
   // the box of a part of the page for a picture: from the node top to the node bottom (or height pixels), right of
   // the menu unless wide, as wide as what shows there
   const box = async spec => {
+    if (spec.window) return { x: 0, y: 0, width: innerWidth, height: innerHeight }
     const t = await tree(), pick = s => s && find(t, named(s[0], s[1]))
     const top = pick(spec.top), bottom = pick(spec.bottom)
     if (!top) return null
     const y0 = Math.max(0, top.Y - 10), y1 = Math.min(innerHeight, bottom ? bottom.Y + bottom.H + 10 : y0 + (spec.height || 300))
-    const x0 = spec.wide ? 0 : 150
+    const side = find(t, n => n.Role === 'navigation'), x0 = spec.wide ? 0 : side ? side.X + side.W + 8 : 150
     const inside = all(t, n => n.W > 0 && n.Role !== 'page' && n.Y >= y0 && n.Y + n.H <= y1 + 1 && n.X >= x0 - 1)
     const x1 = Math.min(innerWidth, Math.max(...inside.map(n => n.X + n.W)) + 12)
     return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }

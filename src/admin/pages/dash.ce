@@ -1,9 +1,10 @@
 (* The dashboard, a board that watches the platform live: a strip of its state (the connection, requests, the times of
    the requests, errors, jobs that failed, sessions, how long it has run), six graphs of this process that share a
-   crosshair (requests, their times, errors, refusals at the door, failed sign-ins, jobs) over a range of 15 minutes,
-   an hour, a day or a week, and the log as it is written, filtered by level, paused to read it. A fresh app shows its
-   first steps above. Every number comes from the server: the points of admin.series (a second each, and a minute
-   each when the server keeps its history, Step 60), the counts of AdminStats, the lines of admin.logs. *)
+   crosshair (requests, their times, errors, sign-ins, live pages, refusals at the door) over a range of 15 minutes, an
+   hour, a day or a week, and the log as it is written, filtered by level, paused to read it. A fresh app shows its
+   first steps above. Every number comes from the server: the points of admin.series (a second each, Step 1; a minute
+   each, Step 60; ten minutes each, Step 600, as the server keeps them), the counts of AdminStats, the lines of
+   admin.logs. *)
 use deps/www-celestial/ceres/src/web
 use src/api
 use std/dict
@@ -43,17 +44,23 @@ end
 stepOf(x) = dict.GetOr("Step", 1, x)   (* A point's step: 1 for a second's, 60 for a minute's. *)
 
 defn inRange(points, key)
-  (** The points of a range, by their time: the seconds for 15 minutes, the minutes for longer ranges when the
-      server keeps them (else the seconds it has), in at most 400 points, each a sum (or the last) of those it holds. *)
+  (** The points of a range, by their time: the seconds for 15 minutes, the minutes for an hour, the ten minutes for a
+      day and a week, as the server keeps them (else the finest it has), in at most 400 points, each a sum (or the
+      last) of those it holds. *)
   r = list.FindFirst(x -> x[1] == key, ranges)
   all = sorted(points)
   if value.IsEmpty(all)
     return []
   end
   now = all[value.Len(all)].At
-  minutes = [x for x in all if stepOf(x) == 60 and x.At > now - r[3]]
-  seconds = [x for x in all if stepOf(x) == 1 and x.At > now - r[3]]
-  got = if key != "15m" and value.Len(minutes) >= 2 minutes else seconds end
+  of = step -> [x for x in all if stepOf(x) == step and x.At > now - r[3]]
+  want = if key == "15m" [1] else if key == "1h" [60, 1] else [600, 60, 1] end
+  got = []
+  for step in want
+    if value.Len(got) < 2
+      got = of(step)
+    end
+  end
   merged(got, list.Max(1, math.Div(value.Len(got) + 399, 400)))
 end
 
@@ -70,7 +77,8 @@ defn merged(points, k)
     last = part[value.Len(part)]
     sum = f -> list.Sum([dict.GetOr(f, 0, x) for x in part])
     out = list.Append({At: last.At, Step: stepOf(last) * k, Requests: sum("Requests"), Errors: sum("Errors"), Origin: sum("Origin"), Limit: sum("Limit"), Signin: sum("Signin"),
-      Role: sum("Role"), Failures: last.Failures, P50: list.Max([x.P50 for x in part]), P99: list.Max([x.P99 for x in part]), Ready: last.Ready, Running: last.Running, Dead: last.Dead}, out)
+      Role: sum("Role"), SignedIn: sum("SignedIn"), FailedSignIns: sum("FailedSignIns"), Failures: last.Failures, P50: list.Max([x.P50 for x in part]),
+      P99: list.Max([x.P99 for x in part]), Ready: last.Ready, Running: last.Running, Dead: last.Dead, Screens: dict.GetOr("Screens", 0, last)}, out)
     i += k
   end
   out
@@ -120,7 +128,7 @@ defn board(ps, cross)
     return web.Text(Say("Waiting for the first seconds…"), color = gray)
   end
   step = stepOf(ps[1])
-  per = if step == 1 "/s" else if step == 60 "/min" else "/$(Span(step))" end
+  per = if step == 1 "/s" else if step == 60 "/min" else if step == 600 Say("/10 min") else "/$(Span(step))" end
   col = f -> [dict.GetOr(f, 0, x) for x in ps]
   at = i -> clock(ps[i].At, step)
   pick = (xs, i) -> if value.IsMissing(i) xs[value.Len(xs)] else xs[i] end
@@ -129,20 +137,19 @@ defn board(ps, cross)
   p50 = [tenth(v) for v in col("P50")]
   p99 = [tenth(v) for v in col("P99")]
   refused = [x.Origin + x.Limit + x.Signin + x.Role for x in ps]
-  fails = col("Failures")
-  ready = col("Ready")
-  running = col("Running")
-  dead = col("Dead")
+  ok = col("SignedIn")
+  failed = col("FailedSignIns")
+  screens = col("Screens")
   m = (title, figure, series, unit, note, style) -> web.Grow(web.Metric(title, figure, () -> series, unit = unit, note = note, at = at, cross = cross, style = style))
   web.Stack([
     web.Row([m(Say("Requests"), i -> Num(pick(req, i)), [{Values: req, Tone: "S1"}], per, Say("peak {N}", {N: Num(list.Max(req))}), "area"),
       m(Say("Response time"), i -> "$(Num(pick(p50, i))) / $(Num(pick(p99, i)))", [{Values: p50, Tone: "S1"}, {Values: p99, Tone: "S4"}], "ms", "p50 / p99", "line"),
       m(Say("Errors"), i -> Num(pick(err, i)), [{Values: err, Tone: "Danger"}], per, Say("{N} in this range", {N: Num(list.Sum(err))}), "bars")], gap = 8, align = "start"),
-    web.Row([m(Say("Refused at the door"), i -> Num(pick(refused, i)), [{Values: col("Origin"), Tone: "S2"}, {Values: col("Limit"), Tone: "S4"}, {Values: col("Signin"), Tone: "S5"},
-        {Values: col("Role"), Tone: "S3"}], per, Say("site, limit, sign-in, role"), "bars"),
-      m(Say("Failed sign-ins"), i -> Num(pick(fails, i)), [{Values: fails, Tone: "Warn"}], "/min", Say("{N} at most", {N: Num(list.Max(fails))}), "line"),
-      m(Say("Jobs"), i -> "$(Num(pick(ready, i))) · $(Num(pick(running, i))) · $(Num(pick(dead, i)))", [{Values: ready, Tone: "S1"}, {Values: running, Tone: "S3"}, {Values: dead, Tone: "Danger"}],
-        "", Say("ready · running · dead"), "line")], gap = 8, align = "start"),
+    web.Row([m(Say("Sign-ins"), i -> Say("{Ok} ok · {Failed} failed", {Ok: Num(pick(ok, i)), Failed: Num(pick(failed, i))}), [{Values: ok, Tone: "Ok"}, {Values: failed, Tone: "Danger"}],
+        per, Say("{N} failed in this range", {N: Num(list.Sum(failed))}), "bars"),
+      m(Say("Live pages"), i -> Num(pick(screens, i)), [{Values: screens, Tone: "S1"}], Say("open now"), Say("kept up to date"), "area"),
+      m(Say("Refused at the door"), i -> Num(pick(refused, i)), [{Values: col("Origin"), Tone: "S2"}, {Values: col("Limit"), Tone: "S4"}, {Values: col("Signin"), Tone: "S5"},
+        {Values: col("Role"), Tone: "S3"}], per, Say("site, limit, sign-in, role"), "bars")], gap = 8, align = "start"),
   ], gap = 8)
 end
 

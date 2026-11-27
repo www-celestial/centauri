@@ -59,7 +59,7 @@ end
 docSteps = [["lang", "en", missing, missing],
   ["signInForm", missing, "signin", {top: ["heading", "Invoices — admin"], bottom: ["button", "Sign in"], wide: true}],
   ["submit", missing, missing, missing], ["signedIn", missing, missing, missing],
-  ["visit", "Dashboard", "dashboard", {top: ["heading", "Dashboard"], bottom: ["img", "Requests a second"]}],
+  ["visit", "Dashboard", "dashboard", {window: true}],
   ["visit", "Users", missing, missing], ["askDisable", missing, "users-disable", {top: ["heading", "Users"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
   ["openUser", missing, "user-factors", {top: ["heading", "User *"], bottom: ["button", "No"]}], ["yes", missing, missing, missing],
   ["openTenant", missing, "tenant-invite", {top: ["heading", "Tenant *"], bottom: ["text", "Done."]}],

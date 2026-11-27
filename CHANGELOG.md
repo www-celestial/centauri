@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### The admin as the pages of a web app
+
+- On the web the admin is laid out as the pages of a web site (Ceres's `web.Shell`), by default: the app and its pages
+  in a side bar by what they are about (Data, People, Activity, Setup) with their counts and the jobs that failed,
+  where one is at the top, the palette of Ctrl+K, the buttons of the density and of the theme, who is signed in and
+  Sign out at the foot; a phone gets a drawer, rows as cards and the sheet over the whole window.
+- A thing of the data opens in a sheet beside its list, at its own address (`/admin/#/data/invoice/65616`), each field
+  with its name and type over its input; a change not saved is asked about in the sheet, inline.
+- The dashboard watches the platform: a strip of its state, six graphs of its real numbers that share a crosshair, over
+  15 minutes, an hour, a day or a week, the log live by level with a pause, the first steps of a fresh app.
+- Settings, Look: the theme, the density of the rows, the layout on the web (pages, or the dock of a desktop tool) and
+  tabs for the pages opened, each kept on the machine; `AdminTheme` gives the theme of a machine that chose none.
+
 ### The admin as a desktop tool, its pages at their own addresses
 
 - The admin pages laid out as a desktop tool, in Ceres's `web.Dock`: the pages in an outliner at the left (Platform,
